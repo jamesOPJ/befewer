@@ -3,16 +3,24 @@
   import Icon from '../lib/Icon.svelte'
   import Equity from '../lib/Equity.svelte'
   import { label } from '../questions'
-  import { backtest, PRESETS, type Rule, type Cond, type Pick, type Unit } from '../rules'
-  import { game, commitRound, lookup, saveRules, setAutopilot } from '../game.svelte'
+  import { backtest, describe, PRESETS, type Rule, type Cond, type Pick, type Unit } from '../rules'
+  import { game, commitRound, lookup, saveRules, setAutopilot, draftDirty, putDraftLive, discardDraft, toast } from '../game.svelte'
 
   const WINDOW = 60
-  const rules = $derived(game.ap.rules)
+  const rules = $derived(game.ap.draft)
   const bt = $derived.by(() => {
     game.history
     const cur = commitRound()
-    return backtest($state.snapshot(game.ap.rules) as Rule[], Math.max(0, cur - WINDOW), cur - 1, lookup, 1000)
+    return backtest($state.snapshot(game.ap.draft) as Rule[], Math.max(0, cur - WINDOW), cur - 1, lookup, 1000)
   })
+  const btLive = $derived.by(() => {
+    game.history
+    const cur = commitRound()
+    return backtest($state.snapshot(game.ap.live) as Rule[], Math.max(0, cur - WINDOW), cur - 1, lookup, 1000)
+  })
+  const dirty = $derived(JSON.stringify(game.ap.draft) !== JSON.stringify(game.ap.live))
+  let confirmLive = $state(false)
+  function goLive() { putDraftLive(); confirmLive = false; toast('ok', game.ap.on ? 'New rules are running from the next round.' : 'New rules saved as the running rules.') }
   const presetBt = $derived.by(() => {
     game.history
     const cur = commitRound()
@@ -32,32 +40,32 @@
   const commit = () => saveRules()
 
   function setKind(i: number, v: Cond['kind']) {
-    const r = game.ap.rules[i]
+    const r = game.ap.draft[i]
     const w = 'winner' in r.cond ? r.cond.winner : 'any'
     r.cond = v === 'always' ? { kind: 'always' } : v === 'streak' ? { kind: 'streak', winner: w, n: 3 } : ({ kind: v, winner: w } as Cond)
     if (v === 'always' && (r.pick === 'same' || r.pick === 'other')) r.pick = 'random'
     commit()
   }
   function add() {
-    const at = game.ap.rules.length && game.ap.rules[game.ap.rules.length - 1].cond.kind === 'always' ? game.ap.rules.length - 1 : game.ap.rules.length
-    game.ap.rules.splice(at, 0, { cond: { kind: 'last', winner: 'any' }, pick: 'other', unit: 'fixed', amount: 10 })
+    const at = game.ap.draft.length && game.ap.draft[game.ap.draft.length - 1].cond.kind === 'always' ? game.ap.draft.length - 1 : game.ap.draft.length
+    game.ap.draft.splice(at, 0, { cond: { kind: 'last', winner: 'any' }, pick: 'other', unit: 'fixed', amount: 10 })
     commit()
   }
-  function del(i: number) { game.ap.rules.splice(i, 1); commit() }
+  function del(i: number) { game.ap.draft.splice(i, 1); commit() }
   function moveRule(i: number, d: number) {
     const j = i + d
-    if (j < 0 || j >= game.ap.rules.length) return
-    const t = game.ap.rules[i]; game.ap.rules[i] = game.ap.rules[j]; game.ap.rules[j] = t
+    if (j < 0 || j >= game.ap.draft.length) return
+    const t = game.ap.draft[i]; game.ap.draft[i] = game.ap.draft[j]; game.ap.draft[j] = t
     commit()
   }
-  function use(i: number) { game.ap.rules = structuredClone(PRESETS[i].rules); commit() }
+  function use(i: number) { game.ap.draft = structuredClone(PRESETS[i].rules); commit(); toast('info', `${PRESETS[i].name} loaded into the draft. Put it live when you're ready.`) }
   const fmtN = (v: number) => v.toLocaleString('en-US')
   const FIXED = [1, 2, 5, 10, 20, 50, 100]
   const PCTS = [1, 2, 5, 10, 25]
   function setStake(i: number, v: string) {
     const [u, n] = v.split(':')
-    game.ap.rules[i].unit = (u === 'p' ? 'pct' : 'fixed') as Unit
-    game.ap.rules[i].amount = Number(n)
+    game.ap.draft[i].unit = (u === 'p' ? 'pct' : 'fixed') as Unit
+    game.ap.draft[i].amount = Number(n)
     commit()
   }
   const net = (b: { end: number; start: number }) => b.end - b.start
@@ -74,20 +82,38 @@
 </header>
 
 <section class="card run" class:on={game.ap.on}>
-  <div class="run-l">
-    <div class="status"><span class="led"></span>{game.ap.on ? 'Running in this tab' : 'Off'}</div>
-    <p class="small muted">{game.ap.on ? 'Each round, once the previous round has finished, your rules decide and place a sealed bet. Keep this page open.' : 'Turn it on to let your rules place a bet every round while this page is open.'}</p>
+  <div class="run-top">
+    <div class="run-l">
+      <div class="status"><span class="led"></span>{game.ap.on ? 'Running in this tab' : 'Off'}</div>
+      <p class="small muted">{game.ap.on ? 'Each round, once the previous round has finished, the running rules decide and place a sealed bet. Keep this page open.' : 'Turn it on to let the running rules place a bet every round while this page is open.'}</p>
+    </div>
+    <label class="switch">
+      <input type="checkbox" checked={game.ap.on} onchange={e => setAutopilot((e.currentTarget as HTMLInputElement).checked)} aria-label="Run autopilot" />
+      <span class="track"><span class="knob"></span></span>
+    </label>
   </div>
-  <label class="switch">
-    <input type="checkbox" checked={game.ap.on} onchange={e => setAutopilot((e.currentTarget as HTMLInputElement).checked)} aria-label="Run autopilot" />
-    <span class="track"><span class="knob"></span></span>
-  </label>
+  <div class="live-rules">
+    <div class="eyebrow">Running rules</div>
+    <ol>{#each game.ap.live as lr}<li>{describe(lr)}</li>{/each}</ol>
+  </div>
 </section>
 
 <div class="cols">
   <div class="col">
     <section class="card block">
-      <div class="bh"><h2>Your rules</h2><span class="faint small">checked top to bottom · first match decides</span></div>
+      <div class="bh"><h2>Draft rules</h2><span class="faint small">checked top to bottom · first match decides</span></div>
+      <div class="draftbar" class:dirty>
+        {#if dirty}
+          <span><b>Draft.</b> Changes here don't affect the running rules{game.ap.on ? ', which keep betting' : ''}.</span>
+          {#if confirmLive}
+            <span class="acts"><button class="btn small" onclick={() => (confirmLive = false)}>Cancel</button><button class="btn small primary" onclick={goLive}>Yes, run these</button></span>
+          {:else}
+            <span class="acts"><button class="btn small ghost" onclick={() => { discardDraft(); toast('info', 'Draft reset to the running rules.') }}>Discard</button><button class="btn small primary" onclick={() => (confirmLive = true)}>Put these rules live</button></span>
+          {/if}
+        {:else}
+          <span class="faint">Same as the running rules. Edit freely: nothing changes until you put a draft live.</span>
+        {/if}
+      </div>
       <ol class="rules">
         {#each rules as r, i (i)}
           <li class="rule" transition:slide={{ duration: 160 }}>
@@ -135,7 +161,7 @@
     </section>
 
     <section class="card block">
-      <div class="bh"><h2>Start from a strategy</h2></div>
+      <div class="bh"><h2>Start from a strategy</h2><span class="faint small">loads into the draft</span></div>
       <div class="presets">
         {#each PRESETS as p, i}
           {@const b = presetBt[i]}
@@ -152,13 +178,16 @@
 
   <div class="col">
     <section class="card block">
-      <div class="bh"><h2>Replay on the last {bt.rounds} rounds</h2></div>
+      <div class="bh"><h2>Replay on the last {bt.rounds} rounds</h2><span class="faint small">{dirty ? 'draft' : 'running rules'}</span></div>
       {#if bt.rounds}
         <div class="kpis">
           <div><div class="eyebrow">Net</div><div class="kv num {tone(net(bt))}">{signed(net(bt))}</div><div class="faint small">1,000 → {fmtN(bt.end)}</div></div>
           <div><div class="eyebrow">Staked</div><div class="kv num">{fmtN(bt.staked)}</div><div class="faint small">{bt.bets} bets · {bt.skips} skipped</div></div>
           <div><div class="eyebrow">Won / lost</div><div class="kv num"><span class="good">{bt.wins}</span> / <span class="burn">{bt.losses}</span></div><div class="faint small">{bt.voids} void</div></div>
         </div>
+        {#if dirty}
+          <div class="vs-live small">Draft <b class={tone(net(bt))}>{signed(net(bt))}</b> <span class="faint">vs</span> running rules <b class={tone(net(btLive))}>{signed(net(btLive))}</b> <span class="faint">on the same rounds</span></div>
+        {/if}
         <Equity curve={bt.curve} />
         <p class="faint small">Replays your rules round by round using only what was known before each round. Assumes your own bet would not have changed which side was smaller.</p>
         <details class="tbl">
@@ -197,7 +226,8 @@
   .ph h1 { font-size: 30px; font-weight: 800 }
   .ph p { margin: 4px 0 0; max-width: 640px }
   .small { font-size: 13px }
-  .run { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px 20px; margin-bottom: 16px }
+  .run { display: grid; gap: 12px; padding: 16px 20px; margin-bottom: 16px }
+  .run-top { display: flex; align-items: center; justify-content: space-between; gap: 16px }
   .run.on { border-color: rgba(140, 187, 127, 0.4); background: linear-gradient(90deg, rgba(140, 187, 127, 0.07), transparent 60%), var(--surface) }
   .run p { margin: 4px 0 0 }
   .status { display: flex; align-items: center; gap: 8px; font-weight: 750 }
@@ -210,6 +240,13 @@
   .switch input:checked + .track { background: var(--good) }
   .switch input:checked + .track .knob { transform: translateX(22px); background: #0f1a0c }
   .switch input:focus-visible + .track { outline: 2px solid var(--brand); outline-offset: 2px }
+  .run-l { min-width: 0 }
+  .live-rules { min-width: 0; padding: 10px 14px; border-radius: 12px; background: var(--surface-2); border: 1px solid var(--line-soft) }
+  .live-rules ol { margin: 4px 0 0; padding-left: 18px; font-size: 13.5px; color: var(--fg-2); display: grid; gap: 2px }
+  .draftbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; padding: 10px 12px; border-radius: 12px; font-size: 13.5px; background: var(--surface-2); border: 1px solid var(--line-soft); margin-bottom: 6px }
+  .draftbar.dirty { background: rgba(232, 182, 94, 0.08); border-color: rgba(232, 182, 94, 0.35) }
+  .draftbar .acts { display: flex; gap: 6px }
+  .vs-live { margin: 2px 0 8px; color: var(--fg-2) }
   .cols { display: grid; gap: 16px }
   @media (min-width: 980px) { .cols { grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); align-items: start } }
   .col { display: grid; gap: 16px; min-width: 0 }

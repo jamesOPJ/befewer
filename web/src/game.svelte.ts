@@ -12,15 +12,25 @@ export type Result = { round: number; side: Side; amount: bigint; outcome: 'A' |
 export type Toast = { id: number; kind: 'ok' | 'err' | 'info'; text: string }
 export type ApLog = { at: number; round: number; text: string; kind: 'bet' | 'skip' | 'err' }
 
-const AP_KEY = 'befewer.ap.rules'
-function loadRules(): Rule[] {
+// Two rule sets: `live` is what the autopilot runs; `draft` is what you edit and replay.
+// Editing never touches the running rules until you press "Put live".
+const LIVE_KEY = 'befewer.ap.live'
+const DRAFT_KEY = 'befewer.ap.draft'
+const OLD_KEY = 'befewer.ap.rules' // single rule set from the previous version
+function readRules(key: string): Rule[] | null {
   try {
-    const saved = JSON.parse(localStorage.getItem(AP_KEY) || 'null')
-    return Array.isArray(saved) ? saved.map(normalizeRule) : structuredClone(PRESETS[0].rules)
+    const saved = JSON.parse(localStorage.getItem(key) || 'null')
+    return Array.isArray(saved) ? saved.map(normalizeRule) : null
   } catch {
-    return structuredClone(PRESETS[0].rules)
+    return null
   }
 }
+function loadRules(): { live: Rule[]; draft: Rule[] } {
+  const live = readRules(LIVE_KEY) ?? readRules(OLD_KEY) ?? structuredClone(PRESETS[0].rules)
+  const draft = readRules(DRAFT_KEY) ?? structuredClone(live)
+  return { live, draft }
+}
+const initialRules = loadRules()
 
 export const NPCS = [
   { id: 'npc-coin.befewer.testnet', name: 'Coin', about: 'Flips a coin every round.' },
@@ -44,7 +54,7 @@ export const game = $state({
   npcs: {} as Record<string, PlayerV>,
   busy: '', // what an in-flight bet is doing right now
   toasts: [] as Toast[],
-  ap: { rules: loadRules(), on: localStorage.getItem('befewer.ap.on') === '1', log: [] as ApLog[] },
+  ap: { live: initialRules.live, draft: initialRules.draft, on: localStorage.getItem('befewer.ap.on') === '1', log: [] as ApLog[] },
 })
 
 // ---------- small helpers used by the pages ----------
@@ -200,7 +210,19 @@ export function forgetDevice() {
 // ---------- autopilot ----------
 const apDone = new Set<number>()
 export function saveRules() {
-  localStorage.setItem(AP_KEY, JSON.stringify(game.ap.rules))
+  localStorage.setItem(LIVE_KEY, JSON.stringify(game.ap.live))
+  localStorage.setItem(DRAFT_KEY, JSON.stringify(game.ap.draft))
+}
+export const draftDirty = () => JSON.stringify(game.ap.draft) !== JSON.stringify(game.ap.live)
+/** Replace the running rules with the draft. Takes effect from the next decision. */
+export function putDraftLive() {
+  game.ap.live = structuredClone($state.snapshot(game.ap.draft) as Rule[])
+  saveRules()
+}
+/** Throw away the draft: back to a copy of the running rules. */
+export function discardDraft() {
+  game.ap.draft = structuredClone($state.snapshot(game.ap.live) as Rule[])
+  saveRules()
 }
 export function setAutopilot(on: boolean) {
   game.ap.on = on
@@ -222,7 +244,7 @@ export async function autopilotTick() {
   const prev = H.round(r - 1)
   if (prev && !prev.settled) return
   apDone.add(r)
-  const d = decide($state.snapshot(game.ap.rules) as Rule[], r, guard(lookup, r))
+  const d = decide($state.snapshot(game.ap.live) as Rule[], r, guard(lookup, r))
   if ('skip' in d) {
     apLog(r, 'skip', d.rule == null ? 'No rule fit, so it skipped.' : `Rule ${d.rule + 1} says skip.`)
     return

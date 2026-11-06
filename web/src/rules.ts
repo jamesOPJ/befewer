@@ -143,3 +143,17 @@ export const PRESETS: { name: string; about: string; rules: Rule[] }[] = [
     { cond: { kind: 'question', winner: 'any' }, pick: 'other', unit: 'fixed', amount: 10 },
     { cond: { kind: 'always' }, pick: 'random', unit: 'fixed', amount: 5 }] },
 ]
+
+/** Plain-English sentence for a rule (read-only views of the running rules). */
+export function describe(r: Rule): string {
+  const c = r.cond
+  const won = (w: Who) => (w === 'any' ? 'one side' : w)
+  const cond =
+    c.kind === 'always' ? 'Otherwise'
+    : c.kind === 'last' ? (c.winner === 'any' ? 'If the round before had a winner' : `If ${c.winner} won the round before`)
+    : c.kind === 'streak' ? `If ${won(c.winner)} won the last ${c.n} rounds in a row`
+    : c.winner === 'any' ? 'If this question was asked before' : `If ${c.winner} won this question last time`
+  const pick = { same: 'that same side', other: 'the other side', A: 'A', B: 'B', random: 'a random side', skip: '' }[r.pick]
+  if (r.pick === 'skip') return `${cond} → skip the round`
+  return `${cond} → bet ${pick}, ${r.unit === 'pct' ? `${r.amount}% of balance` : `${r.amount} BEFEWER`}`
+}
