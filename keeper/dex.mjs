@@ -7,7 +7,7 @@
 //        ... node dex.mjs pool                   (show the DEX pool)
 import { loadAccount, view, provider, NEAR, fmt, fmtN, log, sleep } from './lib.mjs'
 
-const CONTRACT = process.env.FEWER_CONTRACT || 'v4.befewer.testnet'
+const CONTRACT = process.env.FEWER_CONTRACT || 'v5.befewer.testnet'
 const ROOT = 'befewer.testnet'
 const KEEPER = `keeper.${ROOT}`
 const GAS = 300_000_000_000_000n

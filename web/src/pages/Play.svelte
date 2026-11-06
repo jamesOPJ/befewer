@@ -220,6 +220,7 @@
           {#if sharesIfWin > 0}Win this round and you mine: a {nextStreak}-win streak earns {sharesIfWin} share{sharesIfWin === 1 ? '' : 's'} per 0.001 NEAR staked. Winners split the pot by shares.
           {:else}Win {need} rounds in a row and that win mines the pot. Win this one for streak {nextStreak} of {need}.{/if}
           Each round adds {fmt(game.params.reward_per_round)} BEFEWER; nobody else can mint. {fmt(st.issued)} of {fmt(st.max_supply)} issued so far.
+          Mined BEFEWER stays unrefined until you claim it; claiming costs {game.params.refine_fee_bps / 100}%, paid to everyone still holding.
         </p>
       </section>
 

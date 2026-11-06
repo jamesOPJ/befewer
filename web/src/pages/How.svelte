@@ -23,7 +23,7 @@
   <div class="card step"><span class="si"><Icon name="eye" size={22} /></span><h3>1 · Read the crowd</h3><p>Don't pick what you like. Pick the answer you think less NEAR will be on, knowing everyone else is trying to do the same.</p></div>
   <div class="card step"><span class="si"><Icon name="lock" size={22} /></span><h3>2 · Seal your bet</h3><p>Bet up to 25% of your game balance, plus a {feePct}% fee. Your answer is sealed: the chain stores only a fingerprint, and a drand timelock keeps it shut until betting closes.</p></div>
   <div class="card step"><span class="si"><Icon name="flame" size={22} /></span><h3>3 · The smaller side wins +100%</h3><p>When the reveal ends, everyone on the side with less NEAR gets their stake back plus the same amount again. The other side loses its stake. A tie or a one-sided round refunds everyone, fee included.</p></div>
-  <div class="card step"><span class="si"><Icon name="spark" size={22} /></span><h3>4 · Streaks mine BEFEWER</h3><p>Each round adds {fmt(pr?.reward_per_round ?? '0')} BEFEWER to a pot. A win that completes {need} wins in a row takes a share of it: 1 share per 0.001 NEAR staked at {need} in a row, 2 at {need + 1}, and so on. If nobody qualifies, the pot rolls over.</p></div>
+  <div class="card step"><span class="si"><Icon name="spark" size={22} /></span><h3>4 · Streaks mine BEFEWER</h3><p>Each round adds {fmt(pr?.reward_per_round ?? '0')} BEFEWER to a pot. A win that completes {need} wins in a row takes a share of it: 1 share per 0.001 NEAR staked at {need} in a row, 2 at {need + 1}, and so on. If nobody qualifies, the pot rolls over. Mined BEFEWER stays unrefined in the game: claiming it to your wallet costs {(pr?.refine_fee_bps ?? 0) / 100}%, shared among everyone still holding unrefined BEFEWER (like ORE's refining fee).</p></div>
   <div class="card step"><span class="si"><Icon name="shield" size={22} /></span><h3>5 · The treasury backs the token</h3><p>Fees, the gap between the sides and unopened bets go to the treasury. At {fmtN(st?.graduate_at ?? '0')} NEAR it opens a BEFEWER/NEAR pool on Ref Finance and locks the pool shares forever. After that it buys BEFEWER from the pool every {everyMin} minutes and burns it.</p></div>
 </section>
 
@@ -41,10 +41,10 @@
 
 <section class="card block">
   <h2>The token and the treasury</h2>
-  <p class="muted small">$BEFEWER started at zero supply. It is only ever mined by streaks (plus the one-time pool seed) and only ever burned by buybacks.</p>
+  <p class="muted small">$BEFEWER started at zero supply. It is only ever mined by streaks (plus the one-time pool seed) and only ever burned by buybacks. "Supply now" counts BEFEWER claimed to wallets; mined BEFEWER still unrefined in the game is not in it yet.</p>
   <div class="tok">
     <div><div class="eyebrow">Supply now</div><div class="v num">{fmt(st?.total_supply ?? '0')}</div><div class="faint small">{fmt(st?.issued ?? '0')} of {fmt(st?.max_supply ?? '0')} issued</div></div>
-    <div><div class="eyebrow">Mined</div><div class="v num">{fmt(st?.mined ?? '0')}</div><div class="faint small">{fmt(st?.pot ?? '0')} waiting in the pot · longest streak {st?.best_streak ?? 0}</div></div>
+    <div><div class="eyebrow">Mined</div><div class="v num">{fmt(st?.mined ?? '0')}</div><div class="faint small">{fmt(st?.unrefined_total ?? '0')} still unrefined · {fmt(st?.refine_fees ?? '0')} paid in refining fees · {fmt(st?.pot ?? '0')} in the pot</div></div>
     <div><div class="eyebrow">Treasury</div><div class="v num gold">{fmtN(st?.treasury ?? '0', 2)}</div><div class="faint small">NEAR · {fmtN(st?.treasury_in ?? '0', 2)} in so far</div></div>
     <div><div class="eyebrow">Pool</div><div class="v num">{st?.dex.stage === 'open' ? `#${st?.dex.pool_id}` : (st?.dex.stage ?? '—')}</div><div class="faint small">{st?.dex.buybacks ?? 0} buybacks · {fmt(st?.dex.bought_burned ?? '0')} BEFEWER burned</div></div>
   </div>
@@ -57,7 +57,7 @@
     {#each NPCS as n}
       {@const p = game.npcs[n.id]}
       <div class="npc">
-        <div class="nh"><b>{n.name}</b>{#if p}<span class="num faint small">{fmtN(p.balance, 2)} NEAR · {fmt(p.tokens)} BEFEWER</span>{/if}</div>
+        <div class="nh"><b>{n.name}</b>{#if p}<span class="num faint small">{fmtN(p.balance, 2)} NEAR · {fmt(BigInt(p.tokens) + BigInt(p.unrefined) + BigInt(p.refined))} BEFEWER</span>{/if}</div>
         <div class="small muted">{n.about}</div>
         {#if p}<div class="small num">Won {p.wins} · lost {p.losses} · streak {p.streak}</div>{/if}
       </div>

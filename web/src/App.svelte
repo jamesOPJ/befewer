@@ -40,7 +40,7 @@
     <div class="right">
       <span class="pill testnet" title="Testnet NEAR and BEFEWER are free and have no monetary value">Testnet</span>
       {#if game.me}
-        <a class="pill bal num" href="#/me" title={game.session?.accountId}>{fmtN(game.me.balance, 3)} <span class="faint">NEAR</span>{#if BigInt(game.me.tokens) > 0n} · {fmt(game.me.tokens)} <span class="faint">BEFEWER</span>{/if}</a>
+        <a class="pill bal num" href="#/me" title={game.session?.accountId}>{fmtN(game.me.balance, 3)} <span class="faint">NEAR</span>{#if BigInt(game.me.tokens) + BigInt(game.me.unrefined) + BigInt(game.me.refined) > 0n} · {fmt(BigInt(game.me.tokens) + BigInt(game.me.unrefined) + BigInt(game.me.refined))} <span class="faint">BEFEWER</span>{/if}</a>
       {/if}
     </div>
   </div>

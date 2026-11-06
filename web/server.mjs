@@ -14,7 +14,7 @@ import { loadAccount, NEAR } from '../keeper/lib.mjs'
 const PORT = Number(process.env.PORT || 5043)
 const HOST = process.env.HOST || '127.0.0.1'
 const ROOT_ACCOUNT = 'befewer.testnet'
-const CONTRACT = process.env.FEWER_CONTRACT || 'v4.befewer.testnet'
+const CONTRACT = process.env.FEWER_CONTRACT || 'v5.befewer.testnet'
 const GUEST_NEAR = NEAR / 20n // 0.05 testnet NEAR in the wallet, for gas
 const GUEST_PLAY = (NEAR * 3n) / 10n // 0.3 testnet NEAR in the game balance (0.01 of it pays the storage fee)
 const PER_IP_PER_HOUR = 3

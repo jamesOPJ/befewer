@@ -1,7 +1,7 @@
 <script lang="ts">
   import Icon from '../lib/Icon.svelte'
   import { questionFor, label } from '../questions'
-  import { game, fmt, fmtN, netOf, GUEST_GAME_NEAR, short, picks, forgetDevice, toast, commitRound, withdrawAll } from '../game.svelte'
+  import { game, fmt, fmtN, netOf, GUEST_GAME_NEAR, short, picks, forgetDevice, toast, commitRound, withdrawAll, claimBefewer, claimPreview } from '../game.svelte'
 
   const me = $derived(game.me)
   const decided = $derived(me ? me.wins + me.losses : 0)
@@ -9,6 +9,11 @@
   const pk = $derived.by(() => { game.me; return picks() })
   let confirming = $state(false)
 
+  async function claim() {
+    try { await claimBefewer() } catch (e: any) { toast('err', String(e.message || e)) }
+  }
+  const preview = $derived(me ? claimPreview(me) : null)
+  const feePct = $derived((game.params?.refine_fee_bps ?? 0) / 100)
   async function withdraw() {
     try { await withdrawAll() } catch (e: any) { toast('err', String(e.message || e)) }
   }
@@ -53,6 +58,19 @@
         <div class="small muted">Shows up after your first round settles.</div>
       {/if}
     </div>
+  </section>
+
+  <section class="card befewer">
+    <div class="eyebrow">Mined BEFEWER</div>
+    <div class="buckets">
+      <div><div class="faint small">Unrefined</div><div class="v num">{fmt(me.unrefined)}</div><div class="faint small">{feePct}% fee when claimed</div></div>
+      <div><div class="faint small">Refined</div><div class="v num gold">{fmt(me.refined)}</div><div class="faint small">your share of others' fees · no fee</div></div>
+      <div><div class="faint small">In your wallet</div><div class="v num">{fmt(me.tokens)}</div><div class="faint small">tradable once the pool opens</div></div>
+    </div>
+    <p class="small muted">Mined BEFEWER stays unrefined in the game. Claiming it to your wallet costs {feePct}% of the unrefined part, and that {feePct}% is shared among everyone who is still holding unrefined BEFEWER, as refined BEFEWER. The longer you hold, the more of other players' fees you collect.</p>
+    {#if preview && preview.out > 0n}
+      <button class="btn small" onclick={claim} disabled={!!game.busy}>Claim {fmt(preview.out)} BEFEWER to the wallet{preview.fee > 0n ? ` (fee ${fmt(preview.fee)})` : ''}</button>
+    {/if}
   </section>
 
   <section class="stats">
@@ -125,6 +143,12 @@
   .money { font-size: 40px; font-weight: 800; letter-spacing: -0.02em; line-height: 1.1 }
   .money span { font-size: 15px; font-weight: 600; color: var(--fg-3); margin-left: 4px }
   .tok { font-size: 15px; color: var(--fg-2) }
+  .befewer { padding: 16px 20px; display: grid; gap: 10px; margin-bottom: 12px }
+  .befewer p { margin: 0 }
+  .befewer .btn { justify-self: start }
+  .buckets { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px }
+  @media (max-width: 520px) { .buckets { grid-template-columns: 1fr 1fr } }
+  .gold { color: var(--brand) }
   .wd { justify-self: start; margin-top: 6px }
   .acct { justify-self: start; display: inline-flex; gap: 6px; align-items: center; padding: 4px 10px; border-radius: 999px; background: var(--surface-2); border: 1px solid var(--line); color: var(--fg-2); font-size: 13px; cursor: pointer }
   .small { font-size: 13px }

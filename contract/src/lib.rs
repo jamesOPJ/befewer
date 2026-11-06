@@ -1,4 +1,4 @@
-//! BEFEWER v4: a minority game played with NEAR that mines a capped NEP-141 token.
+//! BEFEWER v5: a minority game played with NEAR that mines a capped NEP-141 token.
 //!
 //! Every round, players commit a hidden bet of NEAR on side A or B (commit-reveal, with an
 //! optional drand timelock so a keeper can reveal for them). After the reveal window the side
@@ -14,6 +14,11 @@
 //! `streak_min` is 1 share per milli-NEAR staked, `streak_min + 1` is 2 shares, and so on. The
 //! pot is split among that round's winners by shares; if nobody qualifies it rolls over.
 //! Nothing else ever mints BEFEWER and issuance stops at `max_supply`.
+//!
+//! Refining (like ORE's unrefined ORE): mined BEFEWER stays in the game as "unrefined". Claiming
+//! it to the wallet (`claim_befewer`) costs `refine_fee_bps` (10%) of the unrefined part, and that
+//! fee is shared pro rata among everyone still holding unrefined BEFEWER, as "refined" BEFEWER
+//! that is claimed without a fee. If nobody else holds any, the fee goes back to the mining pot.
 //!
 //! The treasury: once it holds `graduate_at` NEAR, anyone can call `graduate` (step by step)
 //! to open a wNEAR/BEFEWER pool on the DEX (Ref Finance) with all of it plus as many new
@@ -77,6 +82,13 @@ const DEX_LP_STORAGE: u128 = NEAR / 20;
 pub const GRADUATION_COST: u128 = WNEAR_STORAGE + DEX_STORAGE + DEX_POOL_STORAGE + DEX_LP_STORAGE;
 const ONE_YOCTO: NearToken = NearToken::from_yoctonear(1);
 
+uint::construct_uint! {
+    /// 256-bit integer for the refining accumulator (fee * SCALE can exceed u128).
+    pub struct U256(4);
+}
+/// Fixed-point scale of the refining accumulator (`refine_index`).
+pub const REFINE_SCALE: u128 = 1_000_000_000_000_000_000_000_000; // 1e24
+
 const fn tgas(n: u64) -> Gas {
     Gas::from_tgas(n)
 }
@@ -126,6 +138,9 @@ pub struct Params {
     pub buyback_max: U128,
     /// Least time between two buybacks.
     pub buyback_every_ns: U64,
+    /// Fee on claiming unrefined BEFEWER to the wallet, in basis points (1000 = 10%), shared
+    /// among everyone still holding unrefined BEFEWER.
+    pub refine_fee_bps: u16,
 }
 
 #[near(serializers = [borsh])]
@@ -192,6 +207,12 @@ pub struct Player {
     pub mined: u128,
     /// Rounds with a commit that has not been claimed yet, ascending.
     pub open_rounds: Vec<u64>,
+    /// Mined BEFEWER still in the game (claiming it costs the refining fee).
+    pub unrefined: u128,
+    /// Share of other players' refining fees, booked at the last checkpoint (claimed without a fee).
+    pub refined: u128,
+    /// `refine_index` at the last checkpoint.
+    pub refine_index: u128,
 }
 
 #[near(serializers = [borsh])]
@@ -255,6 +276,17 @@ pub struct Contract {
     biggest_reward: u128,
     biggest_reward_round: Option<u64>,
     dex: Dex,
+    // ---- refining ----
+    /// Sum of every player's unrefined BEFEWER.
+    unrefined_total: u128,
+    /// Refined BEFEWER per unit of unrefined, times REFINE_SCALE, accumulated since launch.
+    refine_index: u128,
+    /// Refining fees charged so far.
+    refine_fees: u128,
+    /// Of those, fees that went back to the pot because nobody else held unrefined BEFEWER.
+    refine_to_pot: u128,
+    /// BEFEWER minted to wallets by claims (unrefined after the fee + refined).
+    claimed: u128,
 }
 
 // ---------- JSON views ----------
@@ -328,6 +360,14 @@ pub struct StatusView {
     pub mined: U128,
     pub pot: U128,
     pub total_burned: U128,
+    /// Mined BEFEWER still unrefined (in the game, not yet claimed).
+    pub unrefined_total: U128,
+    pub refine_fee_bps: u16,
+    /// Refining fees charged so far, and the part that went back to the pot.
+    pub refine_fees: U128,
+    pub refine_to_pot: U128,
+    /// BEFEWER minted to wallets by claims.
+    pub claimed: U128,
     pub rounds_settled: U64,
     pub best_streak: u32,
     pub best_streak_holder: Option<AccountId>,
@@ -375,6 +415,10 @@ pub struct PlayerView {
     pub voids: u32,
     pub forfeits: u32,
     pub mined: U128,
+    /// Mined BEFEWER still in the game (claiming costs the refining fee on this part).
+    pub unrefined: U128,
+    /// Share of others' refining fees (claimed without a fee).
+    pub refined: U128,
     pub open: Vec<OpenCommitView>,
 }
 
@@ -467,6 +511,7 @@ impl Contract {
         require!(params.graduate_at.0 > GRADUATION_COST, "graduate_at must cover the graduation cost");
         require!(params.buyback_max.0 >= MIN_BUYBACK, "buyback_max must be >= 0.01 NEAR");
         require!(params.pool_fee > 0 && params.pool_fee <= 1_000, "pool_fee must be in (0, 1000]");
+        require!(params.refine_fee_bps <= 5_000, "refine_fee_bps must be at most 5000 (50%)");
         let me = env::current_account_id();
         let mut token = FungibleToken::new(StorageKey::Token);
         token.internal_register_account(&me);
@@ -494,6 +539,11 @@ impl Contract {
             biggest_reward: 0,
             biggest_reward_round: None,
             dex: Dex::default(),
+            unrefined_total: 0,
+            refine_index: 0,
+            refine_fees: 0,
+            refine_to_pot: 0,
+            claimed: 0,
         }
     }
 
@@ -786,12 +836,13 @@ impl Contract {
                 *self.balances.entry(who.clone()).or_insert(0) += payout;
                 self.balances_total += payout;
             }
-            if mined > 0 && self.token.accounts.get(who).is_some() {
-                self.token.internal_deposit(who, mined);
+            if mined > 0 {
+                // mined BEFEWER stays in the game as unrefined until the player claims it
+                self.checkpoint(&mut player);
+                player.unrefined += mined;
+                self.unrefined_total += mined;
                 self.mined += mined;
                 player.mined += mined;
-                let memo = format!("round {} streak {}", r, player.streak);
-                FtMint { owner_id: who, amount: U128(mined), memo: Some(&memo) }.emit();
             }
             if player.streak > self.best_streak {
                 self.best_streak = player.streak;
@@ -817,6 +868,65 @@ impl Contract {
         }
         self.players.insert(who.clone(), player);
         done
+    }
+
+    // ---------- refining ----------
+
+    /// Book the player's share of refining fees charged since its last checkpoint.
+    fn checkpoint(&self, p: &mut Player) {
+        if p.unrefined > 0 && self.refine_index > p.refine_index {
+            let gain = U256::from(p.unrefined) * U256::from(self.refine_index - p.refine_index) / U256::from(REFINE_SCALE);
+            p.refined += gain.as_u128();
+        }
+        p.refine_index = self.refine_index;
+    }
+
+    /// Refined BEFEWER a player could claim right now (booked + not yet booked).
+    fn refined_now(&self, p: &Player) -> u128 {
+        let mut q = p.clone();
+        self.checkpoint(&mut q);
+        q.refined
+    }
+
+    /// Claim the caller's mined BEFEWER to its wallet: `bps` (default 10000 = all) of the
+    /// unrefined balance minus the refining fee, plus all refined BEFEWER (no fee). The fee is
+    /// shared pro rata among everyone still holding unrefined BEFEWER (the caller too, for what
+    /// it keeps); if nobody holds any, it goes back to the mining pot. Returns the amount minted.
+    pub fn claim_befewer(&mut self, bps: Option<u16>) -> U128 {
+        let who = env::predecessor_account_id();
+        self.internal_claim(&who); // credit wins from rounds that already finished
+        let mut p = self.players.get(&who).cloned().unwrap_or_default();
+        let bps = bps.unwrap_or(10_000) as u128;
+        require!(bps >= 1 && bps <= 10_000, "bps must be 1..10000");
+        require!(self.token.accounts.get(&who).is_some(), "register for BEFEWER first (storage_deposit)");
+        self.checkpoint(&mut p);
+        let take = p.unrefined * bps / BPS;
+        let fee = take * (self.params.refine_fee_bps as u128) / BPS;
+        let out = take - fee + p.refined;
+        require!(out > 0, "nothing to claim");
+        let refined_paid = p.refined;
+        p.unrefined -= take;
+        p.refined = 0;
+        self.unrefined_total -= take;
+        if fee > 0 {
+            self.refine_fees += fee;
+            if self.unrefined_total > 0 {
+                let step = U256::from(fee) * U256::from(REFINE_SCALE) / U256::from(self.unrefined_total);
+                self.refine_index += step.as_u128();
+            } else {
+                self.pot += fee;
+                self.refine_to_pot += fee;
+            }
+        }
+        self.players.insert(who.clone(), p);
+        self.token.internal_deposit(&who, out);
+        self.claimed += out;
+        FtMint { owner_id: &who, amount: U128(out), memo: Some("claimed mined BEFEWER") }.emit();
+        emit(
+            "claim_befewer",
+            json!({"account_id": who, "unrefined": U128(take), "fee": U128(fee), "refined": U128(refined_paid), "minted": U128(out)}),
+        );
+        U128(out)
     }
 
     // ---------- the DEX: graduation and buybacks ----------
@@ -1072,6 +1182,11 @@ impl Contract {
             max_supply: self.params.max_supply,
             issued: U128(self.issued),
             mined: U128(self.mined),
+            unrefined_total: U128(self.unrefined_total),
+            refine_fee_bps: self.params.refine_fee_bps,
+            refine_fees: U128(self.refine_fees),
+            refine_to_pot: U128(self.refine_to_pot),
+            claimed: U128(self.claimed),
             pot: U128(self.pot),
             total_burned: U128(self.total_burned),
             rounds_settled: U64(self.rounds_settled),
@@ -1188,6 +1303,8 @@ impl Contract {
             voids: p.voids,
             forfeits: p.forfeits,
             mined: U128(p.mined),
+            unrefined: U128(p.unrefined),
+            refined: U128(self.refined_now(&p)),
             open,
         }
     }

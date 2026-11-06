@@ -33,7 +33,7 @@ function loadRules(): { live: Rule[]; draft: Rule[] } {
 const initialRules = loadRules()
 
 export const NPCS = [
-  { id: 'npc-coin.befewer.testnet', name: 'Coin', about: 'Flips a coin every round.' },
+  { id: 'npc-coin.befewer.testnet', name: 'Coin', about: 'Flips a coin every round, and claims mined BEFEWER right away (paying the 10%).' },
   { id: 'npc-echo.befewer.testnet', name: 'Echo', about: 'Bets the last smaller side wins again.' },
   { id: 'npc-flip.befewer.testnet', name: 'Flip', about: 'Bets the crowd over-corrects.' },
   { id: 'npc-whale.befewer.testnet', name: 'Whale', about: 'Plays half the rounds and bets big.' },
@@ -111,7 +111,7 @@ export async function refresh(full = false) {
       const before = game.me
       game.me = await view<PlayerV>('get_player', { account_id: game.session.accountId })
       if (before && BigInt(game.me.mined) > BigInt(before.mined))
-        toast('ok', `You mined ${fmt(BigInt(game.me.mined) - BigInt(before.mined))} BEFEWER with a ${game.me.streak}-win streak.`, 9000)
+        toast('ok', `You mined ${fmt(BigInt(game.me.mined) - BigInt(before.mined))} BEFEWER with a ${game.me.streak}-win streak. It stays unrefined in the game until you claim it on the Me page.`, 9000)
       await loadResults()
     }
     game.ready = true
@@ -173,6 +173,26 @@ export async function ensurePlayer() {
   }
   game.me = await view<PlayerV>('get_player', { account_id: game.session.accountId })
   if (!game.me.registered) throw new Error('This account has no game balance yet. Reload the page in a few seconds.')
+}
+
+/** BEFEWER a claim of everything would put in the wallet, and the refining fee it would pay. */
+export function claimPreview(p: PlayerV) {
+  const u = BigInt(p.unrefined)
+  const fee = (u * BigInt(game.params?.refine_fee_bps ?? 0)) / 10000n
+  return { out: u - fee + BigInt(p.refined), fee }
+}
+/** Claim all mined BEFEWER (unrefined minus the fee, plus refined) to this browser's wallet. */
+export async function claimBefewer() {
+  if (!game.session || !game.me) return
+  try {
+    game.busy = 'Claiming your BEFEWER'
+    const { out, fee } = claimPreview(game.me)
+    await callContract(game.session, 'claim_befewer', {}, 50)
+    toast('ok', `${fmt(out)} BEFEWER are in your wallet. ${fmt(fee)} went to everyone still holding unrefined BEFEWER.`)
+  } finally {
+    game.busy = ''
+    await refresh(true)
+  }
 }
 
 /** Move NEAR from the game balance back to this browser's testnet wallet. */

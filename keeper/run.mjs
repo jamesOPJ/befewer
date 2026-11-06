@@ -13,7 +13,7 @@ import { actions } from 'near-api-js'
 import { loadAccount, hasKey, newKeyFor, view, call, provider, newSalt, commitHash, NEAR, fmt, fmtN, sleep, log } from './lib.mjs'
 
 const { timelockEncrypt, timelockDecrypt, roundAt, roundTime, mainnetClient } = tlock
-const CONTRACT = process.env.FEWER_CONTRACT || 'v4.befewer.testnet'
+const CONTRACT = process.env.FEWER_CONTRACT || 'v5.befewer.testnet'
 const ROOT = 'befewer.testnet'
 const KEEPER = `keeper.${ROOT}`
 const KEEPER_ONLY = process.env.FEWER_KEEPER_ONLY === '1'
@@ -24,7 +24,7 @@ const coin = () => (Math.random() < 0.5 ? 'A' : 'B')
 const other = s => (s === 'A' ? 'B' : 'A')
 // Personalities. pick(h) gets the last settled round's outcome. Stakes are in NEAR.
 export const NPCS = [
-  { id: `npc-coin.${ROOT}`, play: 0.85, stake: [0.01, 0.04], about: 'flips a coin', pick: () => coin() },
+  { id: `npc-coin.${ROOT}`, play: 0.85, stake: [0.01, 0.04], about: 'flips a coin; claims mined BEFEWER right away (pays the 10%)', claims: true, pick: () => coin() },
   { id: `npc-echo.${ROOT}`, play: 0.95, stake: [0.01, 0.03], about: 'bets the last minority wins again', pick: h => (h.last === 'A' || h.last === 'B' ? h.last : coin()) },
   { id: `npc-flip.${ROOT}`, play: 0.95, stake: [0.01, 0.03], about: 'bets the crowd over-corrects', pick: h => (h.last === 'A' || h.last === 'B' ? other(h.last) : coin()) },
   { id: `npc-whale.${ROOT}`, play: 0.5, stake: [0.04, 0.08], about: 'bets big on a hunch', pick: () => coin() },
@@ -111,6 +111,12 @@ async function npcTick(st) {
       let p = await view(CONTRACT, 'get_player', { account_id: n.id })
       if (p.open.length >= 8) { log(n.id, 'skips: too many open rounds'); continue }
       p = await topUp(n, p)
+      if (n.claims && BigInt(p.unrefined) + BigInt(p.refined) > 0n) {
+        // the impatient one: claims to its wallet as soon as it mines, so the 10% reaches the holders
+        const res = await loadAccount(n.id).callFunctionRaw({ contractId: CONTRACT, methodName: 'claim_befewer', args: {}, gas: 30_000_000_000_000n })
+        const f = failed(res)
+        log(n.id, f ? `claim_befewer FAILED ${f}` : `claimed ${fmt(BigInt(p.unrefined) * 9n / 10n + BigInt(p.refined))} BEFEWER to its wallet`)
+      }
       const bal = BigInt(p.balance)
       let amount = near(n.stake[0] + Math.random() * (n.stake[1] - n.stake[0]))
       const cap = (bal * BigInt(pr.max_stake_bps)) / 10000n

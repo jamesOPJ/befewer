@@ -81,5 +81,28 @@
       "buyback_max": "500000000000000000000000",
       "buyback_every_ns": "600000000000"
     }
+  },
+  "v5.befewer.testnet": {
+    "deployed_at": "2026-11-06T17:55:16.955Z",
+    "tx": "3NEqs7ejseuqBhjF8LuoW5exHdaKTQwxFYQMwtEubP8c",
+    "code_sha256": "c9bed9f39b5f0dba3c7211d5c0720eabbbd404f78824500ca5f025aa0ab0c47c",
+    "params": {
+      "genesis_ns": "1793987880000000000",
+      "commit_ns": "180000000000",
+      "reveal_ns": "90000000000",
+      "max_stake_bps": 2500,
+      "min_stake": "10000000000000000000000",
+      "fee_bps": 500,
+      "reward_per_round": "1000000000000000000",
+      "max_supply": "1000000000000000000000000",
+      "streak_min": 3,
+      "graduate_at": "5000000000000000000000000",
+      "dex": "ref-finance-101.testnet",
+      "wnear": "wrap.testnet",
+      "pool_fee": 30,
+      "buyback_max": "500000000000000000000000",
+      "buyback_every_ns": "600000000000",
+      "refine_fee_bps": 1000
+    }
   }
 }

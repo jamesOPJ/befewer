@@ -62,6 +62,7 @@ fn params() -> Params {
         pool_fee: 30,
         buyback_max: U128(N),
         buyback_every_ns: U64(MIN),
+        refine_fee_bps: 1000,
     }
 }
 
@@ -150,8 +151,14 @@ fn check_invariants(c: &Contract, players: &[AccountId], donated: u128) {
     );
     let holders: u128 = players.iter().map(|p| tokens(c, p)).sum::<u128>() + tokens(c, &me()) + tokens(c, &dex());
     assert_eq!(holders, s.total_supply.0, "token balances add up to total supply");
-    assert_eq!(s.total_supply.0 + s.total_burned.0, s.mined.0 + s.dex.seed.0, "supply + burned = minted");
-    assert!(s.issued.0 >= s.mined.0 + s.pot.0 + s.dex.seed.0, "issued covers mined + pot + seed");
+    assert_eq!(s.total_supply.0 + s.total_burned.0, s.claimed.0 + s.dex.seed.0, "supply + burned = minted (claims + seed)");
+    let unrefined: u128 = players.iter().map(|p| c.get_player(p.clone()).unrefined.0).sum();
+    assert_eq!(unrefined, s.unrefined_total.0, "unrefined balances add up");
+    // every mined token is still unrefined, was claimed, is owed as refined, or went back to the pot
+    let owed: u128 = players.iter().map(|p| c.get_player(p.clone()).refined.0).sum();
+    let accounted = s.unrefined_total.0 + s.claimed.0 + owed + s.refine_to_pot.0;
+    assert!(accounted <= s.mined.0 && s.mined.0 - accounted <= 1_000, "mining credits conserved (up to rounding dust): mined {} accounted {}", s.mined.0, accounted);
+    assert!(s.issued.0 + s.refine_to_pot.0 >= s.mined.0 + s.pot.0 + s.dex.seed.0, "issued covers mined + pot + seed");
     assert!(s.issued.0 <= s.max_supply.0, "issuance never above the cap");
 }
 
@@ -623,7 +630,8 @@ fn third_win_in_a_row_mines_the_whole_pot() {
         c.claim(Some(p.clone()));
     }
     let s = c.get_status();
-    assert_eq!(tokens(&c, &a), 3 * T, "rounds 0 and 1 rolled over into round 2's pot");
+    assert_eq!(c.get_player(a.clone()).unrefined.0, 3 * T, "rounds 0 and 1 rolled over into round 2's pot");
+    assert_eq!(tokens(&c, &a), 0, "mined BEFEWER stays unrefined in the game until claimed");
     assert_eq!(c.get_player(a.clone()).mined.0, 3 * T);
     assert_eq!((s.mined.0, s.pot.0, s.issued.0), (3 * T, 0, 3 * T));
     assert_eq!(c.get_round(U64(2)).reward.0, 3 * T);
@@ -646,8 +654,8 @@ fn longer_streaks_and_bigger_stakes_get_bigger_shares() {
     }
     // round 2: alice's 3rd win takes the 3-token pot alone (eve is on her 2nd)
     // round 3: pot of 1 token split 2 shares x 1000 (alice, streak 4) : 1 share x 500 (eve, streak 3)
-    assert_eq!(tokens(&c, &a), 3 * T + T * 2000 / 2500);
-    assert_eq!(tokens(&c, &e), T * 500 / 2500);
+    assert_eq!(c.get_player(a.clone()).unrefined.0, 3 * T + T * 2000 / 2500);
+    assert_eq!(c.get_player(e.clone()).unrefined.0, T * 500 / 2500);
     let r3 = c.get_round(U64(3));
     assert_eq!((r3.reward.0, r3.reward_shares.0), (T, 2500));
     check_invariants(&c, &[a, e, b1, b2], 0);
@@ -711,7 +719,7 @@ fn skipped_and_void_rounds_keep_the_streak() {
     }
     let p = c.get_player(a.clone());
     assert_eq!((p.wins, p.voids, p.streak), (3, 1, 3));
-    assert!(tokens(&c, &a) > 0, "the third win mined");
+    assert!(c.get_player(a.clone()).unrefined.0 > 0, "the third win mined");
     check_invariants(&c, &[a, b1, b2], 0);
 }
 
@@ -756,7 +764,7 @@ fn issuance_stops_at_max_supply() {
     assert_eq!(s.issued.0, T * 5 / 2);
     assert_eq!(c.get_round(U64(2)).emission.0, T / 2);
     assert_eq!(c.get_round(U64(3)).emission.0, 0);
-    assert_eq!(tokens(&c, &a), T * 5 / 2);
+    assert_eq!(c.get_player(a.clone()).unrefined.0, T * 5 / 2);
     check_invariants(&c, &[a, b1, b2], 0);
 }
 
@@ -766,6 +774,95 @@ fn mul_div_is_exact_and_does_not_overflow() {
     assert_eq!(mul_div(1_000_000 * T, 999_999, 1_000_000), 999_999 * T);
     let big = u128::MAX / 2;
     assert_eq!(mul_div(big, 7, 7), big);
+}
+
+// ---------------- refining (claiming mined BEFEWER) ----------------
+
+/// Credit unrefined BEFEWER to a registered account the way mining does.
+fn give_unrefined(c: &mut Contract, who: &AccountId, amount: u128) {
+    let mut p = c.players.get(who).cloned().unwrap_or_default();
+    c.checkpoint(&mut p);
+    p.unrefined += amount;
+    p.mined += amount;
+    c.unrefined_total += amount;
+    c.mined += amount;
+    c.issued += amount; // as if emitted into a round's reward
+    c.players.insert(who.clone(), p);
+}
+fn claim_tokens(c: &mut Contract, who: &AccountId, bps: Option<u16>) -> u128 {
+    ctx(who, G);
+    c.claim_befewer(bps).0
+}
+fn view_p(c: &Contract, who: &AccountId) -> PlayerView {
+    c.get_player(who.clone())
+}
+
+#[test]
+fn claiming_alone_costs_10_percent_and_the_fee_goes_back_to_the_pot() {
+    let mut c = setup();
+    let (a, b1, b2) = (acc("alice.testnet"), acc("b1.testnet"), acc("b2.testnet"));
+    for p in [&a, &b1, &b2] {
+        join(&mut c, p);
+    }
+    play_alice_minority(&mut c, 0..3, &a, None);
+    ctx(&a, t_after(2)); // rounds finished but nobody called claim: claim_befewer pays them first
+    assert_eq!(c.claim_befewer(None).0, 3 * T * 9 / 10);
+    let s = c.get_status();
+    assert_eq!(tokens(&c, &a), 3 * T * 9 / 10);
+    assert_eq!((s.refine_fees.0, s.refine_to_pot.0, s.pot.0), (3 * T / 10, 3 * T / 10, 3 * T / 10));
+    assert_eq!(view_p(&c, &a).unrefined.0, 0);
+    check_invariants(&c, &[a, b1, b2], 0);
+}
+
+#[test]
+fn the_refining_fee_is_shared_pro_rata_and_refined_is_claimed_without_a_fee() {
+    let mut c = setup();
+    let (x, y, z) = (acc("x.testnet"), acc("y.testnet"), acc("z.testnet"));
+    for p in [&x, &y, &z] {
+        join(&mut c, p);
+    }
+    give_unrefined(&mut c, &x, 6 * T);
+    give_unrefined(&mut c, &y, 3 * T);
+    give_unrefined(&mut c, &z, T);
+    // x claims everything: 6 - 10% = 5.4; the 0.6 fee splits 3:1 between y and z
+    assert_eq!(claim_tokens(&mut c, &x, None), 54 * T / 10);
+    assert_eq!(view_p(&c, &y).refined.0, 45 * T / 100);
+    assert_eq!(view_p(&c, &z).refined.0, 15 * T / 100);
+    // y claims half its unrefined: 1.5 - 0.15 fee + its 0.45 refined (no fee on that) = 1.8
+    assert_eq!(claim_tokens(&mut c, &y, Some(5_000)), 18 * T / 10);
+    // the 0.15 fee splits over what is still unrefined: y 1.5, z 1 -> 0.09 / 0.06
+    assert_eq!(view_p(&c, &y).refined.0, 9 * T / 100);
+    assert_eq!(view_p(&c, &z).refined.0, 21 * T / 100);
+    assert_eq!(view_p(&c, &y).unrefined.0, 15 * T / 10);
+    let s = c.get_status();
+    assert_eq!(s.refine_fees.0, 75 * T / 100);
+    assert_eq!(s.refine_to_pot.0, 0);
+    check_invariants(&c, &[x, y, z], 0);
+}
+
+#[test]
+fn holding_unrefined_earns_from_a_claim_made_before_it_was_mined_only_if_already_held() {
+    let mut c = setup();
+    let (x, y) = (acc("x.testnet"), acc("y.testnet"));
+    join(&mut c, &x);
+    join(&mut c, &y);
+    give_unrefined(&mut c, &x, 2 * T);
+    give_unrefined(&mut c, &y, 2 * T);
+    claim_tokens(&mut c, &x, None); // 0.2 fee -> all to y
+    assert_eq!(view_p(&c, &y).refined.0, 2 * T / 10);
+    // x mines again later: it must not get a share of the fee charged before
+    give_unrefined(&mut c, &x, T);
+    assert_eq!(view_p(&c, &x).refined.0, 0);
+    check_invariants(&c, &[x, y], 0);
+}
+
+#[test]
+#[should_panic(expected = "nothing to claim")]
+fn claiming_nothing_fails() {
+    let mut c = setup();
+    let a = acc("alice.testnet");
+    join(&mut c, &a);
+    claim_tokens(&mut c, &a, None);
 }
 
 // ---------------- treasury safety ----------------
@@ -797,12 +894,12 @@ fn befewer_sent_to_the_contract_is_burned() {
     }
     play_alice_minority(&mut c, 0..3, &a, None);
     ctx(&a, t_after(2));
-    c.claim(Some(a.clone()));
+    c.claim_befewer(None); // 3 unrefined -> 2.7 in the wallet (alone, so the 0.3 fee goes to the pot)
     ctx_full(&a, t_after(2), 1, BIG, vec![]);
     c.ft_transfer(me(), U128(T), None);
     let s = c.get_status();
-    assert_eq!(tokens(&c, &a), 2 * T);
-    assert_eq!((s.total_supply.0, s.total_burned.0), (2 * T, T));
+    assert_eq!(tokens(&c, &a), 27 * T / 10 - T);
+    assert_eq!((s.total_supply.0, s.total_burned.0), (27 * T / 10 - T, T));
     assert_eq!(tokens(&c, &me()), 0);
 }
 
@@ -1110,6 +1207,15 @@ fn random_play_keeps_invariants() {
                 c.claim(Some(p.clone()));
                 check_invariants(&c, &players, 0);
             }
+            // now and then someone claims part of its mined BEFEWER to the wallet
+            for p in &players {
+                let v = c.get_player(p.clone());
+                if (v.unrefined.0 > 0 || v.refined.0 > 0) && rnd() % 3 == 0 {
+                    ctx(p, t_after(r));
+                    c.claim_befewer(Some((rnd() % 10_000 + 1) as u16));
+                    check_invariants(&c, &players, 0);
+                }
+            }
         }
     }
     ctx(&players[0], t_after(50));
@@ -1121,4 +1227,5 @@ fn random_play_keeps_invariants() {
     check_invariants(&c, &players, 0);
     assert!(s.treasury.0 > 0);
     assert!(s.mined.0 > 0, "40 random rounds should produce some 3-win streaks");
+    assert!(s.refine_fees.0 > 0, "and some refining fees");
 }

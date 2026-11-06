@@ -7,7 +7,7 @@ import tlock from 'tlock-js'
 
 const { timelockEncrypt, roundAt, roundTime, mainnetClient } = tlock as any
 
-export const CONTRACT: string = import.meta.env.VITE_CONTRACT || 'v4.befewer.testnet'
+export const CONTRACT: string = import.meta.env.VITE_CONTRACT || 'v5.befewer.testnet'
 export const NETWORK = 'testnet'
 export const EXPLORER = 'https://testnet.nearblocks.io'
 export const TOKEN = 10n ** 18n // 1 BEFEWER
@@ -36,6 +36,7 @@ export interface Status {
   treasury: string; treasury_spendable: string; treasury_in: string; graduate_at: string
   balances_total: string; escrow: string; storage_fees: string
   total_supply: string; max_supply: string; issued: string; mined: string; pot: string; total_burned: string
+  unrefined_total: string; refine_fee_bps: number; refine_fees: string; refine_to_pot: string; claimed: string
   rounds_settled: string; best_streak: number; best_streak_holder: string | null
   biggest_reward: string; biggest_reward_round: string | null
   dex: DexV
@@ -43,7 +44,7 @@ export interface Status {
 export interface Params {
   genesis_ns: string; commit_ns: string; reveal_ns: string; max_stake_bps: number; min_stake: string
   fee_bps: number; reward_per_round: string; max_supply: string; streak_min: number; graduate_at: string
-  dex: string; wnear: string; pool_fee: number; buyback_max: string; buyback_every_ns: string
+  dex: string; wnear: string; pool_fee: number; buyback_max: string; buyback_every_ns: string; refine_fee_bps: number
 }
 export interface RoundV {
   round: string; commit_starts_at: string; reveal_starts_at: string; reveal_ends_at: string
@@ -55,6 +56,8 @@ export interface RoundV {
 export interface PlayerV {
   account_id: string; balance: string; tokens: string; registered: boolean; streak: number; best_streak: number
   wins: number; losses: number; voids: number; forfeits: number; mined: string
+  /** mined BEFEWER still in the game (claiming costs the refining fee on it) and the share of others' fees (no fee) */
+  unrefined: string; refined: string
   open: { round: string; amount: string; fee: string; side: 'A' | 'B' | null; streak_if_win: number; shares: string }[]
 }
 
