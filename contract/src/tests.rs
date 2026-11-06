@@ -680,6 +680,64 @@ fn a_loss_resets_the_streak_and_the_shares() {
     assert_eq!(c.get_status().pot.0, 4 * T);
 }
 
+/// Win, skip a round, win, a void round, win: the streak is 3 and the last win mines.
+#[test]
+fn skipped_and_void_rounds_keep_the_streak() {
+    let mut c = setup();
+    let (a, b1, b2) = (acc("alice.testnet"), acc("b1.testnet"), acc("b2.testnet"));
+    for p in [&a, &b1, &b2] {
+        join(&mut c, p);
+    }
+    play_alice_minority(&mut c, 0..1, &a, None);
+    // round 1: alice sits out (only b1 and b2 play)
+    commit(&mut c, &b1, 1, "A", N);
+    commit(&mut c, &b2, 1, "B", 2 * N);
+    reveal(&mut c, &b1, 1, "A");
+    reveal(&mut c, &b2, 1, "B");
+    play_alice_minority(&mut c, 2..3, &a, None);
+    // round 3: everyone on A -> void, money back
+    for p in [&a, &b1] {
+        commit(&mut c, p, 3, "A", N);
+        reveal(&mut c, p, 3, "A");
+    }
+    play_alice_minority(&mut c, 4..5, &a, None);
+    let o = c.get_player(a.clone()).open;
+    let last = o.iter().find(|x| x.round.0 == 4).unwrap();
+    assert_eq!(last.streak_if_win, 3, "the skip and the void did not break the streak");
+    assert!(last.shares.0 > 0);
+    ctx(&a, t_after(4));
+    for p in [&a, &b1, &b2] {
+        c.claim(Some(p.clone()));
+    }
+    let p = c.get_player(a.clone());
+    assert_eq!((p.wins, p.voids, p.streak), (3, 1, 3));
+    assert!(tokens(&c, &a) > 0, "the third win mined");
+    check_invariants(&c, &[a, b1, b2], 0);
+}
+
+/// Win, win, then a bet that never gets revealed: it counts as given up and resets the streak.
+#[test]
+fn an_unrevealed_bet_resets_the_streak() {
+    let mut c = setup();
+    let (a, b1, b2) = (acc("alice.testnet"), acc("b1.testnet"), acc("b2.testnet"));
+    for p in [&a, &b1, &b2] {
+        join(&mut c, p);
+    }
+    play_alice_minority(&mut c, 0..2, &a, None);
+    commit(&mut c, &a, 2, "A", N); // never revealed
+    commit(&mut c, &b1, 2, "A", N);
+    commit(&mut c, &b2, 2, "B", N + N / 2);
+    reveal(&mut c, &b1, 2, "A");
+    reveal(&mut c, &b2, 2, "B");
+    play_alice_minority(&mut c, 3..4, &a, None);
+    let o = c.get_player(a.clone()).open;
+    assert_eq!(o.iter().find(|x| x.round.0 == 3).unwrap().streak_if_win, 1);
+    ctx(&a, t_after(3));
+    c.claim(Some(a.clone()));
+    let p = c.get_player(a.clone());
+    assert_eq!((p.wins, p.forfeits, p.streak), (3, 1, 1));
+}
+
 #[test]
 fn issuance_stops_at_max_supply() {
     let mut p = params();
