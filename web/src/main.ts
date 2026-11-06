@@ -20,6 +20,7 @@ let session: Session | null = loadSession()
 let me: PlayerV | null = null
 let rounds: RoundV[] = []
 let busy = ''
+let stakeChoice: number | null = null // the player's slider choice survives re-renders
 let notice = ''
 
 const now = () => Date.now() + skew
@@ -78,7 +79,7 @@ function renderMove(_cr: RoundV | undefined): string {
   const cap = (bal * BigInt(params.max_stake_bps)) / 10000n
   if (cap < BigInt(params.min_stake)) return `<div class="move">${head}<p>Your balance is too small to play (max stake is 25% of your balance).</p></div>`
   const maxW = Number(cap / ONE)
-  const def = Math.max(1, Math.round(maxW / 2))
+  const def = Math.max(1, Math.round(maxW / 2)) // the player's own choice is applied after painting (applyStake)
   return `<div class="move">${head}
     <label class="stake">Stake <input id="amt" type="range" min="1" max="${maxW}" value="${def}"><b id="amtv">${def}</b> FEWER <span class="fine">(max 25% of balance)</span></label>
     <div class="pick"><button class="side-A" data-act="commit" data-side="A" ${busy ? 'disabled' : ''}>A</button>
@@ -109,69 +110,53 @@ async function ensurePlayer() {
   }
 }
 
+/** Write a section only when its HTML actually changed, so polling never repaints the page
+ *  (and never resets the stake slider or the scroll position). */
+const painted = new Map<string, string>()
+function setHTML(id: string, html: string) {
+  if (painted.get(id) === html) return
+  const el = document.getElementById(id)
+  if (!el) return
+  el.innerHTML = html
+  painted.set(id, html)
+}
+// countdowns are filled in by tick(), never baked into the HTML (that would change it every second)
+const timer = (ns: string | null) => `<b class="t" data-t="${ns ?? ''}"></b>`
+function tick() {
+  document.querySelectorAll<HTMLElement>('.t[data-t]').forEach(el => {
+    if (el.dataset.t) el.textContent = left(el.dataset.t)
+  })
+}
+
+/** Put the player's slider choice back without changing the section HTML. */
+function applyStake() {
+  const el = document.getElementById('amt') as HTMLInputElement | null
+  if (!el || stakeChoice == null) return
+  const v = String(Math.min(Number(el.max), Math.max(1, stakeChoice)))
+  if (el.value !== v) el.value = v
+  $('#amtv').textContent = el.value
+}
+
+let skeleton = false
 function render() {
-  const cr = roundById(status.commit_round)
-  const rr = roundById(status.reveal_round)
-  const burned = BigInt(status.total_burned)
-  const supply = BigInt(status.total_supply)
-  const initial = BigInt(status.initial_supply)
-  const handedOut = initial - BigInt(status.faucet_reserve) // everything that ever left the launch reserve
-  const circulating = supply - BigInt(status.faucet_reserve) - BigInt(status.escrow)
-  const burnPct = handedOut > 0n ? Number((burned * 100000n) / handedOut) / 1000 : 0
-  $('#app').innerHTML = `
+  if (!skeleton) {
+    $('#app').innerHTML = `
   <header>
     <h1>$FEWER</h1>
     <p class="tag">Pick the side fewer coins pick.</p>
     <p class="sub">A memecoin whose daily ritual is a sealed-bid minority game on NEAR. The minority doubles, the imbalance burns.</p>
     <p class="testnet">Testnet demo built for NEAR HACKATHON. Testnet FEWER is free and has no monetary value; there is no token sale.</p>
   </header>
-
   <section class="live">
-    <div class="card now">
-      <div class="k">Round ${status.commit_round} · bets close in <b class="t" data-t="${status.commit_ends_at}">${left(status.commit_ends_at)}</b></div>
-      <div class="big">${fmt(cr?.committed ?? '0')} <span>FEWER in</span></div>
-      <div class="k">${cr?.commits ?? 0} sealed bet${cr?.commits === 1 ? '' : 's'} · sides hidden until the reveal opens</div>
-      ${renderMove(cr)}
-      ${notice ? `<p class="notice">${esc(notice)}</p>` : ''}
-      ${busy ? `<p class="notice">${esc(busy)}</p>` : ''}
-    </div>
-    <div class="card reveal">
-      ${rr ? `<div class="k">Round ${rr.round} · revealing · result in <b class="t" data-t="${status.reveal_ends_at}">${left(status.reveal_ends_at!)}</b></div>
-        <div class="vs"><span class="side-A">A ${fmt(rr.revealed_a)}</span><span class="side-B">B ${fmt(rr.revealed_b)}</span></div>
-        ${bar(BigInt(rr.revealed_a), BigInt(rr.revealed_b))}
-        <div class="k">${rr.reveals_a + rr.reveals_b} of ${rr.commits} bets opened · drand published the key, the keeper is opening them</div>`
-        : `<div class="k">No round is revealing right now.</div>`}
-    </div>
+    <div class="card now"><div id="s-round"></div><div id="s-move"></div><div id="s-notice"></div></div>
+    <div class="card reveal" id="s-reveal"></div>
   </section>
-
-  <section class="stats">
-    <div><div class="k">Handed out by the faucet</div><div class="v">${fmt(handedOut)}</div><div class="k">${fmt(status.faucet_reserve)} still in the launch reserve</div></div>
-    <div><div class="k">Burned so far</div><div class="v burn">${fmt(burned)}</div><div class="k">${burnPct}% of everything handed out · ${status.rounds_settled} rounds</div></div>
-    <div><div class="k">In players' hands</div><div class="v">${fmt(circulating)}</div><div class="k">${fmt(status.escrow)} locked in bets</div></div>
-    <div><div class="k">Longest minority streak</div><div class="v">${status.best_streak}</div><div class="k">${status.best_streak_holder ? esc(short(status.best_streak_holder)) : '—'}</div></div>
-  </section>
-
-  ${session && me && me.open.length ? `<section><h2>Your bets</h2><table><tr><th>Round</th><th>Stake</th><th>Your side</th><th>Status</th></tr>
-    ${me.open.map(o => { const p = loadPicks(session!.accountId)[o.round]; const rv = roundById(o.round)
-      const st = rv?.settled ? `settled: ${rv.outcome}` : o.side ? 'opened' : 'sealed'
-      return `<tr><td>${o.round}</td><td>${fmt(o.amount)}</td><td class="side-${p?.side ?? 'x'}">${p?.side ?? '?'}</td><td>${st}</td></tr>` }).join('')}
-    </table><p class="fine">W ${me.wins} · L ${me.losses} · void ${me.voids} · forfeited ${me.forfeits}</p></section>` : ''}
-
-  <section><h2>Recent rounds</h2>
-    <table class="rounds"><tr><th>Round</th><th>Bets</th><th>A</th><th>B</th><th>Smaller side</th><th>Burned</th></tr>
-    ${rounds.filter(r => r.round !== status.commit_round).map(r => `<tr>
-      <td>${r.round}</td><td>${r.commits}</td>
-      <td class="${r.outcome === 'A' ? 'win' : ''}">${r.reveals_a ? fmt(r.revealed_a) : '—'}</td>
-      <td class="${r.outcome === 'B' ? 'win' : ''}">${r.reveals_b ? fmt(r.revealed_b) : '—'}</td>
-      <td>${r.settled ? (r.outcome === 'void' ? 'void (refund)' : `<b class="side-${r.outcome}">${r.outcome}</b> doubles`) : (r.round === status.reveal_round ? 'revealing' : 'waiting for keeper')}</td>
-      <td class="burn">${r.settled ? fmt(r.burned) : ''}</td></tr>`).join('')}
-    </table>
-    <p class="fine">Rounds nobody played are skipped. The burn is |A − B| plus any bet that was never opened.</p>
-  </section>
-
+  <section class="stats" id="s-stats"></section>
+  <div id="s-mine"></div>
+  <section><h2>Recent rounds</h2><div id="s-rounds"></div>
+    <p class="fine">Rounds nobody played are skipped. The burn is |A − B| plus any bet that was never opened.</p></section>
   <section><h2>NPC players</h2><p class="fine">Four bots with their own testnet wallets keep every round alive. They play by the same rules as you.</p>
     <div class="npcs" id="npcs"></div></section>
-
   <section class="rules"><h2>Rules (enforced by the contract, no admin)</h2>
     <ol>
       <li>Every round you can bet up to 25% of your balance on A or B. Your side is sealed: the contract stores only a hash.</li>
@@ -182,7 +167,49 @@ function render() {
     </ol>
     <p class="fine">Contract <a href="${EXPLORER}/address/${CONTRACT}" target="_blank" rel="noopener">${CONTRACT}</a> · this demo runs a round every ${Number(BigInt(params.commit_ns) / 60_000_000_000n)} minutes; the mechanic is designed for one round a day.</p>
   </section>`
+    skeleton = true
+  }
+  const cr = roundById(status.commit_round)
+  const rr = roundById(status.reveal_round)
+  const burned = BigInt(status.total_burned)
+  const supply = BigInt(status.total_supply)
+  const initial = BigInt(status.initial_supply)
+  const handedOut = initial - BigInt(status.faucet_reserve) // everything that ever left the launch reserve
+  const circulating = supply - BigInt(status.faucet_reserve) - BigInt(status.escrow)
+  const burnPct = handedOut > 0n ? Number((burned * 100000n) / handedOut) / 1000 : 0
+
+  setHTML('s-round', `<div class="k">Round ${status.commit_round} · bets close in ${timer(status.commit_ends_at)}</div>
+      <div class="big">${fmt(cr?.committed ?? '0')} <span>FEWER in</span></div>
+      <div class="k">${cr?.commits ?? 0} sealed bet${cr?.commits === 1 ? '' : 's'} · sides hidden until the reveal opens</div>`)
+  setHTML('s-move', renderMove(cr))
+  applyStake()
+  setHTML('s-notice', `${notice ? `<p class="notice">${esc(notice)}</p>` : ''}${busy ? `<p class="notice">${esc(busy)}</p>` : ''}`)
+  setHTML('s-reveal', rr
+    ? `<div class="k">Round ${rr.round} · revealing · result in ${timer(status.reveal_ends_at)}</div>
+        <div class="vs"><span class="side-A">A ${fmt(rr.revealed_a)}</span><span class="side-B">B ${fmt(rr.revealed_b)}</span></div>
+        ${bar(BigInt(rr.revealed_a), BigInt(rr.revealed_b))}
+        <div class="k">${rr.reveals_a + rr.reveals_b} of ${rr.commits} bets opened · drand published the key, the keeper is opening them</div>`
+    : `<div class="k">No round is revealing right now.</div>`)
+  setHTML('s-stats', `
+    <div><div class="k">Handed out by the faucet</div><div class="v">${fmt(handedOut)}</div><div class="k">${fmt(status.faucet_reserve)} still in the launch reserve</div></div>
+    <div><div class="k">Burned so far</div><div class="v burn">${fmt(burned)}</div><div class="k">${burnPct}% of everything handed out · ${status.rounds_settled} rounds</div></div>
+    <div><div class="k">In players' hands</div><div class="v">${fmt(circulating)}</div><div class="k">${fmt(status.escrow)} locked in bets</div></div>
+    <div><div class="k">Longest minority streak</div><div class="v">${status.best_streak}</div><div class="k">${status.best_streak_holder ? esc(short(status.best_streak_holder)) : '—'}</div></div>`)
+  setHTML('s-mine', session && me && me.open.length ? `<section><h2>Your bets</h2><table><tr><th>Round</th><th>Stake</th><th>Your side</th><th>Status</th></tr>
+    ${me.open.map(o => { const p = loadPicks(session!.accountId)[o.round]; const rv = roundById(o.round)
+      const st = rv?.settled ? `settled: ${rv.outcome}` : o.side ? 'opened' : 'sealed'
+      return `<tr><td>${o.round}</td><td>${fmt(o.amount)}</td><td class="side-${p?.side ?? 'x'}">${p?.side ?? '?'}</td><td>${st}</td></tr>` }).join('')}
+    </table><p class="fine">W ${me.wins} · L ${me.losses} · void ${me.voids} · forfeited ${me.forfeits}</p></section>` : '')
+  setHTML('s-rounds', `<table class="rounds"><tr><th>Round</th><th>Bets</th><th>A</th><th>B</th><th>Smaller side</th><th>Burned</th></tr>
+    ${rounds.filter(r => r.round !== status.commit_round).map(r => `<tr>
+      <td>${r.round}</td><td>${r.commits}</td>
+      <td class="${r.outcome === 'A' ? 'win' : ''}">${r.reveals_a ? fmt(r.revealed_a) : '—'}</td>
+      <td class="${r.outcome === 'B' ? 'win' : ''}">${r.reveals_b ? fmt(r.revealed_b) : '—'}</td>
+      <td>${r.settled ? (r.outcome === 'void' ? 'void (refund)' : `<b class="side-${r.outcome}">${r.outcome}</b> doubles`) : (r.round === status.reveal_round ? 'revealing' : 'waiting for keeper')}</td>
+      <td class="burn">${r.settled ? fmt(r.burned) : ''}</td></tr>`).join('')}
+    </table>`)
   renderNpcs()
+  tick()
 }
 
 let npcCache: Record<string, PlayerV> = {}
@@ -193,11 +220,11 @@ async function loadNpcs() {
 function renderNpcs() {
   const el = document.getElementById('npcs')
   if (!el) return
-  el.innerHTML = NPCS.map(([id, name, about]) => {
+  setHTML('npcs', NPCS.map(([id, name, about]) => {
     const p = npcCache[id]
     return `<div class="npc"><b>${name}</b> <span class="fine">${about}</span>
       <div>${p ? `${fmt(p.balance)} FEWER · W ${p.wins} L ${p.losses} · streak ${p.streak}` : '…'}</div></div>`
-  }).join('')
+  }).join(''))
 }
 
 async function act(kind: string, el: HTMLElement) {
@@ -247,9 +274,12 @@ document.addEventListener('click', e => {
 })
 document.addEventListener('input', e => {
   const t = e.target as HTMLInputElement
-  if (t.id === 'amt') $('#amtv').textContent = t.value
+  if (t.id === 'amt') {
+    stakeChoice = Number(t.value)
+    $('#amtv').textContent = t.value
+  }
 })
-setInterval(() => document.querySelectorAll<HTMLElement>('.t[data-t]').forEach(el => (el.textContent = left(el.dataset.t!))), 1000)
+setInterval(tick, 1000)
 setInterval(() => !busy && refresh(), 6000)
 setInterval(() => loadNpcs(), 30000)
 await refresh(true)
