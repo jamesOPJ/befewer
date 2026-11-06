@@ -5,7 +5,7 @@ import {
 } from './chain'
 import * as H from './history'
 import { label } from './questions'
-import { decide, guard, normalizeRule, stakeFor, PRESETS, type Rule, type Lookup } from './rules'
+import { decide, guard, normalizeRule, stakeFor, meFrom, PRESETS, type Rule, type Lookup } from './rules'
 
 export type Side = 'A' | 'B'
 export type Result = { round: number; side: Side; amount: bigint; outcome: 'A' | 'B' | 'void' }
@@ -67,7 +67,7 @@ export const clock = (ms: number) => {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
 }
 export const roundById = (r: number | null) => (r == null ? undefined : game.rounds.find(x => Number(x.round) === r) ?? H.round(r))
-export const lookup: Lookup = { recent: H.recent, sameQuestion: H.sameQuestion, outcome: H.outcome }
+export const lookup: Lookup = { recent: H.recent, sameQuestion: H.sameQuestion, outcome: H.outcome, split: H.split }
 export const picks = () => (game.session ? loadPicks(game.session.accountId) : {})
 export const myOpen = (r: number) => game.me?.open.find(o => Number(o.round) === r)
 export const short = (a: string) => (a.length > 22 ? a.slice(0, 10) + '…' + a.slice(-10) : a)
@@ -243,8 +243,11 @@ export async function autopilotTick() {
   // "the round before" must mean the same thing as in the backtest: wait until it has finished
   const prev = H.round(r - 1)
   if (prev && !prev.settled) return
+  // "my last bet" must include my bet in the round before, so wait until it has been paid out
+  if (myOpen(r - 1)) return
   apDone.add(r)
-  const d = decide($state.snapshot(game.ap.live) as Rule[], r, guard(lookup, r))
+  const me = meFrom(game.results.map(x => ({ side: x.side, outcome: x.outcome })))
+  const d = decide($state.snapshot(game.ap.live) as Rule[], r, guard(lookup, r), me)
   if ('skip' in d) {
     apLog(r, 'skip', d.rule == null ? 'No rule fit, so it skipped.' : `Rule ${d.rule + 1} says skip.`)
     return
@@ -252,7 +255,7 @@ export async function autopilotTick() {
   try {
     if (!game.me) await ensurePlayer()
     const bal = Number(BigInt(game.me!.balance) / ONE)
-    const coins = stakeFor(d.unit, d.amount, bal)
+    const coins = stakeFor(d.unit, d.amount, bal, me)
     if (coins < 1) { apLog(r, 'skip', 'Balance too small to bet (the cap is 25% of it).'); return }
     const want = BigInt(coins) * ONE
     const placed = await placeBet(d.side, want, 'autopilot')

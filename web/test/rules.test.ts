@@ -1,13 +1,14 @@
 // node --test web/test/rules.test.ts   (Node 22+ strips the types)
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { decide, backtest, guard, coin, stakeFor, normalizeRule, PRESETS, type Lookup, type Outcome, type Rule } from '../src/rules.ts'
+import { decide, backtest, guard, coin, stakeFor, normalizeRule, meFrom, NOBODY, PRESETS, type Lookup, type Outcome, type Rule } from '../src/rules.ts'
 
 const Q = 100 // questions in the list
-function history(outcomes: Record<number, Outcome>): Lookup {
+function history(outcomes: Record<number, Outcome>, splits: Record<number, number> = {}): Lookup {
   const outcome = (r: number) => outcomes[r] ?? null
   return {
     outcome,
+    split: r => (splits[r] === undefined ? null : { a: splits[r], b: 1 - splits[r] }),
     recent(r, n) {
       const out: { round: number; outcome: Outcome }[] = []
       for (let t = r - 1; t >= 0 && out.length < n; t--) if (outcome(t)) out.push({ round: t, outcome: outcome(t)! })
@@ -108,4 +109,71 @@ test('with perfect foresight the guard would be the only thing stopping a 100% w
 
 test('presets are valid rules', () => {
   for (const p of PRESETS) assert.doesNotThrow(() => backtest(p.rules, 0, 300, history({ 5: 'A', 6: 'B', 105: 'A' })))
+})
+
+test('tally: a side won at least k of the last n finished rounds', () => {
+  const r: Rule[] = [{ cond: { kind: 'tally', winner: 'A', k: 4, n: 6 }, pick: 'other', unit: 'fixed', amount: 10 }]
+  const four = { 9: 'A', 8: 'B', 7: 'A', 6: 'A', 5: 'B', 4: 'A' } as Record<number, Outcome>
+  assert.deepEqual(decide(r, 10, history(four)), { side: 'B', unit: 'fixed', amount: 10, rule: 0 })
+  assert.deepEqual(decide(r, 10, history({ ...four, 4: 'B' })), { skip: true, rule: null }, 'only 3 of 6')
+  assert.deepEqual(decide(r, 10, history({ 9: 'A', 8: 'A', 7: 'A', 6: 'A' })), { skip: true, rule: null }, 'not 6 rounds of history yet')
+})
+
+test('margin: blowout vs close, from the revealed split of the round before', () => {
+  const blow: Rule[] = [{ cond: { kind: 'margin', mode: 'lopsided', winner: 'any' }, pick: 'other', unit: 'fixed', amount: 20 }]
+  const close: Rule[] = [{ cond: { kind: 'margin', mode: 'close', winner: 'A' }, pick: 'same', unit: 'fixed', amount: 5 }]
+  assert.deepEqual(decide(blow, 10, history({ 9: 'A' }, { 9: 0.2 })), { side: 'B', unit: 'fixed', amount: 20, rule: 0 })
+  assert.deepEqual(decide(blow, 10, history({ 9: 'A' }, { 9: 0.45 })), { skip: true, rule: null })
+  assert.deepEqual(decide(close, 10, history({ 9: 'A' }, { 9: 0.45 })), { side: 'A', unit: 'fixed', amount: 5, rule: 0 })
+  assert.deepEqual(decide(close, 10, history({ 9: 'B' }, { 9: 0.55 })), { skip: true, rule: null }, 'close, but B won')
+  assert.deepEqual(decide(blow, 10, history({ 9: 'void' }, { 9: 1 })), { skip: true, rule: null })
+})
+
+test('mine: my last bet won / lost / was refunded', () => {
+  const r: Rule[] = [
+    { cond: { kind: 'mine', result: 'won' }, pick: 'same', unit: 'fixed', amount: 10 },
+    { cond: { kind: 'mine', result: 'lost' }, pick: 'other', unit: 'fixed', amount: 10 },
+  ]
+  const L = history({})
+  assert.equal((decide(r, 5, L, meFrom([{ side: 'A', outcome: 'A' }])) as any).side, 'A')
+  assert.equal((decide(r, 5, L, meFrom([{ side: 'A', outcome: 'B' }])) as any).side, 'B')
+  assert.deepEqual(decide(r, 5, L, meFrom([{ side: 'A', outcome: 'void' }])), { skip: true, rule: null })
+  assert.deepEqual(decide(r, 5, L, NOBODY), { skip: true, rule: null }, 'no bets yet')
+})
+
+test('meFrom counts the current run and skips refunds', () => {
+  const lost2 = meFrom([{ side: 'A', outcome: 'B' }, { side: 'B', outcome: 'void' }, { side: 'B', outcome: 'A' }, { side: 'A', outcome: 'A' }])
+  assert.deepEqual([lost2.losses, lost2.wins], [2, 0])
+  const won1 = meFrom([{ side: 'B', outcome: 'B' }, { side: 'B', outcome: 'A' }])
+  assert.deepEqual([won1.losses, won1.wins], [0, 1])
+})
+
+test('martingale doubles after each loss and resets after a win; paroli rides 3 wins', () => {
+  const m = (losses: number, bal = 1000) => stakeFor('martingale', 2, bal, { last: null, wins: 0, losses })
+  assert.deepEqual([m(0), m(1), m(2), m(3)], [2, 4, 8, 16])
+  assert.equal(m(9, 100), 25, 'still capped at 25% of the balance')
+  const p = (wins: number) => stakeFor('paroli', 5, 1000, { last: null, wins, losses: 0 })
+  assert.deepEqual([p(0), p(1), p(2), p(3)], [5, 10, 20, 5])
+  // replay: always A, martingale from 2; outcomes B, B, A, B -> stakes 2, 4, 8, then back to 2 after the win
+  const bt = backtest([{ cond: { kind: 'always' }, pick: 'A', unit: 'martingale', amount: 2 }], 1, 4, history({ 1: 'B', 2: 'B', 3: 'A', 4: 'B' }))
+  assert.deepEqual(bt.curve.map(s => s.stake), [2, 4, 8, 2])
+  assert.equal(bt.end, 1000 - 2 - 4 + 8 - 2)
+  // paroli replay: always A from 5; outcomes A, A, A, A, B -> 5, 10, 20, back to 5, 10
+  const pb = backtest([{ cond: { kind: 'always' }, pick: 'A', unit: 'paroli', amount: 5 }], 1, 5, history({ 1: 'A', 2: 'A', 3: 'A', 4: 'A', 5: 'B' }))
+  assert.deepEqual(pb.curve.map(s => s.stake), [5, 10, 20, 5, 10])
+})
+
+test('stick or switch uses the replay\'s own previous bet', () => {
+  const stick = PRESETS.find(p => p.name === 'Stick or switch')!.rules
+  // first bet is random (coin), afterwards: keep after win, switch after loss
+  const bt = backtest(stick, 1, 4, history({ 1: 'A', 2: 'A', 3: 'B', 4: 'B' }))
+  for (let i = 1; i < bt.curve.length; i++) {
+    const prev = bt.curve[i - 1], cur = bt.curve[i]
+    const won = prev.outcome === prev.side
+    assert.equal(cur.side, won ? prev.side : prev.side === 'A' ? 'B' : 'A')
+  }
+})
+
+test('the guard also refuses a peek at the split of the round being decided', () => {
+  assert.throws(() => guard(history({ 3: 'A' }, { 3: 0.2 }), 3).split(3), /lookahead/)
 })

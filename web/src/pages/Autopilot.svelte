@@ -3,7 +3,7 @@
   import Icon from '../lib/Icon.svelte'
   import Equity from '../lib/Equity.svelte'
   import { label } from '../questions'
-  import { backtest, describe, PRESETS, type Rule, type Cond, type Pick, type Unit } from '../rules'
+  import { backtest, describe, PRESETS, PRESET_GROUPS, type Rule, type Cond, type Pick, type Unit } from '../rules'
   import { game, commitRound, lookup, saveRules, setAutopilot, draftDirty, putDraftLive, discardDraft, toast } from '../game.svelte'
 
   const WINDOW = 60
@@ -27,13 +27,17 @@
     return PRESETS.map(p => backtest(p.rules, Math.max(0, cur - WINDOW), cur - 1, lookup, 1000))
   })
 
-  const KINDS: [Cond['kind'], string][] = [['last', 'the round before'], ['streak', 'the last few rounds'], ['question', 'last time this question was asked'], ['always', 'anything else']]
+  const KINDS: [Cond['kind'], string][] = [
+    ['last', 'the round before'], ['margin', 'the round before was'], ['streak', 'the last few rounds'], ['tally', 'over the last rounds'],
+    ['question', 'last time this question was asked'], ['mine', 'my last bet'], ['always', 'anything else'],
+  ]
   function picksFor(c: Cond): [Pick, string][] {
-    return c.kind === 'always'
-      ? [['A', 'A'], ['B', 'B'], ['random', 'a random side'], ['skip', 'nothing (skip)']]
-      : [['same', 'that same side'], ['other', 'the other side'], ['A', 'A'], ['B', 'B'], ['random', 'a random side'], ['skip', 'nothing (skip)']]
+    if (c.kind === 'always') return [['A', 'A'], ['B', 'B'], ['random', 'a random side'], ['skip', 'nothing (skip)']]
+    const same = c.kind === 'mine' ? 'the side I picked' : 'that same side'
+    return [['same', same], ['other', 'the other side'], ['A', 'A'], ['B', 'B'], ['random', 'a random side'], ['skip', 'nothing (skip)']]
   }
   function winners(c: Cond): [string, string][] {
+    if (c.kind === 'margin') return [['any', 'whoever won it'], ['A', 'and A won it'], ['B', 'and B won it']]
     const all = c.kind === 'streak'
     return [['A', all ? 'were all won by A' : 'was won by A'], ['B', all ? 'were all won by B' : 'was won by B'], ['any', all ? 'were all won by one side' : 'had a winner']]
   }
@@ -42,7 +46,13 @@
   function setKind(i: number, v: Cond['kind']) {
     const r = game.ap.draft[i]
     const w = 'winner' in r.cond ? r.cond.winner : 'any'
-    r.cond = v === 'always' ? { kind: 'always' } : v === 'streak' ? { kind: 'streak', winner: w, n: 3 } : ({ kind: v, winner: w } as Cond)
+    r.cond =
+      v === 'always' ? { kind: 'always' }
+      : v === 'streak' ? { kind: 'streak', winner: w, n: 3 }
+      : v === 'tally' ? { kind: 'tally', winner: w === 'B' ? 'B' : 'A', k: 4, n: 6 }
+      : v === 'margin' ? { kind: 'margin', mode: 'lopsided', winner: w }
+      : v === 'mine' ? { kind: 'mine', result: 'lost' }
+      : ({ kind: v, winner: w } as Cond)
     if (v === 'always' && (r.pick === 'same' || r.pick === 'other')) r.pick = 'random'
     commit()
   }
@@ -62,12 +72,16 @@
   const fmtN = (v: number) => v.toLocaleString('en-US')
   const FIXED = [1, 2, 5, 10, 20, 50, 100]
   const PCTS = [1, 2, 5, 10, 25]
+  const BASES = [1, 2, 5, 10]
+  const CODE: Record<Unit, string> = { fixed: 'f', pct: 'p', martingale: 'm', paroli: 'r' }
+  const UNIT: Record<string, Unit> = { f: 'fixed', p: 'pct', m: 'martingale', r: 'paroli' }
   function setStake(i: number, v: string) {
     const [u, n] = v.split(':')
-    game.ap.draft[i].unit = (u === 'p' ? 'pct' : 'fixed') as Unit
+    game.ap.draft[i].unit = UNIT[u]
     game.ap.draft[i].amount = Number(n)
     commit()
   }
+  const has = (r: Rule, unit: Unit, list: number[]) => r.unit !== unit || list.includes(r.amount)
   const net = (b: { end: number; start: number }) => b.end - b.start
   const tone = (v: number) => (v > 0 ? 'good' : v < 0 ? 'burn' : '')
   const signed = (v: number) => (v > 0 ? '+' : v < 0 ? '−' : '±') + fmtN(Math.abs(v))
@@ -128,8 +142,32 @@
                   {#each [2, 3, 4, 5, 6] as n}<option value={String(n)}>{n} rounds</option>{/each}
                 </select>
               {/if}
-              {#if r.cond.kind !== 'always'}
-                <select aria-label="Winner" value={r.cond.winner} onchange={e => { if (r.cond.kind !== 'always') r.cond.winner = (e.currentTarget as HTMLSelectElement).value as any; commit() }}>
+              {#if r.cond.kind === 'margin'}
+                <select aria-label="Margin" value={r.cond.mode} onchange={e => { if (r.cond.kind === 'margin') r.cond.mode = (e.currentTarget as HTMLSelectElement).value as any; commit() }}>
+                  <option value="lopsided">a blowout (smaller side under 30%)</option>
+                  <option value="close">close (smaller side 40%+)</option>
+                </select>
+              {/if}
+              {#if r.cond.kind === 'tally'}
+                <select aria-label="Side" value={r.cond.winner} onchange={e => { if (r.cond.kind === 'tally') r.cond.winner = (e.currentTarget as HTMLSelectElement).value as any; commit() }}>
+                  <option value="A">A</option><option value="B">B</option>
+                </select>
+                <span class="w">won at least</span>
+                <select aria-label="At least" value={String(r.cond.k)} onchange={e => { if (r.cond.kind === 'tally') { r.cond.k = Number((e.currentTarget as HTMLSelectElement).value); if (r.cond.k > r.cond.n) r.cond.n = r.cond.k } commit() }}>
+                  {#each [2, 3, 4, 5, 6, 7] as n}<option value={String(n)}>{n}</option>{/each}
+                </select>
+                <span class="w">of the last</span>
+                <select aria-label="Of the last" value={String(r.cond.n)} onchange={e => { if (r.cond.kind === 'tally') { r.cond.n = Number((e.currentTarget as HTMLSelectElement).value); if (r.cond.k > r.cond.n) r.cond.k = r.cond.n } commit() }}>
+                  {#each [3, 4, 5, 6, 8, 10] as n}<option value={String(n)}>{n} rounds</option>{/each}
+                </select>
+              {/if}
+              {#if r.cond.kind === 'mine'}
+                <select aria-label="My last result" value={r.cond.result} onchange={e => { if (r.cond.kind === 'mine') r.cond.result = (e.currentTarget as HTMLSelectElement).value as any; commit() }}>
+                  <option value="won">won</option><option value="lost">lost</option><option value="void">was refunded</option>
+                </select>
+              {/if}
+              {#if r.cond.kind === 'last' || r.cond.kind === 'streak' || r.cond.kind === 'question' || r.cond.kind === 'margin'}
+                <select aria-label="Winner" value={r.cond.winner} onchange={e => { if ('winner' in r.cond) (r.cond as any).winner = (e.currentTarget as HTMLSelectElement).value; commit() }}>
                   {#each winners(r.cond) as [v, t]}<option value={v}>{t}</option>{/each}
                 </select>
               {/if}
@@ -139,12 +177,22 @@
               </select>
               {#if r.pick !== 'skip'}
                 <span class="w">with</span>
-                <select aria-label="Stake" value={`${r.unit === 'pct' ? 'p' : 'f'}:${r.amount}`} onchange={e => setStake(i, (e.currentTarget as HTMLSelectElement).value)}>
-                  {#each FIXED as n}<option value={`f:${n}`}>{n} BEFEWER</option>{/each}
-                  {#if r.unit === 'fixed' && !FIXED.includes(r.amount)}<option value={`f:${r.amount}`}>{r.amount} BEFEWER</option>{/if}
+                <select aria-label="Stake" value={`${CODE[r.unit]}:${r.amount}`} onchange={e => setStake(i, (e.currentTarget as HTMLSelectElement).value)}>
+                  <optgroup label="The same amount every time">
+                    {#each FIXED as n}<option value={`f:${n}`}>{n} BEFEWER</option>{/each}
+                    {#if !has(r, 'fixed', FIXED)}<option value={`f:${r.amount}`}>{r.amount} BEFEWER</option>{/if}
+                  </optgroup>
                   <optgroup label="Share of my balance">
                     {#each PCTS as n}<option value={`p:${n}`}>{n}% of balance</option>{/each}
-                    {#if r.unit === 'pct' && !PCTS.includes(r.amount)}<option value={`p:${r.amount}`}>{r.amount}% of balance</option>{/if}
+                    {#if !has(r, 'pct', PCTS)}<option value={`p:${r.amount}`}>{r.amount}% of balance</option>{/if}
+                  </optgroup>
+                  <optgroup label="Double after a loss (martingale)">
+                    {#each BASES as n}<option value={`m:${n}`}>{n}, doubled after each loss</option>{/each}
+                    {#if !has(r, 'martingale', BASES)}<option value={`m:${r.amount}`}>{r.amount}, doubled after each loss</option>{/if}
+                  </optgroup>
+                  <optgroup label="Double after a win (paroli)">
+                    {#each BASES as n}<option value={`r:${n}`}>{n}, doubled after each win</option>{/each}
+                    {#if !has(r, 'paroli', BASES)}<option value={`r:${r.amount}`}>{r.amount}, doubled after each win</option>{/if}
                   </optgroup>
                 </select>
               {/if}
@@ -162,17 +210,21 @@
 
     <section class="card block">
       <div class="bh"><h2>Start from a strategy</h2><span class="faint small">loads into the draft</span></div>
+      {#each PRESET_GROUPS as g}
+      <div class="pg eyebrow">{g}</div>
       <div class="presets">
-        {#each PRESETS as p, i}
+        {#each PRESETS.filter(x => x.group === g) as p}
+          {@const i = PRESETS.indexOf(p)}
           {@const b = presetBt[i]}
           <button class="preset" onclick={() => use(i)}>
             <span class="pn">{p.name}</span>
             <span class="pa small muted">{p.about}</span>
             {#if b.rounds}<span class="pr small num">staked {fmtN(b.staked)} → <b class={tone(net(b))}>{signed(net(b))}</b> <span class="faint">· last {b.rounds} rounds</span></span>{/if}
-            <span class="use small">Use this</span>
+            <span class="use small">Load into draft</span>
           </button>
         {/each}
       </div>
+      {/each}
     </section>
   </div>
 
@@ -265,6 +317,8 @@
   .ic:disabled { opacity: 0.3; cursor: default }
   @media (max-width: 520px) { .rule { grid-template-columns: 26px minmax(0, 1fr) } .ops { grid-column: 2 } .block { padding: 16px } }
   .foot { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 10px }
+  .pg { margin: 14px 0 8px }
+  .pg:first-of-type { margin-top: 2px }
   .presets { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px }
   .preset { display: grid; gap: 4px; text-align: left; padding: 14px; border-radius: 14px; border: 1px solid var(--line); background: var(--surface-2); cursor: pointer; color: var(--fg); transition: border-color 0.15s var(--ease) }
   .preset:hover { border-color: var(--fg-3) }
