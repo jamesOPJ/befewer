@@ -78,13 +78,13 @@ fn hash_hex(who: &AccountId, r: u64, side: &str, salt: &str) -> String {
 fn commit(c: &mut Contract, who: &AccountId, r: u64, side: &str, amount: u128) {
     ctx(who, t_commit(r));
     let s = salt(who, r);
-    let got = c.commit(U128(amount), hash_hex(who, r, side, &s));
+    let got = c.commit(U128(amount), hash_hex(who, r, side, &s), None);
     assert_eq!(got.0, r);
 }
 
 fn reveal(c: &mut Contract, who: &AccountId, r: u64, side: &str) {
     ctx(who, t_reveal(r));
-    c.reveal(U64(r), side.into(), salt(who, r));
+    c.reveal(U64(r), side.into(), salt(who, r), None);
 }
 
 fn faucet(c: &mut Contract, who: &AccountId) {
@@ -215,9 +215,9 @@ fn commit_hash_is_bound_to_account() {
     let s = salt(&a, 0);
     let h = hash_hex(&a, 0, "A", &s);
     ctx(&b, t_commit(0));
-    c.commit(U128(10 * ONE), h);
+    c.commit(U128(10 * ONE), h, None);
     ctx(&b, t_reveal(0));
-    c.reveal(U64(0), "A".into(), s);
+    c.reveal(U64(0), "A".into(), s, None);
 }
 
 #[test]
@@ -228,7 +228,7 @@ fn reveal_too_early_fails() {
     faucet(&mut c, &a);
     commit(&mut c, &a, 0, "A", 10 * ONE);
     ctx(&a, t_commit(0));
-    c.reveal(U64(0), "A".into(), salt(&a, 0));
+    c.reveal(U64(0), "A".into(), salt(&a, 0), None);
 }
 
 #[test]
@@ -239,7 +239,7 @@ fn reveal_too_late_fails() {
     faucet(&mut c, &a);
     commit(&mut c, &a, 0, "A", 10 * ONE);
     ctx(&a, t_after(0));
-    c.reveal(U64(0), "A".into(), salt(&a, 0));
+    c.reveal(U64(0), "A".into(), salt(&a, 0), None);
 }
 
 #[test]
@@ -318,8 +318,8 @@ fn rounds_overlap_commit_next_while_revealing_previous() {
     assert_eq!(st.commit_round.0, 1);
     assert_eq!(st.reveal_round.map(|x| x.0), Some(0));
     let s = salt(&a, 1);
-    assert_eq!(c.commit(U128(10 * ONE), hash_hex(&a, 1, "B", &s)).0, 1);
-    c.reveal(U64(0), "A".into(), salt(&a, 0));
+    assert_eq!(c.commit(U128(10 * ONE), hash_hex(&a, 1, "B", &s), None).0, 1);
+    c.reveal(U64(0), "A".into(), salt(&a, 0), None);
 }
 
 #[test]
@@ -466,4 +466,56 @@ fn random_play_keeps_invariants() {
     assert_eq!(s.escrow.0, 0, "everything claimed -> nothing left in escrow");
     check_invariants(&c, &players);
     assert!(s.total_burned.0 > 0);
+}
+
+#[test]
+fn keeper_reveals_from_the_sealed_ciphertext() {
+    let mut c = setup();
+    let (a, b, keeper) = (acc("alice.testnet"), acc("bob.testnet"), acc("keeper.testnet"));
+    faucet(&mut c, &a);
+    faucet(&mut c, &b);
+    for (who, side, amt) in [(&a, "A", 10 * ONE), (&b, "B", 20 * ONE)] {
+        ctx(who, t_commit(0));
+        let s = salt(who, 0);
+        c.commit(U128(amt), hash_hex(who, 0, side, &s), Some(format!("tlock-ciphertext-of-{}:{}", side, s)));
+    }
+    let list = c.get_round_commits(U64(0), 0, 10);
+    assert_eq!(list.len(), 2);
+    assert!(list.iter().all(|x| x.side.is_none() && x.sealed.is_some()));
+    // the keeper (not the players) reveals both after opening the timelock
+    ctx(&keeper, t_reveal(0));
+    c.reveal(U64(0), "A".into(), salt(&a, 0), Some(a.clone()));
+    c.reveal(U64(0), "B".into(), salt(&b, 0), Some(b.clone()));
+    let list = c.get_round_commits(U64(0), 0, 10);
+    assert_eq!(list[0].side.as_deref(), Some("A"));
+    assert!(list.iter().all(|x| x.sealed.is_none()), "ciphertext dropped on reveal");
+    ctx(&keeper, t_after(0));
+    c.claim(Some(a.clone()));
+    c.claim(Some(b.clone()));
+    assert_eq!(bal(&c, &a), (1000 + 10) * ONE);
+    assert_eq!(bal(&c, &b), (1000 - 20) * ONE);
+    assert!(c.get_round_commits(U64(0), 0, 10).is_empty(), "round list removed once fully claimed");
+    check_invariants(&c, &[a, b]);
+}
+
+#[test]
+#[should_panic(expected = "hash does not match")]
+fn keeper_cannot_reveal_a_different_side() {
+    let mut c = setup();
+    let (a, keeper) = (acc("alice.testnet"), acc("keeper.testnet"));
+    faucet(&mut c, &a);
+    commit(&mut c, &a, 0, "A", 10 * ONE);
+    ctx(&keeper, t_reveal(0));
+    c.reveal(U64(0), "B".into(), salt(&a, 0), Some(a.clone()));
+}
+
+#[test]
+#[should_panic(expected = "sealed must be 1..1024 bytes")]
+fn sealed_ciphertext_is_bounded() {
+    let mut c = setup();
+    let a = acc("alice.testnet");
+    faucet(&mut c, &a);
+    ctx(&a, t_commit(0));
+    let s = salt(&a, 0);
+    c.commit(U128(10 * ONE), hash_hex(&a, 0, "A", &s), Some("x".repeat(MAX_SEALED_LEN + 1)));
 }

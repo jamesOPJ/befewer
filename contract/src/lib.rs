@@ -46,6 +46,7 @@ enum StorageKey {
     Commits,
     Players,
     FaucetClaimed,
+    RoundPlayers,
 }
 
 /// Launch parameters. Fixed forever once `new` runs.
@@ -88,7 +89,14 @@ pub struct Commit {
     pub hash: [u8; 32],
     pub amount: u128,
     pub side: u8,
+    /// Optional drand timelock ciphertext of "<A|B>:<salt>", sealed to the drand round at
+    /// this round's reveal start. Lets anyone reveal for the player once drand publishes
+    /// that round. Dropped on reveal to free storage.
+    pub sealed: Option<String>,
 }
+
+/// Longest accepted `sealed` ciphertext (tlock armored output is ~580 bytes).
+pub const MAX_SEALED_LEN: usize = 1024;
 
 #[near(serializers = [borsh])]
 #[derive(Default, Clone)]
@@ -116,6 +124,9 @@ pub struct Contract {
     escrow: u128,
     rounds: LookupMap<u64, Round>,
     commits: LookupMap<(u64, AccountId), Commit>,
+    /// Accounts that committed in a round, so keepers can enumerate commits to reveal.
+    /// Removed once every commit of the round is claimed.
+    round_players: LookupMap<u64, Vec<AccountId>>,
     players: LookupMap<AccountId, Player>,
     faucet_claimed: LookupSet<AccountId>,
     total_burned: u128,
@@ -174,6 +185,15 @@ pub struct OpenCommitView {
     pub amount: U128,
     /// "A", "B", or null if not revealed yet.
     pub side: Option<String>,
+}
+
+#[near(serializers = [json])]
+pub struct RoundCommitView {
+    pub account_id: AccountId,
+    pub amount: U128,
+    /// "A", "B", or null if not revealed yet.
+    pub side: Option<String>,
+    pub sealed: Option<String>,
 }
 
 #[near(serializers = [json])]
@@ -265,6 +285,7 @@ impl Contract {
             escrow: 0,
             rounds: LookupMap::new(StorageKey::Rounds),
             commits: LookupMap::new(StorageKey::Commits),
+            round_players: LookupMap::new(StorageKey::RoundPlayers),
             players: LookupMap::new(StorageKey::Players),
             faucet_claimed: LookupSet::new(StorageKey::FaucetClaimed),
             total_burned: 0,
@@ -314,13 +335,18 @@ impl Contract {
 
     /// Lock `amount` into the round currently taking commits, hidden behind
     /// `hash = sha256("fewer:<account>:<round>:<A|B>:<salt>")` as lowercase hex.
+    /// `sealed` (optional) is the drand timelock ciphertext of "<A|B>:<salt>" so that a
+    /// keeper can reveal for the player; without it the player must reveal manually.
     /// No attached deposit, so the app's function-call key can sign it without a popup.
-    pub fn commit(&mut self, amount: U128, hash: String) -> U64 {
+    pub fn commit(&mut self, amount: U128, hash: String, sealed: Option<String>) -> U64 {
         let who = env::predecessor_account_id();
         let now = env::block_timestamp();
         let r = self.commit_round_at(now);
         let amount = amount.0;
         let hash = parse_hash(&hash);
+        if let Some(s) = &sealed {
+            require!(!s.is_empty() && s.len() <= MAX_SEALED_LEN, "sealed must be 1..1024 bytes");
+        }
         require!(amount >= self.params.min_stake.0, "stake below min_stake");
         let balance = self.token.accounts.get(&who).unwrap_or_else(|| {
             env::panic_str("account is not registered for FEWER: claim the faucet or storage_deposit first")
@@ -337,19 +363,23 @@ impl Contract {
 
         self.token.internal_transfer(&who, &env::current_account_id(), amount, Some(format!("commit round {}", r)));
         self.escrow += amount;
-        self.commits.insert(key, Commit { hash, amount, side: SIDE_NONE });
+        let has_sealed = sealed.is_some();
+        self.commits.insert(key, Commit { hash, amount, side: SIDE_NONE, sealed });
+        self.round_players.entry(r).or_default().push(who.clone());
         player.open_rounds.push(r);
         self.players.insert(who.clone(), player);
         let round = self.rounds.entry(r).or_default();
         round.committed += amount;
         round.commits += 1;
-        emit("commit", json!({"account_id": who, "round": U64(r), "amount": U128(amount)}));
+        emit("commit", json!({"account_id": who, "round": U64(r), "amount": U128(amount), "sealed": has_sealed}));
         U64(r)
     }
 
-    /// Reveal a commit during its round's reveal window.
-    pub fn reveal(&mut self, round: U64, side: String, salt: String) {
-        let who = env::predecessor_account_id();
+    /// Reveal a commit during its round's reveal window. Anyone can reveal for anyone
+    /// (`account_id`, default: caller): the hash binds account, round, side and salt, so
+    /// only the side that was committed can ever be revealed.
+    pub fn reveal(&mut self, round: U64, side: String, salt: String, account_id: Option<AccountId>) {
+        let who = account_id.unwrap_or_else(env::predecessor_account_id);
         let now = env::block_timestamp();
         let r = round.0;
         require!(now >= self.round_reveal_start(r), "reveal window has not opened yet");
@@ -362,6 +392,7 @@ impl Contract {
         let digest = env::sha256(commit_preimage(&who, r, &side, &salt).as_bytes());
         require!(digest.as_slice() == c.hash.as_slice(), "hash does not match side+salt");
         c.side = s;
+        c.sealed = None;
         let amount = c.amount;
         let round = self.rounds.get_mut(&r).expect("round exists when a commit exists");
         if s == SIDE_A {
@@ -371,7 +402,11 @@ impl Contract {
             round.revealed_b += amount;
             round.reveals_b += 1;
         }
-        emit("reveal", json!({"account_id": who, "round": U64(r), "side": side, "amount": U128(amount)}));
+        emit(
+            "reveal",
+            json!({"account_id": who, "round": U64(r), "side": side, "amount": U128(amount),
+                   "by": env::predecessor_account_id()}),
+        );
     }
 
     /// Settle a round after its reveal window. Anyone can call; idempotent.
@@ -468,8 +503,15 @@ impl Contract {
                 self.best_streak = player.streak;
                 self.best_streak_holder = Some(who.clone());
             }
-            if let Some(round) = self.rounds.get_mut(&r) {
-                round.claims += 1;
+            let fully_claimed = match self.rounds.get_mut(&r) {
+                Some(round) => {
+                    round.claims += 1;
+                    round.claims == round.commits
+                }
+                None => false,
+            };
+            if fully_claimed {
+                self.round_players.remove(&r);
             }
             emit(
                 "claim",
@@ -547,6 +589,24 @@ impl Contract {
             scanned += 1;
         }
         out
+    }
+
+    /// Commits of a round in commit order, for keepers: who, how much, revealed side (if
+    /// any) and the timelock ciphertext (only while unrevealed). Empty once fully claimed.
+    pub fn get_round_commits(&self, round: U64, from_index: u32, limit: u32) -> Vec<RoundCommitView> {
+        let Some(list) = self.round_players.get(&round.0) else { return vec![] };
+        list.iter()
+            .skip(from_index as usize)
+            .take(limit.min(100) as usize)
+            .filter_map(|a| {
+                self.commits.get(&(round.0, a.clone())).map(|c| RoundCommitView {
+                    account_id: a.clone(),
+                    amount: U128(c.amount),
+                    side: side_str(c.side),
+                    sealed: c.sealed.clone(),
+                })
+            })
+            .collect()
     }
 
     pub fn get_player(&self, account_id: AccountId) -> PlayerView {
