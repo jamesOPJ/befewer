@@ -58,3 +58,11 @@ td.win { color: var(--good); font-weight: 700 }
 .notice.busy::before { content: '⏳ ' }
 .good { color: var(--good) }
 .last { margin: .7rem 0 0; padding: .5rem .7rem; background: #27241f; border-radius: 8px }
+details.rules { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: .7rem 1rem; margin: 1rem 0 }
+details.rules summary { cursor: pointer; list-style: none; display: flex; gap: .6rem; align-items: baseline; flex-wrap: wrap }
+details.rules summary::-webkit-details-marker { display: none }
+details.rules summary::before { content: '▸'; color: var(--accent); transition: transform .15s; display: inline-block }
+details.rules[open] summary::before { transform: rotate(90deg) }
+details.rules .gist { color: var(--fg-dim); font-size: .92rem }
+details.rules[open] .gist { display: none }
+details.rules ol { margin: .5rem 0 }

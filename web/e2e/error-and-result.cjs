@@ -3,7 +3,7 @@
 const puppeteer = require('/root/dota/node_modules/puppeteer')
 const [URL = 'http://127.0.0.1:5043/', MODE = 'error'] = process.argv.slice(2)
 ;(async () => {
-  const b = await puppeteer.launch({ headless: 'new', args: ['--no-sandbox'] })
+  const b = await puppeteer.launch({ headless: 'new', args: ['--no-sandbox'], protocolTimeout: 20 * 60_000 }) // a round takes ~8 min; default is 3
   const p = await b.newPage()
   await p.setViewport({ width: 390, height: 844, isMobile: true, hasTouch: true })
   if (MODE === 'error') {

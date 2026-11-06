@@ -175,6 +175,18 @@ function render() {
     <p class="sub">A memecoin whose daily ritual is a sealed-bid minority game on NEAR. The minority doubles, the imbalance burns.</p>
     <p class="testnet">Testnet demo built for NEAR HACKATHON. Testnet FEWER is free and has no monetary value; there is no token sale.</p>
   </header>
+  <details class="rules" id="rules">
+    <summary><b>How to play</b> <span class="gist">Bet on the side you think <b>fewer coins</b> will pick. Win: 2× back. Lose: your stake. The gap burns.</span></summary>
+    <p class="fine">All of this is enforced by the contract. There is no owner and no admin.</p>
+    <ol>
+      <li>Every round you can bet up to 25% of your balance on A or B. Your side is sealed: the contract stores only a hash.</li>
+      <li>Your browser also locks your side with a <a href="https://drand.love" target="_blank" rel="noopener">drand</a> timelock that opens when the reveal window opens. Then anyone can open it and reveal it for you, so you never have to come back.</li>
+      <li>After the reveal window, the side with <b>less</b> revealed FEWER wins. Winners get exactly 2× their stake. Losers lose their stake.</li>
+      <li>The gap between the sides is burned, along with every bet that was never revealed. A tie or a one-sided round refunds everyone.</li>
+      <li>Supply only goes down: everything was minted once at launch, there is no mint function and no owner.</li>
+    </ol>
+    <p class="fine">Contract <a href="${EXPLORER}/address/${CONTRACT}" target="_blank" rel="noopener">${CONTRACT}</a> · this demo runs a round every ${Number(BigInt(params.commit_ns) / 60_000_000_000n)} minutes; the mechanic is designed for one round a day.</p>
+  </details>
   <section class="live">
     <div class="card now"><div id="s-round"></div><div id="s-last"></div><div id="s-move"></div><div id="s-notice"></div></div>
     <div class="card reveal" id="s-reveal"></div>
@@ -186,17 +198,11 @@ function render() {
     <p class="fine">Rounds nobody played are skipped. The burn is |A − B| plus any bet that was never opened.</p></section>
   <section><h2>NPC players</h2><p class="fine">Four bots with their own testnet wallets keep every round alive. They play by the same rules as you.</p>
     <div class="npcs" id="npcs"></div></section>
-  <section class="rules"><h2>Rules (enforced by the contract, no admin)</h2>
-    <ol>
-      <li>Every round you can bet up to 25% of your balance on A or B. Your side is sealed: the contract stores only a hash.</li>
-      <li>Your browser also locks your side with a <a href="https://drand.love" target="_blank" rel="noopener">drand</a> timelock that opens when the reveal window opens. Then anyone can open it and reveal it for you, so you never have to come back.</li>
-      <li>After the reveal window, the side with <b>less</b> revealed FEWER wins. Winners get exactly 2× their stake. Losers lose their stake.</li>
-      <li>The gap between the sides is burned, along with every bet that was never revealed. A tie or a one-sided round refunds everyone.</li>
-      <li>Supply only goes down: everything was minted once at launch, there is no mint function and no owner.</li>
-    </ol>
-    <p class="fine">Contract <a href="${EXPLORER}/address/${CONTRACT}" target="_blank" rel="noopener">${CONTRACT}</a> · this demo runs a round every ${Number(BigInt(params.commit_ns) / 60_000_000_000n)} minutes; the mechanic is designed for one round a day.</p>
-  </section>`
+`
     skeleton = true
+    const det = document.getElementById('rules') as HTMLDetailsElement
+    det.open = localStorage.getItem('fewer.rules') !== 'closed'
+    det.addEventListener('toggle', () => localStorage.setItem('fewer.rules', det.open ? 'open' : 'closed'))
   }
   const cr = roundById(status.commit_round)
   const rr = roundById(status.reveal_round)
