@@ -1,0 +1,93 @@
+/* BEFEWER design tokens. Warm dark canvas, ~10:1 text contrast (no halation), one brand
+   accent, two side colours. Every colour lives here; components only use the variables. */
+:root {
+  --bg: #161412;
+  --bg-2: #1b1916;
+  --surface: #211f1c;
+  --surface-2: #292623;
+  --surface-3: #312d29;
+  --line: #36322d;
+  --line-soft: #2b2824;
+  --fg: #d6cfc4;
+  --fg-2: #a29a8f;
+  --fg-3: #7f786e;
+  --brand: #e8b65e;
+  --brand-ink: #1a1408;
+  /* side colours: validated with the dataviz palette checker on --surface (dark): band, chroma, CVD, contrast all pass */
+  --a: #bd8739;
+  --a-soft: rgba(189, 135, 57, 0.16);
+  --a-line: rgba(189, 135, 57, 0.55);
+  --b: #5e98d8;
+  --b-soft: rgba(94, 152, 216, 0.16);
+  --b-line: rgba(94, 152, 216, 0.55);
+  --good: #8cbb7f;
+  --good-soft: rgba(140, 187, 127, 0.12);
+  --burn: #dc7f63;
+  --burn-soft: rgba(220, 127, 99, 0.12);
+  --err-bg: #3a2320;
+  --err-line: #6c3b34;
+  --err-fg: #f2d5cf;
+
+  --r-sm: 8px;
+  --r: 12px;
+  --r-lg: 18px;
+  --shadow: 0 1px 0 rgba(255, 255, 255, 0.03) inset, 0 10px 30px rgba(0, 0, 0, 0.28);
+  --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --nav-h: 64px;
+
+  --font: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box }
+html { -webkit-text-size-adjust: 100%; background: var(--bg) }
+body {
+  margin: 0; min-height: 100vh; background:
+    radial-gradient(1200px 600px at 10% -10%, rgba(232, 182, 94, 0.06), transparent 60%),
+    radial-gradient(900px 500px at 110% 10%, rgba(134, 172, 208, 0.05), transparent 60%), var(--bg);
+  color: var(--fg); font: 400 16px/1.5 var(--font); -webkit-font-smoothing: antialiased;
+}
+a { color: var(--brand); text-decoration: none }
+a:hover { text-decoration: underline }
+button { font: inherit; color: inherit }
+:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; border-radius: 6px }
+.num { font-variant-numeric: tabular-nums }
+.muted { color: var(--fg-2) }
+.faint { color: var(--fg-3) }
+/* text keeps text ink; the side's colour rides on a dot beside it */
+.side-A, .side-B { color: var(--fg) }
+.side-A::before, .side-B::before { content: ''; display: inline-block; width: 0.55em; height: 0.55em; border-radius: 50%; margin: 0 0.32em 0.08em 0.05em; vertical-align: middle }
+.side-A::before { background: var(--a) }
+.side-B::before { background: var(--b) }
+.good { color: var(--good) }
+.burn { color: var(--burn) }
+h1, h2, h3 { margin: 0; letter-spacing: -0.015em; color: var(--fg) }
+
+.card {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.015), transparent 40%), var(--surface);
+  border: 1px solid var(--line-soft); border-radius: var(--r-lg); box-shadow: var(--shadow);
+}
+.eyebrow { font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--fg-3) }
+.pill {
+  display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px;
+  font-size: 12px; font-weight: 600; background: var(--surface-2); border: 1px solid var(--line); color: var(--fg-2);
+}
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 44px; padding: 0 18px;
+  border-radius: var(--r); border: 1px solid var(--line); background: var(--surface-2); cursor: pointer;
+  transition: background 0.15s var(--ease), border-color 0.15s var(--ease), transform 0.1s var(--ease);
+}
+.btn:hover:not(:disabled) { background: var(--surface-3) }
+.btn:active:not(:disabled) { transform: translateY(1px) }
+.btn:disabled { opacity: 0.45; cursor: default }
+.btn.primary { background: var(--brand); color: var(--brand-ink); border-color: transparent; font-weight: 700 }
+.btn.primary:hover:not(:disabled) { background: #f0c26f }
+.btn.ghost { background: transparent }
+.btn.small { min-height: 34px; padding: 0 12px; font-size: 14px; border-radius: 10px }
+select, input[type='number'] {
+  font: inherit; font-size: 15px; color: var(--fg); background: var(--surface-2); border: 1px solid var(--line);
+  border-radius: 10px; padding: 6px 10px; min-height: 36px; max-width: 100%;
+}
+select { appearance: none; padding-right: 28px; background-image: linear-gradient(45deg, transparent 50%, var(--fg-2) 50%), linear-gradient(135deg, var(--fg-2) 50%, transparent 50%); background-position: calc(100% - 14px) 52%, calc(100% - 9px) 52%; background-size: 5px 5px; background-repeat: no-repeat }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important } }

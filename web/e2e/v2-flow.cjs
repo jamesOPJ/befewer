@@ -1,0 +1,33 @@
+// New app, phone size: pick an answer -> seal -> sealed panel; Me shows the bet; Autopilot bets by itself next round.
+const puppeteer = require('/root/dota/node_modules/puppeteer')
+const URL = process.argv[2] || 'http://127.0.0.1:5043/'
+;(async () => {
+  const b = await puppeteer.launch({ headless: 'new', args: ['--no-sandbox'], protocolTimeout: 15 * 60_000 })
+  const p = await b.newPage()
+  const errors = []
+  p.on('pageerror', e => errors.push(String(e)))
+  await p.setViewport({ width: 390, height: 844, isMobile: true, hasTouch: true })
+  await p.goto(URL, { waitUntil: 'networkidle2' })
+  await p.waitForSelector('.answer.B')
+  const ctaBefore = await p.$eval('.cta', e => e.textContent.trim())
+  await p.tap('.answer.B')
+  const ctaAfter = await p.$eval('.cta', e => e.textContent.trim())
+  console.log('CTA before/after picking:', JSON.stringify(ctaBefore), '->', JSON.stringify(ctaAfter))
+  await p.tap('.cta')
+  await p.waitForFunction(() => document.querySelector('.sealed') || [...document.querySelectorAll('.toast.err')].length, { timeout: 120000 })
+  const err = await p.$('.toast.err')
+  if (err) { console.log('FAILED:', await p.evaluate(e => e.textContent, err)); process.exit(1) }
+  console.log('sealed panel:', (await p.$eval('.sealed', e => e.innerText)).replace(/\s+/g, ' ').slice(0, 140))
+  await p.goto(URL + '#/me', { waitUntil: 'networkidle2' })
+  await p.waitForSelector('.money')
+  console.log('me:', (await p.$eval('main', e => e.innerText)).replace(/\s+/g, ' ').slice(0, 220))
+  await p.goto(URL + '#/autopilot', { waitUntil: 'networkidle2' })
+  await p.waitForSelector('.preset')
+  await p.evaluate(() => [...document.querySelectorAll('.preset')].find(x => /Echo/.test(x.textContent)).click())
+  await p.evaluate(() => document.querySelector('.switch input').click())
+  const t0 = Date.now()
+  await p.waitForSelector('.log li', { timeout: 8 * 60_000 })
+  console.log(`autopilot log after ${Math.round((Date.now() - t0) / 1000)} s:`, (await p.$eval('.log li', e => e.innerText)).replace(/\s+/g, ' '))
+  console.log('errors:', errors.length ? errors : 'none')
+  await b.close()
+})().catch(e => { console.error('E2E FAILED', e.message); process.exit(1) })

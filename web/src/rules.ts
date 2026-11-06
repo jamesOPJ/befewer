@@ -70,25 +70,27 @@ export function decide(rules: Rule[], r: number, L: Lookup): Decision {
   return { skip: true, rule: null }
 }
 
-export type Backtest = { rounds: number; bets: number; wins: number; losses: number; voids: number; skips: number; start: number; end: number }
+export type Step = { round: number; side: Side | null; outcome: Outcome; stake: number; bal: number }
+export type Backtest = { rounds: number; bets: number; wins: number; losses: number; voids: number; skips: number; start: number; end: number; curve: Step[] }
 
 /** Replay `rules` over finished rounds from..to, starting with `start` coins, compounding.
  *  Assumes your own bet would not have changed which side was smaller. */
 export function backtest(rules: Rule[], from: number, to: number, L: Lookup, start = 1000): Backtest {
-  const bt: Backtest = { rounds: 0, bets: 0, wins: 0, losses: 0, voids: 0, skips: 0, start, end: start }
+  const bt: Backtest = { rounds: 0, bets: 0, wins: 0, losses: 0, voids: 0, skips: 0, start, end: start, curve: [] }
   let bal = start
   for (let t = from; t <= to; t++) {
     const o = L.outcome(t)
     if (!o) continue // nobody played that round
     bt.rounds++
     const d = decide(rules, t, guard(L, t))
-    if ('skip' in d) { bt.skips++; continue }
+    if ('skip' in d) { bt.skips++; bt.curve.push({ round: t, side: null, outcome: o, stake: 0, bal }); continue }
     const stake = Math.max(1, Math.floor((bal * d.pct) / 100))
-    if (stake > bal) { bt.skips++; continue }
+    if (stake > bal) { bt.skips++; bt.curve.push({ round: t, side: null, outcome: o, stake: 0, bal }); continue }
     bt.bets++
     if (o === 'void') bt.voids++
     else if (o === d.side) { bt.wins++; bal += stake }
     else { bt.losses++; bal -= stake }
+    bt.curve.push({ round: t, side: d.side, outcome: o, stake, bal })
   }
   bt.end = bal
   return bt
