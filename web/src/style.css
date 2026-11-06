@@ -71,3 +71,7 @@ details.rules ol { margin: .5rem 0 }
 .amt { color: var(--fg) }
 .pick button small { display: block; font-size: 1rem; font-weight: 600; margin-top: .15rem; overflow-wrap: anywhere }
 td .fine { font-size: .78rem; font-weight: 400; color: var(--fg-dim); text-align: inherit }
+/* long answers ("100 tiny horses") must wrap instead of widening the page on phones */
+th, td { overflow-wrap: anywhere }
+.vs span { overflow-wrap: anywhere; min-width: 0 }
+@media (max-width: 760px) { .rounds th:nth-child(2), .rounds td:nth-child(2) { display: none } }

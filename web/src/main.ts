@@ -87,7 +87,7 @@ function renderMove(_cr: RoundV | undefined): string {
   const cap = (bal * BigInt(params.max_stake_bps)) / 10000n
   if (cap < BigInt(params.min_stake)) return `<div class="move">${head}<p>Your balance is too small to play (max stake is 25% of your balance).</p></div>`
   const maxW = Number(cap / ONE)
-  const def = Math.max(1, Math.round(maxW / 2)) // the player's own choice is applied after painting (applyStake)
+  const def = 1 // start at the minimum; the player's own choice is applied after painting (applyStake)
   return `<div class="move">${head}
     <label class="stake">Stake <input id="amt" type="range" min="1" max="${maxW}" value="${def}"><b id="amtv">${def}</b> BEFEWER <span class="fine">(max 25% of balance)</span></label>
     <div class="pick"><button class="side-A" data-act="commit" data-side="A" ${busy ? 'disabled' : ''}>A<small>${esc(questionFor(r).a)}</small></button>
