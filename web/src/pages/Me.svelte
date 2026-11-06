@@ -1,7 +1,7 @@
 <script lang="ts">
   import Icon from '../lib/Icon.svelte'
   import { questionFor, label } from '../questions'
-  import { game, fmt, fmtN, netOf, GUEST_GAME_NEAR, short, picks, forgetDevice, toast, commitRound, withdrawAll, claimBefewer, claimPreview } from '../game.svelte'
+  import { game, fmt, fmtN, netOf, GUEST_GAME_NEAR, short, picks, forgetDevice, toast, commitRound, withdrawAll, claimBefewer, claimPreview, openWallet, depositMore, disconnectWallet } from '../game.svelte'
 
   const me = $derived(game.me)
   const decided = $derived(me ? me.wins + me.losses : 0)
@@ -14,6 +14,9 @@
   }
   const preview = $derived(me ? claimPreview(me) : null)
   const feePct = $derived((game.params?.refine_fee_bps ?? 0) / 100)
+  async function deposit(n: number) {
+    try { await depositMore(n) } catch (e: any) { toast('err', String(e.message || e)) }
+  }
   async function withdraw() {
     try { await withdrawAll() } catch (e: any) { toast('err', String(e.message || e)) }
   }
@@ -41,7 +44,12 @@
       <div class="money num">{fmtN(me.balance)} <span>NEAR</span></div>
       <div class="tok"><b class="num">{fmt(me.tokens)}</b> BEFEWER in your wallet <span class="faint">· {fmt(me.mined)} mined by your streaks</span></div>
       <button class="acct" onclick={copy} title="Copy account name"><span class="num">{short(game.session.accountId)}</span><Icon name="copy" size={15} /></button>
-      <div class="faint small">Testnet account kept in this browser · {me.open.length} bet{me.open.length === 1 ? '' : 's'} waiting to settle</div>
+      <div class="faint small">{game.session.kind === 'wallet' ? 'Your wallet account · bets signed by a game-only key in this browser' : 'Testnet guest account kept in this browser'} · {me.open.length} bet{me.open.length === 1 ? '' : 's'} waiting to settle</div>
+      {#if game.session.kind === 'wallet'}
+        <div class="row wrap">
+          {#each [0.5, 1, 2] as n}<button class="btn small" onclick={() => deposit(n)} disabled={!!game.busy}>Deposit {n} NEAR</button>{/each}
+        </div>
+      {/if}
       <button class="btn small wd" onclick={withdraw} disabled={!!game.busy || BigInt(me.balance) === 0n}>Withdraw {fmtN(me.balance)} NEAR to the wallet</button>
     </div>
     <div class="card score">
@@ -117,6 +125,16 @@
     {/if}
   </section>
 
+  <section class="card walletbox">
+    {#if game.session.kind === 'wallet'}
+      <div><h3>Wallet connected</h3><p class="small muted">Disconnecting only forgets the game key in this browser. To remove the key from your account, delete it in your wallet's key settings.</p></div>
+      <button class="btn small" onclick={disconnectWallet}>Disconnect</button>
+    {:else}
+      <div><h3>Play with your own wallet</h3><p class="small muted">Connect a NEAR testnet wallet, approve once, and bet from your own account without popups. This guest account is kept and comes back if you disconnect.</p></div>
+      <button class="btn small primary" onclick={openWallet}>Connect wallet</button>
+    {/if}
+  </section>
+
   <section class="danger card">
     <div>
       <h3>Forget this device</h3>
@@ -143,6 +161,10 @@
   .money { font-size: 40px; font-weight: 800; letter-spacing: -0.02em; line-height: 1.1 }
   .money span { font-size: 15px; font-weight: 600; color: var(--fg-3); margin-left: 4px }
   .tok { font-size: 15px; color: var(--fg-2) }
+  .wrap { flex-wrap: wrap; margin-top: 4px }
+  .walletbox { display: flex; justify-content: space-between; gap: 16px; align-items: center; padding: 16px 18px; flex-wrap: wrap }
+  .walletbox h3 { font-size: 15px }
+  .walletbox p { margin: 4px 0 0; max-width: 520px }
   .befewer { padding: 16px 20px; display: grid; gap: 10px; margin-bottom: 12px }
   .befewer p { margin: 0 }
   .befewer .btn { justify-self: start }

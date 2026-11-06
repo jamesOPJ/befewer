@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte'
-  import { game, start, fmt, fmtN, short } from './game.svelte'
+  import { game, start, fmt, fmtN, short, openWallet } from './game.svelte'
+  import WalletModal from './lib/WalletModal.svelte'
   import Icon from './lib/Icon.svelte'
   import Toasts from './lib/Toasts.svelte'
   import Play from './pages/Play.svelte'
@@ -39,6 +40,7 @@
     </nav>
     <div class="right">
       <span class="pill testnet" title="Testnet NEAR and BEFEWER are free and have no monetary value">Testnet</span>
+      {#if game.session?.kind !== 'wallet'}<button class="pill connect" onclick={openWallet}>Connect wallet</button>{/if}
       {#if game.me}
         <a class="pill bal num" href="#/me" title={game.session?.accountId}>{fmtN(game.me.balance, 3)} <span class="faint">NEAR</span>{#if BigInt(game.me.tokens) + BigInt(game.me.unrefined) + BigInt(game.me.refined) > 0n} · {fmt(BigInt(game.me.tokens) + BigInt(game.me.unrefined) + BigInt(game.me.refined))} <span class="faint">BEFEWER</span>{/if}</a>
       {/if}
@@ -58,6 +60,7 @@
   {:else if page === 'me'}<Me />
   {:else if page === 'how'}<How />
   {:else}<Play />{/if}
+  <WalletModal />
 </main>
 
 <nav class="tabs-bottom" aria-label="Main">
@@ -97,4 +100,6 @@
   .sk { border-radius: var(--r-lg); background: linear-gradient(90deg, var(--surface) 0%, var(--surface-2) 50%, var(--surface) 100%); background-size: 200% 100%; animation: sh 1.4s linear infinite }
   .sk1 { height: 260px } .sk2 { height: 140px } .sk3 { height: 200px }
   @keyframes sh { to { background-position: -200% 0 } }
+  .connect { cursor: pointer; border: 1px solid var(--line); background: var(--surface-2); color: var(--fg) }
+  @media (max-width: 520px) { .connect { font-size: 12px; padding: 4px 9px } }
 </style>

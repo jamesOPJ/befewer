@@ -6,7 +6,7 @@
   import Orbs from '../lib/Orbs.svelte'
   import Icon from '../lib/Icon.svelte'
   import {
-    game, fmt, fmtN, toNear, toYocto, feeFor, GUEST_GAME_NEAR, commitRound, revealRound, started, msLeft, clock, roundById, myOpen, picks, placeBet, capFor, toast,
+    game, fmt, fmtN, toNear, toYocto, feeFor, GUEST_GAME_NEAR, openWallet, commitRound, revealRound, started, msLeft, clock, roundById, myOpen, picks, placeBet, capFor, toast,
     type Side,
   } from '../game.svelte'
 
@@ -152,7 +152,8 @@
         {:else}<Icon name="lock" size={18} /> Seal {fmtN(stakeY)} NEAR on {side === 'A' ? q.a : q.b}{/if}
       </button>
       <p class="fine">
-        {#if newcomer}Your first bet creates a free testnet account in this browser with {fmtN(GUEST_GAME_NEAR)} testnet NEAR to play. No wallet, no seed phrase, no popups.
+        {#if newcomer && game.session?.kind !== 'wallet'}Your first bet creates a free testnet account in this browser with {fmtN(GUEST_GAME_NEAR)} testnet NEAR to play. No wallet, no seed phrase, no popups. Have a testnet wallet? <button class="link" onclick={openWallet}>Play with your wallet</button>.
+        {:else if newcomer}Deposit NEAR from your wallet on the Me page to start betting.
         {:else}Win: +{fmtN(stakeY)} NEAR (you get {fmtN(stakeY * 2n)} back). Lose: −{fmtN(stakeY)}. Every bet also pays a {(game.params?.fee_bps ?? 0) / 100}% fee ({fmtN(feeY)} NEAR) to the treasury. Max {capW} per round (25% of your balance).{/if}
       </p>
     {/if}
@@ -312,4 +313,5 @@
   .bar { height: 8px; border-radius: 999px; background: var(--surface-2); border: 1px solid var(--line); margin-top: 10px; overflow: hidden }
   .bar span { display: block; height: 100%; background: var(--brand); border-radius: 999px }
   .gold { color: var(--brand) }
+  .link { border: 0; padding: 0; background: none; color: var(--brand); font: inherit; text-decoration: underline; cursor: pointer }
 </style>

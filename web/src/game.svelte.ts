@@ -1,11 +1,12 @@
 // App-wide reactive state: chain data (polled), the player's session, bets, results, autopilot.
 import {
-  ONE, CHIP, NEAR, view, fmt, fmtN, toNear, toYocto, nsToMs, randomSalt, commitHash, seal, loadSession, saveSession, newKeyPair,
+  ONE, CHIP, NEAR, view, fmt, fmtN, toNear, toYocto, nsToMs, randomSalt, commitHash, seal, loadSession, saveSession, loadGuestBackup, saveGuestBackup, newKeyPair,
   loadPicks, savePick, callContract, type Status, type Params, type RoundV, type PlayerV, type Session,
 } from './chain'
 import * as H from './history'
 import { label } from './questions'
 import { decide, guard, normalizeRule, stakeFor, meFrom, PRESETS, type Rule, type Lookup } from './rules'
+import * as W from './wallet'
 
 export type Side = 'A' | 'B'
 export type Result = { round: number; side: Side; amount: bigint; fee: bigint; outcome: 'A' | 'B' | 'void' }
@@ -55,6 +56,8 @@ export const game = $state({
   busy: '', // what an in-flight bet is doing right now
   toasts: [] as Toast[],
   ap: { live: initialRules.live, draft: initialRules.draft, on: localStorage.getItem('befewer.ap.on') === '1', log: [] as ApLog[] },
+  /** wallet login dialog: pick a wallet -> approve key + deposit -> done */
+  wallet: { open: false, step: 'pick' as 'pick' | 'connecting' | 'setup' | 'approving', accountId: null as string | null, error: '' },
 })
 
 // ---------- small helpers used by the pages ----------
@@ -172,7 +175,92 @@ export async function ensurePlayer() {
     saveSession(game.session)
   }
   game.me = await view<PlayerV>('get_player', { account_id: game.session.accountId })
-  if (!game.me.registered) throw new Error('This account has no game balance yet. Reload the page in a few seconds.')
+  if (!game.me.registered)
+    throw new Error(game.session.kind === 'wallet' ? 'Deposit NEAR from your wallet first (Me page).' : 'This account has no game balance yet. Reload the page in a few seconds.')
+}
+
+// ---------- wallet login ----------
+export function openWallet() {
+  game.wallet.open = true
+  game.wallet.error = ''
+  game.wallet.step = game.wallet.accountId ? 'setup' : 'pick'
+}
+export function closeWallet() {
+  game.wallet.open = false
+}
+export async function pickWallet(id: string) {
+  game.wallet.error = ''
+  game.wallet.step = 'connecting'
+  try {
+    game.wallet.accountId = await W.connect(id) // redirect wallets continue after the page comes back
+    game.wallet.step = 'setup'
+  } catch (e: any) {
+    game.wallet.step = 'pick'
+    game.wallet.error = String(e?.message || e || 'The wallet did not connect.')
+  }
+}
+/** One wallet approval: add this browser's key for the game and deposit `near`. */
+export async function approveWallet(near: number) {
+  if (!game.wallet.accountId) return
+  game.wallet.error = ''
+  game.wallet.step = 'approving'
+  try {
+    await W.setupSession(game.wallet.accountId, toYocto(near))
+    await waitForPending(60_000)
+    if (game.session?.kind !== 'wallet') throw new Error('The wallet did not add the key. Try again.')
+  } catch (e: any) {
+    game.wallet.step = 'setup'
+    game.wallet.error = String(e?.message || e || 'The wallet did not approve.')
+  }
+}
+async function waitForPending(ms: number) {
+  const until = Date.now() + ms
+  while (Date.now() < until) {
+    const s = await W.finishPendingSession()
+    if (s) return adopt(s)
+    if (!W.hasPending()) return
+    await new Promise(r => setTimeout(r, 2000))
+  }
+}
+/** Play with the wallet account from now on. A guest account is kept aside, not lost. */
+async function adopt(s: Session) {
+  if (game.session?.kind === 'guest') saveGuestBackup(game.session)
+  saveSession(s)
+  game.session = s
+  game.me = null
+  game.results = []
+  game.wallet.open = false
+  toast('ok', `Connected ${short(s.accountId)}. Bets are signed in this browser now: no wallet popups.`)
+  await refresh(true)
+}
+/** Stop using the wallet account here (its key stays on the account; remove it in the wallet any time). */
+export async function disconnectWallet() {
+  await W.disconnect()
+  game.wallet.accountId = null
+  const guest = loadGuestBackup()
+  saveGuestBackup(null)
+  saveSession(guest)
+  game.session = guest
+  game.me = null
+  game.results = []
+  toast('info', guest ? 'Wallet disconnected. Back to your guest account.' : 'Wallet disconnected.')
+  await refresh(true)
+}
+export async function depositMore(near: number) {
+  if (!game.session || game.session.kind !== 'wallet') return
+  const before = BigInt(game.me?.balance ?? '0')
+  try {
+    game.busy = 'Waiting for the wallet'
+    await W.depositFromWallet(toYocto(near))
+    for (let i = 0; i < 10; i++) {
+      await refresh(true)
+      if (BigInt(game.me?.balance ?? '0') > before) break
+      await new Promise(r => setTimeout(r, 1500))
+    }
+    toast('ok', `Deposited ${near} NEAR into your game balance.`)
+  } finally {
+    game.busy = ''
+  }
 }
 
 /** BEFEWER a claim of everything would put in the wallet, and the refining fee it would pay. */
@@ -318,6 +406,13 @@ export function start() {
   if (startedLoops) return
   startedLoops = true
   refresh(true).then(() => loadNpcs())
+  // coming back from a redirect wallet: finish the key it just added, or reopen the next step
+  if (W.hasPending()) waitForPending(90_000)
+  W.connectedAccount().then(a => {
+    if (!a) return
+    game.wallet.accountId = a
+    if (game.session?.kind !== 'wallet' && !W.hasPending()) { game.wallet.open = true; game.wallet.step = 'setup' }
+  }).catch(() => {})
   setInterval(() => (game.now = Date.now() + game.skew), 250)
   setInterval(async () => {
     if (game.busy) return

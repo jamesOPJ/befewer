@@ -110,6 +110,14 @@ export function loadSession(): Session | null {
 export function saveSession(s: Session | null) {
   s ? localStorage.setItem(SESSION_KEY, JSON.stringify(s)) : localStorage.removeItem(SESSION_KEY)
 }
+/** A guest account put aside while a wallet account is connected (restored on disconnect). */
+const GUEST_BACKUP = `fewer.guestbackup.${CONTRACT}`
+export function loadGuestBackup(): Session | null {
+  try { return JSON.parse(localStorage.getItem(GUEST_BACKUP) || 'null') } catch { return null }
+}
+export function saveGuestBackup(s: Session | null) {
+  s ? localStorage.setItem(GUEST_BACKUP, JSON.stringify(s)) : localStorage.removeItem(GUEST_BACKUP)
+}
 export function newKeyPair(): { publicKey: string; privateKey: string } {
   const kp = KeyPair.fromRandom('ed25519')
   return { publicKey: kp.getPublicKey().toString(), privateKey: kp.toString() }
