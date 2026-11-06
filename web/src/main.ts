@@ -59,29 +59,22 @@ function bar(a: bigint, b: bigint): string {
   return `<div class="bar"><span class="a" style="width:${pa}%"></span><span class="b" style="width:${100 - pa}%"></span></div>`
 }
 
-function renderMove(cr: RoundV | undefined): string {
+function renderMove(_cr: RoundV | undefined): string {
   const r = Number(status.commit_round)
-  if (!session) {
-    return `<div class="move">
-      <p class="lead">Play on NEAR testnet. No wallet, no seed phrase, no popups.</p>
-      <button class="primary" data-act="guest">Play now as a guest</button>
-      <p class="fine">Creates a throwaway testnet account in your browser. The key never leaves this device.</p>
-    </div>`
-  }
-  if (!me) return `<div class="move"><p>Loading your account…</p></div>`
-  const bal = BigInt(me.balance)
-  const head = `<div class="who">${esc(short(session.accountId))} · <b>${fmt(bal)}</b> FEWER
-     · streak ${me.streak} (best ${me.best_streak}) · <a href="#" data-act="logout">forget this device</a></div>`
-  if (!me.faucet_claimed && bal === 0n) {
-    return `<div class="move">${head}<button class="primary" data-act="faucet">Claim ${fmt(params.faucet_amount)} FEWER</button></div>`
-  }
-  const mine = me.open.find(o => o.round === String(r))
-  if (mine) {
+  const head = session && me
+    ? `<div class="who">${esc(short(session.accountId))} · <b>${fmt(me.balance)}</b> FEWER
+       · streak ${me.streak} (best ${me.best_streak}) · <a href="#" data-act="logout">forget this device</a></div>`
+    : ''
+  const mine = me?.open.find(o => o.round === String(r))
+  if (session && mine) {
     const pick = loadPicks(session.accountId)[r]
     return `<div class="move">${head}<p class="locked">You're in round ${r}: <b>${fmt(mine.amount)}</b> FEWER on
       <b class="side-${pick?.side ?? 'x'}">${pick?.side ?? '?'}</b>, sealed until drand #${pick?.drandRound ?? '?'}.
-      Nobody, including us, can see your side until the reveal opens. It reveals itself.</p></div>`
+      Nobody, including us, can see your side until the reveal opens. It reveals itself; the result shows up here.</p></div>`
   }
+  // newcomers bet straight away: their first tap creates a testnet account and claims the faucet
+  const newcomer = !session || !me || (!me.faucet_claimed && BigInt(me.balance) === 0n)
+  const bal = newcomer ? BigInt(params.faucet_amount) : BigInt(me!.balance)
   const cap = (bal * BigInt(params.max_stake_bps)) / 10000n
   if (cap < BigInt(params.min_stake)) return `<div class="move">${head}<p>Your balance is too small to play (max stake is 25% of your balance).</p></div>`
   const maxW = Number(cap / ONE)
@@ -91,7 +84,29 @@ function renderMove(cr: RoundV | undefined): string {
     <div class="pick"><button class="side-A" data-act="commit" data-side="A" ${busy ? 'disabled' : ''}>A</button>
     <button class="side-B" data-act="commit" data-side="B" ${busy ? 'disabled' : ''}>B</button></div>
     <p class="fine">Pick the side you think <b>fewer coins</b> will pick. Win: 2× back. Lose: your stake. The gap between the sides burns.</p>
+    ${newcomer ? `<p class="fine">Your first tap creates a free testnet account in this browser and gives you ${fmt(params.faucet_amount)} FEWER. No wallet, no seed phrase, no popups.</p>` : ''}
   </div>`
+}
+
+/** Make sure this browser has a testnet account with FEWER in it. */
+async function ensurePlayer() {
+  if (!session) {
+    busy = 'Creating your testnet account…'
+    render()
+    const kp = newKeyPair()
+    const res = await fetch('/api/guest', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ publicKey: kp.publicKey }) })
+    const j = await res.json().catch(() => ({}))
+    if (!res.ok) throw new Error(j.error || 'The guest account service is unavailable.')
+    session = { accountId: j.accountId, privateKey: kp.privateKey, kind: 'guest' }
+    saveSession(session)
+  }
+  me = await view<PlayerV>('get_player', { account_id: session.accountId })
+  if (!me.faucet_claimed && BigInt(me.balance) === 0n) {
+    busy = `Claiming ${fmt(params.faucet_amount)} FEWER…`
+    render()
+    await callContract(session, 'faucet', {})
+    me = await view<PlayerV>('get_player', { account_id: session.accountId })
+  }
 }
 
 function render() {
@@ -188,22 +203,8 @@ function renderNpcs() {
 async function act(kind: string, el: HTMLElement) {
   notice = ''
   try {
-    if (kind === 'guest') {
-      busy = 'Creating your testnet account…'
-      render()
-      const kp = newKeyPair()
-      const res = await fetch('/api/guest', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ publicKey: kp.publicKey }) })
-      const j = await res.json()
-      if (!res.ok) throw new Error(j.error || 'guest account service unavailable')
-      session = { accountId: j.accountId, privateKey: kp.privateKey, kind: 'guest' }
-      saveSession(session)
-      busy = `Claiming ${fmt(params.faucet_amount)} FEWER…`
-      render()
-      await callContract(session, 'faucet', {})
-    } else if (kind === 'faucet') {
-      busy = 'Claiming…'
-      render()
-      await callContract(session!, 'faucet', {})
+    if (kind === 'faucet') {
+      await ensurePlayer()
     } else if (kind === 'logout') {
       if (!confirm('Forget this testnet account on this device? You will lose access to it.')) return
       saveSession(null)
@@ -211,7 +212,11 @@ async function act(kind: string, el: HTMLElement) {
       me = null
     } else if (kind === 'commit') {
       const side = el.dataset.side as 'A' | 'B'
-      const amount = BigInt((document.getElementById('amt') as HTMLInputElement).value) * ONE
+      let amount = BigInt((document.getElementById('amt') as HTMLInputElement).value) * ONE // read before re-rendering
+      await ensurePlayer()
+      const cap = (BigInt(me!.balance) * BigInt(params.max_stake_bps)) / 10000n
+      if (amount > cap) amount = cap
+      status = await view<Status>('get_status')
       const r = Number(status.commit_round)
       const revealStart = nsToMs(status.commit_ends_at)
       if (revealStart - now() < 8000) throw new Error('This round is closing; wait a few seconds for the next one.')
