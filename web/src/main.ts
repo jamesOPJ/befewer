@@ -3,6 +3,7 @@ import {
   CONTRACT, EXPLORER, ONE, view, fmt, nsToMs, randomSalt, commitHash, seal, loadSession, saveSession,
   newKeyPair, loadPicks, savePick, callContract, type Status, type Params, type RoundV, type PlayerV, type Session,
 } from './chain'
+import { questionFor, label, QUESTIONS } from './questions'
 
 const $ = (sel: string) => document.querySelector(sel) as HTMLElement
 const esc = (s: string) => s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!)
@@ -77,7 +78,7 @@ function renderMove(_cr: RoundV | undefined): string {
   if (session && mine) {
     const pick = loadPicks(session.accountId)[r]
     return `<div class="move">${head}<p class="locked">You're in round ${r}: <b>${fmt(mine.amount)}</b> BEFEWER on
-      <b class="side-${pick?.side ?? 'x'}">${pick?.side ?? '?'}</b>, sealed until drand #${pick?.drandRound ?? '?'}.
+      <b class="side-${pick?.side ?? 'x'}">${pick ? `${pick.side} · ${esc(label(r, pick.side))}` : '?'}</b>, sealed until drand #${pick?.drandRound ?? '?'}.
       Nobody, including us, can see your side until the reveal opens. It reveals itself; the result shows up here.</p></div>`
   }
   // newcomers bet straight away: their first tap creates a testnet account and claims the faucet
@@ -89,9 +90,9 @@ function renderMove(_cr: RoundV | undefined): string {
   const def = Math.max(1, Math.round(maxW / 2)) // the player's own choice is applied after painting (applyStake)
   return `<div class="move">${head}
     <label class="stake">Stake <input id="amt" type="range" min="1" max="${maxW}" value="${def}"><b id="amtv">${def}</b> BEFEWER <span class="fine">(max 25% of balance)</span></label>
-    <div class="pick"><button class="side-A" data-act="commit" data-side="A" ${busy ? 'disabled' : ''}>A</button>
-    <button class="side-B" data-act="commit" data-side="B" ${busy ? 'disabled' : ''}>B</button></div>
-    <p class="fine">Pick the side you think <b>fewer coins</b> will pick. Win: 2× back. Lose: your stake. The gap between the sides burns.</p>
+    <div class="pick"><button class="side-A" data-act="commit" data-side="A" ${busy ? 'disabled' : ''}>A<small>${esc(questionFor(r).a)}</small></button>
+    <button class="side-B" data-act="commit" data-side="B" ${busy ? 'disabled' : ''}>B<small>${esc(questionFor(r).b)}</small></button></div>
+    <p class="fine">Don't pick what you like. Pick the answer you think <b>fewer coins</b> will pick. Win: 2× back. Lose: your stake. The gap between the sides burns.</p>
     ${newcomer ? `<p class="fine">Your first tap creates a free testnet account in this browser and gives you ${fmt(params.faucet_amount)} BEFEWER. No wallet, no seed phrase, no popups.</p>` : ''}
   </div>`
 }
@@ -179,16 +180,17 @@ function render() {
     <p class="testnet">Testnet demo built for NEAR HACKATHON. Testnet BEFEWER is free and has no monetary value; there is no token sale.</p>
   </header>
   <details class="rules" id="rules">
-    <summary><b>How to play</b> <span class="gist">Bet on the side you think <b>fewer coins</b> will pick. Win: 2× back. Lose: your stake. The gap burns.</span></summary>
+    <summary><b>How to play</b> <span class="gist">Each round asks a question. Pick the answer you think <b>fewer coins</b> will pick. Win: 2× back. Lose: your stake. The gap burns.</span></summary>
     <p class="fine">All of this is enforced by the contract. There is no owner and no admin.</p>
     <ol>
-      <li>Every round you can bet up to 25% of your balance on A or B. Your side is sealed: the contract stores only a hash.</li>
+      <li>Every round asks a two-answer question. Don't pick what you like: pick the answer you think <b>fewer coins</b> will pick.</li>
+      <li>You can bet up to 25% of your balance on answer A or B. Your side is sealed: the contract stores only a hash.</li>
       <li>Your browser also locks your side with a <a href="https://drand.love" target="_blank" rel="noopener">drand</a> timelock that opens when the reveal window opens. Then anyone can open it and reveal it for you, so you never have to come back.</li>
       <li>After the reveal window, the side with <b>less</b> revealed BEFEWER wins. Winners get exactly 2× their stake. Losers lose their stake.</li>
       <li>The gap between the sides is burned, along with every bet that was never revealed. A tie or a one-sided round refunds everyone.</li>
       <li>Supply only goes down: everything was minted once at launch, there is no mint function and no owner.</li>
     </ol>
-    <p class="fine">Contract <a href="${EXPLORER}/address/${CONTRACT}" target="_blank" rel="noopener">${CONTRACT}</a> · this demo runs a round every ${Number(BigInt(params.commit_ns) / 60_000_000_000n)} minutes; the mechanic is designed for one round a day.</p>
+    <p class="fine">Contract <a href="${EXPLORER}/address/${CONTRACT}" target="_blank" rel="noopener">${CONTRACT}</a> · this demo runs a round every ${Number(BigInt(params.commit_ns) / 60_000_000_000n)} minutes; the mechanic is designed for one round a day. Questions come from a fixed public list (round number mod ${QUESTIONS.length}); the contract only knows A and B, so the wording cannot change who wins.</p>
   </details>
   <section class="live">
     <div class="card now"><div id="s-round"></div><div id="s-last"></div><div id="s-move"></div><div id="s-notice"></div></div>
@@ -217,14 +219,15 @@ function render() {
   const burnPct = handedOut > 0n ? Number((burned * 100000n) / handedOut) / 1000 : 0
 
   setHTML('s-round', `<div class="k">Round ${status.commit_round} · bets close in ${timer(status.commit_ends_at)}</div>
-      <div class="big">${fmt(cr?.committed ?? '0')} <span>BEFEWER in</span></div>
-      <div class="k">${cr?.commits ?? 0} sealed bet${cr?.commits === 1 ? '' : 's'} · sides hidden until the reveal opens</div>`)
+      <div class="q">${esc(questionFor(status.commit_round).q)}</div>
+      <div class="k"><b class="amt">${fmt(cr?.committed ?? '0')}</b> BEFEWER in · ${cr?.commits ?? 0} sealed bet${cr?.commits === 1 ? '' : 's'} · sides hidden until the reveal opens</div>`)
   setHTML('s-move', renderMove(cr))
   applyStake()
   setHTML('s-notice', `${failure ? `<p class="failure">Your bet did not go through: ${esc(failure)}</p>` : ''}${notice ? `<p class="notice">${esc(notice)}</p>` : ''}${busy ? `<p class="notice busy">${esc(busy)}</p>` : ''}`)
   setHTML('s-reveal', rr
     ? `<div class="k">Round ${rr.round} · revealing · result in ${timer(status.reveal_ends_at)}</div>
-        <div class="vs"><span class="side-A">A ${fmt(rr.revealed_a)}</span><span class="side-B">B ${fmt(rr.revealed_b)}</span></div>
+        <div class="q small">${esc(questionFor(rr.round).q)}</div>
+        <div class="vs"><span class="side-A">${esc(label(rr.round, 'A'))} ${fmt(rr.revealed_a)}</span><span class="side-B">${esc(label(rr.round, 'B'))} ${fmt(rr.revealed_b)}</span></div>
         ${bar(BigInt(rr.revealed_a), BigInt(rr.revealed_b))}
         <div class="k">${rr.reveals_a + rr.reveals_b} of ${rr.commits} bets opened · drand published the key, the keeper is opening them</div>`
     : `<div class="k">No round is revealing right now.</div>`)
@@ -234,20 +237,20 @@ function render() {
     <div><div class="k">In players' hands</div><div class="v">${fmt(circulating)}</div><div class="k">${fmt(status.escrow)} locked in bets</div></div>
     <div><div class="k">Longest minority streak</div><div class="v">${status.best_streak}</div><div class="k">${status.best_streak_holder ? esc(short(status.best_streak_holder)) : '—'}</div></div>`)
   const last = results[0]
-  setHTML('s-last', last ? `<p class="last">Round ${last.round}: <b class="side-${last.outcome}">${last.outcome === 'void' ? 'void' : last.outcome}</b>${last.outcome === 'void' ? '' : ' was the smaller side'}. You bet <b class="side-${last.side}">${last.side}</b> → ${resultText(last)}.</p>` : '')
+  setHTML('s-last', last ? `<p class="last">Round ${last.round} · ${esc(questionFor(last.round).q)} ${last.outcome === 'void' ? 'Void.' : `<b class="side-${last.outcome}">${esc(label(last.round, last.outcome))}</b> was the smaller side.`} You picked <b class="side-${last.side}">${esc(label(last.round, last.side))}</b> → ${resultText(last)}.</p>` : '')
   setHTML('s-results', results.length ? `<section><h2>Your results</h2><table><tr><th>Round</th><th>Your side</th><th>Stake</th><th>Smaller side</th><th>Result</th></tr>
-    ${results.map(x => `<tr><td>${x.round}</td><td class="side-${x.side}">${x.side}</td><td>${fmt(x.amount)}</td><td>${x.outcome}</td><td>${resultText(x)}</td></tr>`).join('')}</table></section>` : '')
+    ${results.map(x => `<tr><td>${x.round}<div class="fine">${esc(questionFor(x.round).q)}</div></td><td class="side-${x.side}">${esc(label(x.round, x.side))}</td><td>${fmt(x.amount)}</td><td>${esc(label(x.round, x.outcome))}</td><td>${resultText(x)}</td></tr>`).join('')}</table></section>` : '')
   setHTML('s-mine', session && me && me.open.length ? `<section><h2>Your bets</h2><table><tr><th>Round</th><th>Stake</th><th>Your side</th><th>Status</th></tr>
     ${me.open.map(o => { const p = loadPicks(session!.accountId)[o.round]; const rv = roundById(o.round)
       const st = rv?.settled ? `settled: ${rv.outcome}` : o.side ? 'opened' : 'sealed'
-      return `<tr><td>${o.round}</td><td>${fmt(o.amount)}</td><td class="side-${p?.side ?? 'x'}">${p?.side ?? '?'}</td><td>${st}</td></tr>` }).join('')}
+      return `<tr><td>${o.round}<div class="fine">${esc(questionFor(o.round).q)}</div></td><td>${fmt(o.amount)}</td><td class="side-${p?.side ?? 'x'}">${p ? esc(label(o.round, p.side)) : '?'}</td><td>${st}</td></tr>` }).join('')}
     </table><p class="fine">W ${me.wins} · L ${me.losses} · void ${me.voids} · forfeited ${me.forfeits}</p></section>` : '')
   setHTML('s-rounds', `<table class="rounds"><tr><th>Round</th><th>Bets</th><th>A</th><th>B</th><th>Smaller side</th><th>Burned</th></tr>
     ${rounds.filter(r => r.round !== status.commit_round).map(r => `<tr>
-      <td>${r.round}</td><td>${r.commits}</td>
-      <td class="${r.outcome === 'A' ? 'win' : ''}">${r.reveals_a ? fmt(r.revealed_a) : '—'}</td>
-      <td class="${r.outcome === 'B' ? 'win' : ''}">${r.reveals_b ? fmt(r.revealed_b) : '—'}</td>
-      <td>${r.settled ? (r.outcome === 'void' ? 'void (refund)' : `<b class="side-${r.outcome}">${r.outcome}</b> doubles`) : (r.round === status.reveal_round ? 'revealing' : 'waiting for keeper')}</td>
+      <td>${r.round}<div class="fine">${esc(questionFor(r.round).q)}</div></td><td>${r.commits}</td>
+      <td class="${r.outcome === 'A' ? 'win' : ''}">${r.reveals_a ? fmt(r.revealed_a) : '—'}<div class="fine">${esc(label(r.round, 'A'))}</div></td>
+      <td class="${r.outcome === 'B' ? 'win' : ''}">${r.reveals_b ? fmt(r.revealed_b) : '—'}<div class="fine">${esc(label(r.round, 'B'))}</div></td>
+      <td>${r.settled ? (r.outcome === 'void' ? 'void (refund)' : `<b class="side-${r.outcome}">${esc(label(r.round, r.outcome))}</b> doubles`) : (r.round === status.reveal_round ? 'revealing' : 'waiting for keeper')}</td>
       <td class="burn">${r.settled ? fmt(r.burned) : ''}</td></tr>`).join('')}
     </table>`)
   renderNpcs()

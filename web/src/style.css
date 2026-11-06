@@ -66,3 +66,8 @@ details.rules[open] summary::before { transform: rotate(90deg) }
 details.rules .gist { color: var(--fg-dim); font-size: .92rem }
 details.rules[open] .gist { display: none }
 details.rules ol { margin: .5rem 0 }
+.q { font-size: 1.7rem; font-weight: 700; line-height: 1.25; margin: .35rem 0 .45rem; color: var(--fg) }
+.q.small { font-size: 1.15rem; margin: .3rem 0 }
+.amt { color: var(--fg) }
+.pick button small { display: block; font-size: 1rem; font-weight: 600; margin-top: .15rem; overflow-wrap: anywhere }
+td .fine { font-size: .78rem; font-weight: 400; color: var(--fg-dim); text-align: inherit }
