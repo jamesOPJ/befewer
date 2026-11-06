@@ -4,7 +4,7 @@
   import { questionFor, label } from '../questions'
   import Icon from '../lib/Icon.svelte'
   import Orbs from '../lib/Orbs.svelte'
-  import { game, fmt, commitRound, picks } from '../game.svelte'
+  import { game, fmt, fmtN, commitRound, picks } from '../game.svelte'
   import type { RoundV } from '../chain'
 
   let filter = $state<'all' | 'mine'>('all')
@@ -25,15 +25,16 @@
   const list = $derived(filter === 'mine' ? all.filter(x => mine[x.round]) : all)
   const settled = $derived(all.filter(x => x.settled))
   const sum = $derived.by(() => {
-    const s = { A: 0, B: 0, void: 0, burned: 0n }
+    const s = { A: 0, B: 0, void: 0, treasury: 0n, mined: 0n }
     for (const x of settled) {
       if (x.outcome === 'A' || x.outcome === 'B' || x.outcome === 'void') s[x.outcome]++
-      s.burned += BigInt(x.burned)
+      s.treasury += BigInt(x.to_treasury)
+      s.mined += BigInt(x.reward)
     }
     return s
   })
   const pct = (x: RoundV) => {
-    const a = Number(BigInt(x.revealed_a) / 10n ** 15n), b = Number(BigInt(x.revealed_b) / 10n ** 15n)
+    const a = Number(BigInt(x.revealed_a) / 10n ** 18n), b = Number(BigInt(x.revealed_b) / 10n ** 18n)
     return a + b > 0 ? Math.round((a / (a + b)) * 100) : null
   }
   const phase = (x: RoundV) => (x.settled ? 'settled' : Number(x.round) === commitRound() ? 'betting' : 'opening')
@@ -42,7 +43,7 @@
 <header class="ph">
   <div>
     <h1>Rounds</h1>
-    <p class="muted">Every round so far. Bets on the smaller side won +100%; the gap between the sides burned.</p>
+    <p class="muted">Every round so far. Bets on the smaller side won +100%; fees and the gap between the sides went to the treasury.</p>
   </div>
 </header>
 
@@ -50,7 +51,7 @@
   <div class="card tile"><div class="eyebrow">Settled</div><div class="big num">{settled.length}</div><div class="faint">rounds with bets</div></div>
   <div class="card tile"><div class="eyebrow">A smaller</div><div class="big num"><span class="dot A"></span>{sum.A}</div><div class="faint">{settled.length ? Math.round((sum.A / settled.length) * 100) : 0}% of rounds</div></div>
   <div class="card tile"><div class="eyebrow">B smaller</div><div class="big num"><span class="dot B"></span>{sum.B}</div><div class="faint">{settled.length ? Math.round((sum.B / settled.length) * 100) : 0}% of rounds</div></div>
-  <div class="card tile"><div class="eyebrow">Burned</div><div class="big num burn">{fmt(sum.burned)}</div><div class="faint">{sum.void} void (refunded)</div></div>
+  <div class="card tile"><div class="eyebrow">To the treasury</div><div class="big num gold">{fmtN(sum.treasury, 2)}</div><div class="faint">NEAR · {fmt(sum.mined)} BEFEWER mined · {sum.void} void</div></div>
 </section>
 
 <div class="seg" role="tablist" aria-label="Filter rounds">
@@ -88,7 +89,7 @@
           <span class="res">
             {#if st !== 'settled'}<span class="pill">{st === 'betting' ? 'Live' : 'Opening'}</span>
             {:else if x.outcome === 'void'}<span class="pill">Void</span>
-            {:else}<span class="win side-{x.outcome}">{label(n, x.outcome!)} won</span><span class="burn small num"><Icon name="flame" size={13} /> {fmt(x.burned)}</span>{/if}
+            {:else}<span class="win side-{x.outcome}">{label(n, x.outcome!)} won</span><span class="gold small num"><Icon name="flame" size={13} /> {fmtN(x.to_treasury, 3)}</span>{/if}
             {#if my}<span class="mine-tag">you: {label(n, my.side)}</span>{/if}
           </span>
         </button>
@@ -97,9 +98,10 @@
             {#if p !== null}<Orbs round={x} compact />{/if}
             <dl>
               <div><dt>Bets</dt><dd class="num">{x.commits} ({x.reveals_a} on A, {x.reveals_b} on B{x.commits - x.reveals_a - x.reveals_b > 0 && x.settled ? `, ${x.commits - x.reveals_a - x.reveals_b} never opened` : ''})</dd></div>
-              <div><dt>Staked</dt><dd class="num">{fmt(x.committed)} BEFEWER</dd></div>
-              {#if x.settled}<div><dt>Burned</dt><dd class="num burn">{fmt(x.burned)} BEFEWER</dd></div>{/if}
-              {#if my}<div><dt>Your bet</dt><dd class="num">{fmt(my.amount)} on {label(n, my.side)}</dd></div>{/if}
+              <div><dt>Staked</dt><dd class="num">{fmtN(x.committed)} NEAR <span class="faint">+ {fmtN(x.fees)} fees</span></dd></div>
+              {#if x.settled}<div><dt>To the treasury</dt><dd class="num gold">{fmtN(x.to_treasury)} NEAR</dd></div>
+                <div><dt>Mined</dt><dd class="num">{BigInt(x.reward) > 0n ? `${fmt(x.reward)} BEFEWER to streak winners` : `none (pot rolls over: +${fmt(x.emission)})`}</dd></div>{/if}
+              {#if my}<div><dt>Your bet</dt><dd class="num">{fmtN(my.amount)} NEAR on {label(n, my.side)}</dd></div>{/if}
             </dl>
             {#if H.sameQuestion(n, 4).length}
               <div class="same">
@@ -158,4 +160,5 @@
   .empty { padding: 36px 20px; display: grid; justify-items: center; gap: 10px; text-align: center; color: var(--fg-2) }
   .empty p { margin: 0 }
   .more { margin: 16px auto 0; display: flex }
+  .gold { color: var(--brand) }
 </style>

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte'
-  import { game, start, fmt, short } from './game.svelte'
+  import { game, start, fmt, fmtN, short } from './game.svelte'
   import Icon from './lib/Icon.svelte'
   import Toasts from './lib/Toasts.svelte'
   import Play from './pages/Play.svelte'
@@ -38,9 +38,9 @@
       {/each}
     </nav>
     <div class="right">
-      <span class="pill testnet" title="Testnet BEFEWER is free and has no monetary value">Testnet</span>
+      <span class="pill testnet" title="Testnet NEAR and BEFEWER are free and have no monetary value">Testnet</span>
       {#if game.me}
-        <a class="pill bal num" href="#/me" title={game.session?.accountId}>{fmt(game.me.balance)} <span class="faint">BEFEWER</span></a>
+        <a class="pill bal num" href="#/me" title={game.session?.accountId}>{fmtN(game.me.balance, 3)} <span class="faint">NEAR</span>{#if BigInt(game.me.tokens) > 0n} · {fmt(game.me.tokens)} <span class="faint">BEFEWER</span>{/if}</a>
       {/if}
     </div>
   </div>

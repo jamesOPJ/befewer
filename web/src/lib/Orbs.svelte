@@ -1,13 +1,13 @@
 <script lang="ts">
-  import { fmt } from '../game.svelte'
+  import { fmtN } from '../game.svelte'
   import { label } from '../questions'
   import type { RoundV } from '../chain'
-  // Two orbs whose AREA is the BEFEWER revealed on each answer. The smaller orb is the minority:
-  // its bets win +100%. The gap between them is what burns.
+  // Two orbs whose AREA is the NEAR revealed on each answer. The smaller orb is the minority:
+  // its bets win +100%. The gap between them goes to the treasury.
   let { round, compact = false }: { round: RoundV; compact?: boolean } = $props()
   const r = $derived(Number(round.round))
-  const a = $derived(Number(BigInt(round.revealed_a) / 10n ** 15n) / 1000)
-  const b = $derived(Number(BigInt(round.revealed_b) / 10n ** 15n) / 1000)
+  const a = $derived(Number(BigInt(round.revealed_a) / 10n ** 18n) / 1e6)
+  const b = $derived(Number(BigInt(round.revealed_b) / 10n ** 18n) / 1e6)
   const big = $derived(Math.max(a, b, 1e-9))
   const k = (x: number) => (x <= 0 ? 0 : Math.max(0.14, Math.sqrt(x / big)))
   const total = $derived(a + b)
@@ -18,7 +18,7 @@
 </script>
 
 <div class="orbs" class:compact>
-  <svg viewBox="0 0 320 {H}" width="100%" height={H} role="img" aria-label="{label(r, 'A')}: {fmt(round.revealed_a)}; {label(r, 'B')}: {fmt(round.revealed_b)}">
+  <svg viewBox="0 0 320 {H}" width="100%" height={H} role="img" aria-label="{label(r, 'A')}: {fmtN(round.revealed_a)} NEAR; {label(r, 'B')}: {fmtN(round.revealed_b)} NEAR">
     {#each [['A', a, 86], ['B', b, 234]] as [side, v, cx]}
       {@const s = side as 'A' | 'B'}
       {@const win = outcome === s}
@@ -35,7 +35,7 @@
       {@const s = side as 'A' | 'B'}
       <div class="lg">
         <div class="ans"><span class="letter {s}">{s}</span>{label(r, s)}</div>
-        <div class="amt num">{fmt(raw as string)} <span class="faint">· {pct(v as number)}% · {n} bet{n === 1 ? '' : 's'}</span></div>
+        <div class="amt num">{fmtN(raw as string)} NEAR <span class="faint">· {pct(v as number)}% · {n} bet{n === 1 ? '' : 's'}</span></div>
         {#if outcome === s}<div class="tag good">smaller side · wins +100%</div>
         {:else if outcome && outcome !== 'void'}<div class="tag burn">bigger side · loses</div>{/if}
       </div>

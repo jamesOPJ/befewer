@@ -1,7 +1,7 @@
 <script lang="ts">
   import Icon from '../lib/Icon.svelte'
   import { questionFor, label } from '../questions'
-  import { game, fmt, short, picks, forgetDevice, toast, commitRound } from '../game.svelte'
+  import { game, fmt, fmtN, netOf, GUEST_GAME_NEAR, short, picks, forgetDevice, toast, commitRound, withdrawAll } from '../game.svelte'
 
   const me = $derived(game.me)
   const decided = $derived(me ? me.wins + me.losses : 0)
@@ -9,6 +9,9 @@
   const pk = $derived.by(() => { game.me; return picks() })
   let confirming = $state(false)
 
+  async function withdraw() {
+    try { await withdrawAll() } catch (e: any) { toast('err', String(e.message || e)) }
+  }
   async function copy() {
     try { await navigator.clipboard.writeText(game.session!.accountId); toast('ok', 'Account name copied.') } catch { toast('err', 'Could not copy.') }
   }
@@ -23,16 +26,18 @@
   <div class="card empty">
     <div class="halo"><Icon name="user" size={30} /></div>
     <h2>You haven't played yet</h2>
-    <p class="muted">Your first bet creates a free testnet account right here in your browser and gives you {fmt(game.params?.faucet_amount ?? '0')} BEFEWER. No wallet, no seed phrase.</p>
+    <p class="muted">Your first bet creates a free testnet account right here in your browser with {fmtN(GUEST_GAME_NEAR)} testnet NEAR to play. No wallet, no seed phrase.</p>
     <a class="btn primary" href="#/">Play this round</a>
   </div>
 {:else}
   <section class="top">
     <div class="card bal">
-      <div class="eyebrow">Balance</div>
-      <div class="money num">{fmt(me.balance)} <span>BEFEWER</span></div>
+      <div class="eyebrow">Game balance</div>
+      <div class="money num">{fmtN(me.balance)} <span>NEAR</span></div>
+      <div class="tok"><b class="num">{fmt(me.tokens)}</b> BEFEWER in your wallet <span class="faint">· {fmt(me.mined)} mined by your streaks</span></div>
       <button class="acct" onclick={copy} title="Copy account name"><span class="num">{short(game.session.accountId)}</span><Icon name="copy" size={15} /></button>
       <div class="faint small">Testnet account kept in this browser · {me.open.length} bet{me.open.length === 1 ? '' : 's'} waiting to settle</div>
+      <button class="btn small wd" onclick={withdraw} disabled={!!game.busy || BigInt(me.balance) === 0n}>Withdraw {fmtN(me.balance)} NEAR to the wallet</button>
     </div>
     <div class="card score">
       <div class="eyebrow">Picked the smaller side</div>
@@ -65,7 +70,7 @@
           {@const n = Number(o.round)}
           <li class="card item">
             <span class="no num">#{n}</span>
-            <span class="body"><span class="q">{questionFor(n).q}</span><span class="small muted">{fmt(o.amount)} BEFEWER on {pk[o.round] ? label(n, pk[o.round].side) : '?'}</span></span>
+            <span class="body"><span class="q">{questionFor(n).q}</span><span class="small muted">{fmtN(o.amount)} NEAR on {pk[o.round] ? label(n, pk[o.round].side) : '?'}{o.streak_if_win >= (game.params?.streak_min ?? 3) ? ` · mines if it wins (streak ${o.streak_if_win})` : ''}</span></span>
             <span class="pill">{n === commitRound() ? 'Sealed' : o.side ? 'Opened' : 'Opening'}</span>
           </li>
         {/each}
@@ -78,13 +83,14 @@
     {#if game.results.length}
       <ul class="list">
         {#each game.results as x}
+          {@const n = netOf(x)}
           <li class="card item">
             <span class="no num">#{x.round}</span>
             <span class="body"><span class="q">{questionFor(x.round).q}</span>
               <span class="small muted">You picked {label(x.round, x.side)} · {x.outcome === 'void' ? 'void' : `${label(x.round, x.outcome)} was smaller`}</span></span>
             {#if x.outcome === 'void'}<span class="amt num">±0</span>
-            {:else if x.outcome === x.side}<span class="amt num good">+{fmt(x.amount)}</span>
-            {:else}<span class="amt num burn">−{fmt(x.amount)}</span>{/if}
+            {:else if n > 0n}<span class="amt num good">+{fmtN(n)}</span>
+            {:else}<span class="amt num burn">−{fmtN(-n)}</span>{/if}
           </li>
         {/each}
       </ul>
@@ -96,7 +102,7 @@
   <section class="danger card">
     <div>
       <h3>Forget this device</h3>
-      <p class="small muted">Removes the testnet account's key from this browser. You lose access to its BEFEWER. Testnet only.</p>
+      <p class="small muted">Removes the testnet account's key from this browser. You lose access to its NEAR and BEFEWER. Testnet only.</p>
     </div>
     {#if confirming}
       <div class="row"><button class="btn small" onclick={() => (confirming = false)}>Keep it</button><button class="btn small bad" onclick={() => { forgetDevice(); confirming = false; toast('info', 'Forgot the account on this device.') }}>Forget</button></div>
@@ -118,6 +124,8 @@
   .bal, .score { padding: 18px 20px; display: grid; gap: 6px; align-content: start }
   .money { font-size: 40px; font-weight: 800; letter-spacing: -0.02em; line-height: 1.1 }
   .money span { font-size: 15px; font-weight: 600; color: var(--fg-3); margin-left: 4px }
+  .tok { font-size: 15px; color: var(--fg-2) }
+  .wd { justify-self: start; margin-top: 6px }
   .acct { justify-self: start; display: inline-flex; gap: 6px; align-items: center; padding: 4px 10px; border-radius: 999px; background: var(--surface-2); border: 1px solid var(--line); color: var(--fg-2); font-size: 13px; cursor: pointer }
   .small { font-size: 13px }
   .meter { position: relative; height: 10px; border-radius: 5px; background: var(--surface-3); margin: 6px 0 4px }

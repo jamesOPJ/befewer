@@ -1,6 +1,6 @@
 // App-wide reactive state: chain data (polled), the player's session, bets, results, autopilot.
 import {
-  ONE, view, fmt, nsToMs, randomSalt, commitHash, seal, loadSession, saveSession, newKeyPair,
+  ONE, CHIP, NEAR, view, fmt, fmtN, toNear, toYocto, nsToMs, randomSalt, commitHash, seal, loadSession, saveSession, newKeyPair,
   loadPicks, savePick, callContract, type Status, type Params, type RoundV, type PlayerV, type Session,
 } from './chain'
 import * as H from './history'
@@ -8,7 +8,7 @@ import { label } from './questions'
 import { decide, guard, normalizeRule, stakeFor, meFrom, PRESETS, type Rule, type Lookup } from './rules'
 
 export type Side = 'A' | 'B'
-export type Result = { round: number; side: Side; amount: bigint; outcome: 'A' | 'B' | 'void' }
+export type Result = { round: number; side: Side; amount: bigint; fee: bigint; outcome: 'A' | 'B' | 'void' }
 export type Toast = { id: number; kind: 'ok' | 'err' | 'info'; text: string }
 export type ApLog = { at: number; round: number; text: string; kind: 'bet' | 'skip' | 'err' }
 
@@ -71,7 +71,14 @@ export const lookup: Lookup = { recent: H.recent, sameQuestion: H.sameQuestion, 
 export const picks = () => (game.session ? loadPicks(game.session.accountId) : {})
 export const myOpen = (r: number) => game.me?.open.find(o => Number(o.round) === r)
 export const short = (a: string) => (a.length > 22 ? a.slice(0, 10) + '…' + a.slice(-10) : a)
-export { fmt, label, ONE }
+export { fmt, fmtN, toNear, toYocto, label, ONE, CHIP, NEAR }
+/** What a new guest account starts with in its game balance (the server deposits 0.3, the first
+ *  deposit pays the 0.01 storage fee). Only used to preview stakes before the account exists. */
+export const GUEST_GAME_NEAR = toYocto(0.29)
+/** Fee the contract adds on top of a stake. */
+export const feeFor = (amount: bigint) => (amount * BigInt(game.params?.fee_bps ?? 0)) / 10000n
+/** Net result of a settled bet in NEAR yocto: win +stake-fee, loss -stake-fee, void 0. */
+export const netOf = (x: Result) => (x.outcome === 'void' ? 0n : x.outcome === x.side ? x.amount - x.fee : -(x.amount + x.fee))
 
 let toastId = 0
 export function toast(kind: Toast['kind'], text: string, ms = kind === 'err' ? 9000 : 4500) {
@@ -101,7 +108,10 @@ export async function refresh(full = false) {
     game.rounds = [...byId.values()].sort((a, b) => Number(b.round) - Number(a.round)).slice(0, 60)
     game.history++
     if (game.session) {
+      const before = game.me
       game.me = await view<PlayerV>('get_player', { account_id: game.session.accountId })
+      if (before && BigInt(game.me.mined) > BigInt(before.mined))
+        toast('ok', `You mined ${fmt(BigInt(game.me.mined) - BigInt(before.mined))} BEFEWER with a ${game.me.streak}-win streak.`, 9000)
       await loadResults()
     }
     game.ready = true
@@ -127,7 +137,9 @@ async function loadResults() {
       H.remember([rv])
     }
     if (!rv.settled || !rv.outcome) continue
-    out.push({ round: Number(id), side: pk[id].side, amount: BigInt(pk[id].amount), outcome: rv.outcome })
+    const amount = BigInt(pk[id].amount)
+    const fee = pk[id].fee != null ? BigInt(pk[id].fee!) : (amount * BigInt(game.params?.fee_bps ?? 0)) / 10000n
+    out.push({ round: Number(id), side: pk[id].side, amount, fee, outcome: rv.outcome })
   }
   const newest = out[0]
   const prevNewest = game.results[0]
@@ -136,9 +148,9 @@ async function loadResults() {
 }
 
 function announce(x: Result) {
-  if (x.outcome === 'void') toast('info', `Round ${x.round} was void: your ${fmt(x.amount)} BEFEWER came back.`)
-  else if (x.outcome === x.side) toast('ok', `Round ${x.round}: ${label(x.round, x.side)} was the smaller side. You won +${fmt(x.amount)} BEFEWER.`)
-  else toast('info', `Round ${x.round}: ${label(x.round, x.outcome)} was the smaller side. You lost ${fmt(x.amount)} BEFEWER.`)
+  if (x.outcome === 'void') toast('info', `Round ${x.round} was void: your ${fmtN(x.amount + x.fee)} NEAR came back, fee included.`)
+  else if (x.outcome === x.side) toast('ok', `Round ${x.round}: ${label(x.round, x.side)} was the smaller side. You won +${fmtN(x.amount)} NEAR.`)
+  else toast('info', `Round ${x.round}: ${label(x.round, x.outcome)} was the smaller side. You lost ${fmtN(x.amount)} NEAR.`)
 }
 
 export async function loadNpcs() {
@@ -148,7 +160,7 @@ export async function loadNpcs() {
 }
 
 // ---------- account + bets ----------
-/** Make sure this browser has a testnet account with BEFEWER in it. */
+/** Make sure this browser has a testnet account with NEAR in its game balance. */
 export async function ensurePlayer() {
   if (!game.session) {
     game.busy = 'Creating your testnet account'
@@ -160,10 +172,21 @@ export async function ensurePlayer() {
     saveSession(game.session)
   }
   game.me = await view<PlayerV>('get_player', { account_id: game.session.accountId })
-  if (!game.me.faucet_claimed && BigInt(game.me.balance) === 0n) {
-    game.busy = `Claiming ${fmt(game.params!.faucet_amount)} free BEFEWER`
-    await callContract(game.session, 'faucet', {})
-    game.me = await view<PlayerV>('get_player', { account_id: game.session.accountId })
+  if (!game.me.registered) throw new Error('This account has no game balance yet. Reload the page in a few seconds.')
+}
+
+/** Move NEAR from the game balance back to this browser's testnet wallet. */
+export async function withdrawAll() {
+  if (!game.session || !game.me) return
+  const amount = BigInt(game.me.balance)
+  if (amount === 0n) throw new Error('Nothing to withdraw.')
+  try {
+    game.busy = 'Sending NEAR to your wallet'
+    await callContract(game.session, 'withdraw', {}, 30)
+    toast('ok', `${fmtN(amount)} NEAR moved to your wallet ${short(game.session.accountId)}.`)
+  } finally {
+    game.busy = ''
+    await refresh(true)
   }
 }
 
@@ -171,15 +194,18 @@ export function capFor(balance: bigint) {
   return (balance * BigInt(game.params!.max_stake_bps)) / 10000n
 }
 
-/** Seal a side with drand and commit it to the round taking bets right now. */
+/** Seal a side with drand and commit it to the round taking bets right now. `want` is NEAR in yocto. */
 export async function placeBet(side: Side, want: bigint, by: 'you' | 'autopilot' = 'you') {
   try {
     await ensurePlayer()
-    const cap = capFor(BigInt(game.me!.balance))
+    const bal = BigInt(game.me!.balance)
+    const cap = capFor(bal)
     let amount = want > cap ? cap : want
     const min = BigInt(game.params!.min_stake)
     if (amount < min) amount = min
-    if (amount > cap) throw new Error('Your balance is too small: the most you can bet is 25% of it.')
+    if (amount > cap) throw new Error(`Your game balance is too small: the most you can bet is 25% of it, and the smallest bet is ${fmtN(min)} NEAR.`)
+    const fee = feeFor(amount)
+    if (amount + fee > bal) throw new Error('Not enough NEAR for the stake plus the fee.')
     const st = await view<Status>('get_status')
     game.status = st
     const r = Number(st.commit_round)
@@ -189,10 +215,10 @@ export async function placeBet(side: Side, want: bigint, by: 'you' | 'autopilot'
     const salt = randomSalt()
     const hash = await commitHash(game.session!.accountId, r, side, salt)
     const { sealed, drandRound } = await seal(side, salt, revealStart)
-    savePick(game.session!.accountId, r, { side, salt, amount: amount.toString(), drandRound })
+    savePick(game.session!.accountId, r, { side, salt, amount: amount.toString(), fee: fee.toString(), drandRound })
     game.busy = 'Sending the sealed bet'
     await callContract(game.session!, 'commit', { round: String(r), amount: amount.toString(), hash, sealed })
-    if (by === 'you') toast('ok', `Sealed: ${fmt(amount)} BEFEWER on ${label(r, side)}. It opens itself at the reveal.`)
+    if (by === 'you') toast('ok', `Sealed: ${fmtN(amount)} NEAR on ${label(r, side)} (+${fmtN(fee)} fee). It opens itself at the reveal.`)
     return { round: r, amount }
   } finally {
     game.busy = ''
@@ -254,12 +280,13 @@ export async function autopilotTick() {
   }
   try {
     if (!game.me) await ensurePlayer()
-    const bal = Number(BigInt(game.me!.balance) / ONE)
-    const coins = stakeFor(d.unit, d.amount, bal, me)
-    if (coins < 1) { apLog(r, 'skip', 'Balance too small to bet (the cap is 25% of it).'); return }
-    const want = BigInt(coins) * ONE
+    // the autopilot counts in chips of 0.01 NEAR (the smallest bet)
+    const bal = Number(BigInt(game.me!.balance) / CHIP)
+    const chips = stakeFor(d.unit, d.amount, bal, me)
+    if (chips < 1) { apLog(r, 'skip', 'Balance too small to bet (the cap is 25% of it).'); return }
+    const want = BigInt(chips) * CHIP
     const placed = await placeBet(d.side, want, 'autopilot')
-    apLog(placed.round, 'bet', `Rule ${d.rule + 1}: ${fmt(placed.amount)} BEFEWER on ${label(placed.round, d.side)} (${d.side}).`)
+    apLog(placed.round, 'bet', `Rule ${d.rule + 1}: ${fmtN(placed.amount)} NEAR on ${label(placed.round, d.side)} (${d.side}).`)
   } catch (e: any) {
     apLog(r, 'err', String(e.message || e))
   }

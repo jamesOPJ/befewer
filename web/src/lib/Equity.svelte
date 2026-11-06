@@ -2,7 +2,7 @@
   import type { Step } from '../rules'
   import { label } from '../questions'
   // Balance after each replayed round. One series, so no legend: the card title names it.
-  // Dashed reference = the 1,000 you start with. Hover/touch shows the round under the cursor.
+  // Values are chips of 0.01 NEAR. Dashed reference = the 10 NEAR you start with. Hover/touch shows the round under the cursor.
   let { curve, start = 1000 }: { curve: Step[]; start?: number } = $props()
   let w = $state(320)
   const h = 170
@@ -23,7 +23,7 @@
     hover = Math.max(1, Math.min(pts.length - 1, i))
   }
   const step = $derived(hover != null ? curve[hover - 1] : null)
-  const fmtN = (v: number) => v.toLocaleString('en-US')
+  const fmtN = (v: number) => (v / 100).toLocaleString('en-US', { maximumFractionDigits: 2 })
 </script>
 
 <div class="eq" bind:clientWidth={w}>

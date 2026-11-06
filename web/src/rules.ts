@@ -15,7 +15,8 @@ export type Cond =
   | { kind: 'question'; winner: Who } // the last time this same question was asked
   | { kind: 'mine'; result: 'won' | 'lost' | 'void' } // my most recent settled bet
 export type Pick = 'A' | 'B' | 'same' | 'other' | 'random' | 'skip'
-/** fixed = N BEFEWER every time (DCA); pct = share of balance; martingale = base, doubled after
+/** Amounts count chips of 0.01 NEAR (the smallest bet).
+ *  fixed = N chips every time (DCA); pct = share of balance; martingale = base, doubled after
  *  each loss in a row; paroli = base, doubled after each win, back to base after 3 wins. */
 export type Unit = 'fixed' | 'pct' | 'martingale' | 'paroli'
 export type Rule = { cond: Cond; pick: Pick; unit: Unit; amount: number }
@@ -54,7 +55,7 @@ export function normalizeRule(r: any): Rule {
   return { cond: r.cond, pick: r.pick, unit: 'pct', amount: typeof r.pct === 'number' ? r.pct : 5 }
 }
 
-/** BEFEWER a rule would stake with balance `bal`, after the contract's 25% cap. 0 = can't bet. */
+/** Chips a rule would stake with balance `bal` (in chips), after the contract's 25% cap. 0 = can't bet. */
 export function stakeFor(unit: Unit, amount: number, bal: number, me: Me = NOBODY): number {
   const cap = Math.floor((bal * MAX_PCT) / 100)
   if (cap < 1) return 0
@@ -151,10 +152,11 @@ export function decide(rules: Rule[], r: number, L: Lookup, me: Me = NOBODY): De
 export type Step = { round: number; side: Side | null; outcome: Outcome; stake: number; bal: number }
 export type Backtest = { rounds: number; bets: number; wins: number; losses: number; voids: number; skips: number; start: number; end: number; staked: number; curve: Step[] }
 
-/** Replay `rules` over finished rounds from..to, starting with `start` coins. The replay keeps
+/** Replay `rules` over finished rounds from..to, starting with `start` chips. Every bet pays
+ *  `feeBps` on top of its stake (refunded on a void), like the contract. The replay keeps
  *  its own "my last bet" state from its own simulated bets. Assumes your own bet would not have
  *  changed which side was smaller. */
-export function backtest(rules: Rule[], from: number, to: number, L: Lookup, start = 1000): Backtest {
+export function backtest(rules: Rule[], from: number, to: number, L: Lookup, start = 1000, feeBps = 0): Backtest {
   const bt: Backtest = { rounds: 0, bets: 0, wins: 0, losses: 0, voids: 0, skips: 0, start, end: start, staked: 0, curve: [] }
   let bal = start
   let me: Me = NOBODY
@@ -168,8 +170,8 @@ export function backtest(rules: Rule[], from: number, to: number, L: Lookup, sta
     bt.bets++
     bt.staked += stake
     if (o === 'void') bt.voids++
-    else if (o === d.side) { bt.wins++; bal += stake }
-    else { bt.losses++; bal -= stake }
+    else if (o === d.side) { bt.wins++; bal += stake - (stake * feeBps) / 10000 }
+    else { bt.losses++; bal -= stake + (stake * feeBps) / 10000 }
     me = nextMe(me, d.side, o)
     bt.curve.push({ round: t, side: d.side, outcome: o, stake, bal })
   }
@@ -209,11 +211,13 @@ export function describe(r: Rule): string {
   const pick = { same: 'that same side', other: 'the other side', A: 'A', B: 'B', random: 'a random side' }[r.pick]
   return `${cond} → bet ${pick}, ${stakeText(r.unit, r.amount)}`
 }
+/** chips (0.01 NEAR each) -> "0.05 NEAR" */
+export const chipsText = (n: number) => `${(n / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} NEAR`
 export function stakeText(unit: Unit, amount: number): string {
   if (unit === 'pct') return `${amount}% of balance`
-  if (unit === 'martingale') return `${amount} BEFEWER, doubled after each loss`
-  if (unit === 'paroli') return `${amount} BEFEWER, doubled after each win (3 max)`
-  return `${amount} BEFEWER`
+  if (unit === 'martingale') return `${chipsText(amount)}, doubled after each loss`
+  if (unit === 'paroli') return `${chipsText(amount)}, doubled after each win (3 max)`
+  return chipsText(amount)
 }
 
 const R = (cond: Cond, pick: Pick, amount = 10, unit: Unit = 'fixed'): Rule => ({ cond, pick, unit, amount })
@@ -221,26 +225,26 @@ const ALWAYS: Cond = { kind: 'always' }
 export type Preset = { name: string; group: string; about: string; rules: Rule[] }
 export const PRESET_GROUPS = ['Follow the crowd', 'Fade the crowd', 'Memory', 'Money management']
 export const PRESETS: Preset[] = [
-  { name: 'Echo', group: 'Follow the crowd', about: 'Bet 10 that the last smaller side wins again.',
+  { name: 'Echo', group: 'Follow the crowd', about: 'Bet 0.10 NEAR that the last smaller side wins again.',
     rules: [R({ kind: 'last', winner: 'any' }, 'same'), R(ALWAYS, 'random')] },
-  { name: 'Momentum', group: 'Follow the crowd', about: 'If one side won 4 of the last 6 rounds, bet 10 on it again. Otherwise sit out.',
+  { name: 'Momentum', group: 'Follow the crowd', about: 'If one side won 4 of the last 6 rounds, bet 0.10 NEAR on it again. Otherwise sit out.',
     rules: [R({ kind: 'tally', winner: 'A', k: 4, n: 6 }, 'A'), R({ kind: 'tally', winner: 'B', k: 4, n: 6 }, 'B'), R(ALWAYS, 'skip')] },
-  { name: 'Flip', group: 'Fade the crowd', about: "Bet 10 that the crowd over-corrects to last round's smaller side.",
+  { name: 'Flip', group: 'Fade the crowd', about: "Bet 0.10 NEAR that the crowd over-corrects to last round's smaller side.",
     rules: [R({ kind: 'last', winner: 'any' }, 'other'), R(ALWAYS, 'random')] },
-  { name: 'Streak breaker', group: 'Fade the crowd', about: 'After 3 wins in a row for one side, bet 20 on the other. Otherwise sit out.',
+  { name: 'Streak breaker', group: 'Fade the crowd', about: 'After 3 wins in a row for one side, bet 0.20 NEAR on the other. Otherwise sit out.',
     rules: [R({ kind: 'streak', winner: 'any', n: 3 }, 'other', 20), R(ALWAYS, 'skip')] },
-  { name: 'Mean reversion', group: 'Fade the crowd', about: 'If one side won 4 of the last 6 rounds, bet 10 on the other. Otherwise sit out.',
+  { name: 'Mean reversion', group: 'Fade the crowd', about: 'If one side won 4 of the last 6 rounds, bet 0.10 NEAR on the other. Otherwise sit out.',
     rules: [R({ kind: 'tally', winner: 'A', k: 4, n: 6 }, 'B'), R({ kind: 'tally', winner: 'B', k: 4, n: 6 }, 'A'), R(ALWAYS, 'skip')] },
-  { name: 'Fade the blowout', group: 'Fade the crowd', about: "After a blowout (smaller side under 30%), the crowd piles onto last round's winner. Bet 20 against it.",
+  { name: 'Fade the blowout', group: 'Fade the crowd', about: "After a blowout (smaller side under 30%), the crowd piles onto last round's winner. Bet 0.20 NEAR against it.",
     rules: [R({ kind: 'margin', mode: 'lopsided', winner: 'any' }, 'other', 20), R(ALWAYS, 'skip')] },
-  { name: 'Remember the question', group: 'Memory', about: 'Bet 10 against whatever won this question last time.',
+  { name: 'Remember the question', group: 'Memory', about: 'Bet 0.10 NEAR against whatever won this question last time.',
     rules: [R({ kind: 'question', winner: 'any' }, 'other'), R(ALWAYS, 'random', 5)] },
-  { name: 'Stick or switch', group: 'Memory', about: 'Keep my side after a win, switch after a loss. 10 each time.',
+  { name: 'Stick or switch', group: 'Memory', about: 'Keep my side after a win, switch after a loss. 0.10 NEAR each time.',
     rules: [R({ kind: 'mine', result: 'won' }, 'same'), R({ kind: 'mine', result: 'lost' }, 'other'), R(ALWAYS, 'random')] },
-  { name: 'Steady DCA', group: 'Money management', about: '5 BEFEWER on a random side every single round. The baseline to beat.',
+  { name: 'Steady DCA', group: 'Money management', about: '0.05 NEAR on a random side every single round. The baseline to beat.',
     rules: [R(ALWAYS, 'random', 5)] },
-  { name: 'Martingale', group: 'Money management', about: 'Start at 2, double after every loss, back to 2 after a win. Risky: losing streaks hit the 25% cap.',
+  { name: 'Martingale', group: 'Money management', about: 'Start at 0.02 NEAR, double after every loss, back to 0.02 after a win. Risky: losing streaks hit the 25% cap.',
     rules: [R(ALWAYS, 'random', 2, 'martingale')] },
-  { name: 'Paroli', group: 'Money management', about: 'Start at 5, double after every win, back to 5 after 3 wins or any loss.',
+  { name: 'Paroli', group: 'Money management', about: 'Start at 0.05 NEAR, double after every win, back to 0.05 after 3 wins or any loss.',
     rules: [R(ALWAYS, 'random', 5, 'paroli')] },
 ]

@@ -37,5 +37,49 @@
       "min_stake": "1000000000000000000",
       "faucet_amount": "1000000000000000000000"
     }
+  },
+  "v4t.befewer.testnet": {
+    "deployed_at": "2026-11-06T16:32:48.320Z",
+    "tx": "5aKwuRmJnS3jRHRB2tXf99taGSobYC3Jpq4EtcTFg1fx",
+    "code_sha256": "bee033c1af5a64f00c6af896a0ca5d9c34c13d8ea5b3a334ea1098237a4fd37c",
+    "params": {
+      "genesis_ns": "1793982900000000000",
+      "commit_ns": "180000000000",
+      "reveal_ns": "90000000000",
+      "max_stake_bps": 2500,
+      "min_stake": "10000000000000000000000",
+      "fee_bps": 500,
+      "reward_per_round": "1000000000000000000",
+      "max_supply": "1000000000000000000000000",
+      "streak_min": 3,
+      "graduate_at": "1500000000000000000000000",
+      "dex": "ref-finance-101.testnet",
+      "wnear": "wrap.testnet",
+      "pool_fee": 30,
+      "buyback_max": "500000000000000000000000",
+      "buyback_every_ns": "60000000000"
+    }
+  },
+  "v4.befewer.testnet": {
+    "deployed_at": "2026-11-06T16:44:23.904Z",
+    "tx": "AgAFeKPVSnF2YwxhbPm7gXDaWs9V4PAUeh5iyspy7V7Q",
+    "code_sha256": "bee033c1af5a64f00c6af896a0ca5d9c34c13d8ea5b3a334ea1098237a4fd37c",
+    "params": {
+      "genesis_ns": "1793983620000000000",
+      "commit_ns": "180000000000",
+      "reveal_ns": "90000000000",
+      "max_stake_bps": 2500,
+      "min_stake": "10000000000000000000000",
+      "fee_bps": 500,
+      "reward_per_round": "1000000000000000000",
+      "max_supply": "1000000000000000000000000",
+      "streak_min": 3,
+      "graduate_at": "5000000000000000000000000",
+      "dex": "ref-finance-101.testnet",
+      "wnear": "wrap.testnet",
+      "pool_fee": 30,
+      "buyback_max": "500000000000000000000000",
+      "buyback_every_ns": "600000000000"
+    }
   }
 }

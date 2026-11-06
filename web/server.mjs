@@ -1,6 +1,7 @@
-// FEWER web server: serves the built page (gzip) and one endpoint, POST /api/guest, which
+// BEFEWER web server: serves the built page (gzip) and one endpoint, POST /api/guest, which
 // creates a throwaway testnet account g<random>.befewer.testnet for a public key generated in
-// the visitor's browser (the private key never leaves the browser). Testnet only.
+// the visitor's browser (the private key never leaves the browser) and deposits a little
+// testnet NEAR into its game balance so it can play right away. Testnet only.
 // usage: PORT=5043 node server.mjs
 import http from 'node:http'
 import fs from 'node:fs'
@@ -8,19 +9,21 @@ import path from 'node:path'
 import zlib from 'node:zlib'
 import crypto from 'node:crypto'
 import { fileURLToPath } from 'node:url'
-import { loadAccount } from '../keeper/lib.mjs'
+import { loadAccount, NEAR } from '../keeper/lib.mjs'
 
 const PORT = Number(process.env.PORT || 5043)
 const HOST = process.env.HOST || '127.0.0.1'
 const ROOT_ACCOUNT = 'befewer.testnet'
-const GUEST_NEAR = 5n * 10n ** 22n // 0.05 testnet NEAR for gas
+const CONTRACT = process.env.FEWER_CONTRACT || 'v4.befewer.testnet'
+const GUEST_NEAR = NEAR / 20n // 0.05 testnet NEAR in the wallet, for gas
+const GUEST_PLAY = (NEAR * 3n) / 10n // 0.3 testnet NEAR in the game balance (0.01 of it pays the storage fee)
 const PER_IP_PER_HOUR = 3
-const PER_DAY = 300
+const PER_DAY = 60
 // Pages that may call /api/guest besides this server's own host. claude.aifinode.xyz/p/5043/ is
 // the owner's password-gated preview proxy (it rewrites Host to 127.0.0.1:5043 but keeps Origin).
 const ORIGINS = (process.env.FEWER_ORIGINS || 'https://fewer.aifinode.xyz,https://claude.aifinode.xyz').split(',')
 const TRUSTED_ORIGINS = new Set(['https://claude.aifinode.xyz']) // owner-only: not rate limited
-const DIST = path.join(path.dirname(fileURLToPath(import.meta.url)), 'dist')
+const DIST = process.env.FEWER_DIST || path.join(path.dirname(fileURLToPath(import.meta.url)), 'dist')
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.json': 'application/json', '.png': 'image/png', '.mp4': 'video/mp4' }
 
 const cache = new Map() // path -> { raw, gz, type }
@@ -50,7 +53,9 @@ function allowed(ip) {
 
 async function createGuest(publicKey) {
   const id = `g${crypto.randomBytes(6).toString('hex')}.${ROOT_ACCOUNT}`
-  await loadAccount(ROOT_ACCOUNT).createSubAccount({ accountOrPrefix: id, publicKey, nearToTransfer: GUEST_NEAR })
+  const root = loadAccount(ROOT_ACCOUNT)
+  await root.createSubAccount({ accountOrPrefix: id, publicKey, nearToTransfer: GUEST_NEAR })
+  await root.callFunction({ contractId: CONTRACT, methodName: 'deposit', args: { account_id: id }, gas: 30_000_000_000_000n, deposit: GUEST_PLAY })
   return id
 }
 

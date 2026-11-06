@@ -45,7 +45,12 @@ export function commitHash(accountId, round, side, salt) {
   return crypto.createHash('sha256').update(`fewer:${accountId}:${round}:${side}:${salt}`).digest('hex')
 }
 
-export const ONE = 10n ** 18n
+export const TOKEN = 10n ** 18n // 1 BEFEWER
+export const NEAR = 10n ** 24n // 1 NEAR in yocto
+export const ONE = TOKEN
+/** BEFEWER amount (18 decimals) for logs */
 export const fmt = x => (Number(BigInt(x) / 10n ** 15n) / 1000).toLocaleString('en-US', { maximumFractionDigits: 3 })
+/** NEAR amount (24 decimals) for logs */
+export const fmtN = x => (Number(BigInt(x) / 10n ** 20n) / 10000).toLocaleString('en-US', { maximumFractionDigits: 4 })
 export const sleep = ms => new Promise(r => setTimeout(r, ms))
 export const log = (...a) => console.log(new Date().toISOString().slice(0, 19).replace('T', ' '), ...a)

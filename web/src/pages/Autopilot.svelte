@@ -3,20 +3,22 @@
   import Icon from '../lib/Icon.svelte'
   import Equity from '../lib/Equity.svelte'
   import { label } from '../questions'
-  import { backtest, describe, PRESETS, PRESET_GROUPS, type Rule, type Cond, type Pick, type Unit } from '../rules'
+  import { backtest, describe, chipsText, PRESETS, PRESET_GROUPS, type Rule, type Cond, type Pick, type Unit } from '../rules'
   import { game, commitRound, lookup, saveRules, setAutopilot, draftDirty, putDraftLive, discardDraft, toast } from '../game.svelte'
 
   const WINDOW = 60
+  // replays count chips of 0.01 NEAR and pay the contract's fee on every bet
+  const fee = () => game.params?.fee_bps ?? 0
   const rules = $derived(game.ap.draft)
   const bt = $derived.by(() => {
     game.history
     const cur = commitRound()
-    return backtest($state.snapshot(game.ap.draft) as Rule[], Math.max(0, cur - WINDOW), cur - 1, lookup, 1000)
+    return backtest($state.snapshot(game.ap.draft) as Rule[], Math.max(0, cur - WINDOW), cur - 1, lookup, 1000, fee())
   })
   const btLive = $derived.by(() => {
     game.history
     const cur = commitRound()
-    return backtest($state.snapshot(game.ap.live) as Rule[], Math.max(0, cur - WINDOW), cur - 1, lookup, 1000)
+    return backtest($state.snapshot(game.ap.live) as Rule[], Math.max(0, cur - WINDOW), cur - 1, lookup, 1000, fee())
   })
   const dirty = $derived(JSON.stringify(game.ap.draft) !== JSON.stringify(game.ap.live))
   let confirmLive = $state(false)
@@ -24,7 +26,7 @@
   const presetBt = $derived.by(() => {
     game.history
     const cur = commitRound()
-    return PRESETS.map(p => backtest(p.rules, Math.max(0, cur - WINDOW), cur - 1, lookup, 1000))
+    return PRESETS.map(p => backtest(p.rules, Math.max(0, cur - WINDOW), cur - 1, lookup, 1000, fee()))
   })
 
   const KINDS: [Cond['kind'], string][] = [
@@ -69,7 +71,7 @@
     commit()
   }
   function use(i: number) { game.ap.draft = structuredClone(PRESETS[i].rules); commit(); toast('info', `${PRESETS[i].name} loaded into the draft. Put it live when you're ready.`) }
-  const fmtN = (v: number) => v.toLocaleString('en-US')
+  const fmtN = (v: number) => (v / 100).toLocaleString('en-US', { maximumFractionDigits: 2 })
   const FIXED = [1, 2, 5, 10, 20, 50, 100]
   const PCTS = [1, 2, 5, 10, 25]
   const BASES = [1, 2, 5, 10]
@@ -179,20 +181,20 @@
                 <span class="w">with</span>
                 <select aria-label="Stake" value={`${CODE[r.unit]}:${r.amount}`} onchange={e => setStake(i, (e.currentTarget as HTMLSelectElement).value)}>
                   <optgroup label="The same amount every time">
-                    {#each FIXED as n}<option value={`f:${n}`}>{n} BEFEWER</option>{/each}
-                    {#if !has(r, 'fixed', FIXED)}<option value={`f:${r.amount}`}>{r.amount} BEFEWER</option>{/if}
+                    {#each FIXED as n}<option value={`f:${n}`}>{chipsText(n)}</option>{/each}
+                    {#if !has(r, 'fixed', FIXED)}<option value={`f:${r.amount}`}>{chipsText(r.amount)}</option>{/if}
                   </optgroup>
                   <optgroup label="Share of my balance">
                     {#each PCTS as n}<option value={`p:${n}`}>{n}% of balance</option>{/each}
                     {#if !has(r, 'pct', PCTS)}<option value={`p:${r.amount}`}>{r.amount}% of balance</option>{/if}
                   </optgroup>
                   <optgroup label="Double after a loss (martingale)">
-                    {#each BASES as n}<option value={`m:${n}`}>{n}, doubled after each loss</option>{/each}
-                    {#if !has(r, 'martingale', BASES)}<option value={`m:${r.amount}`}>{r.amount}, doubled after each loss</option>{/if}
+                    {#each BASES as n}<option value={`m:${n}`}>{chipsText(n)}, doubled after each loss</option>{/each}
+                    {#if !has(r, 'martingale', BASES)}<option value={`m:${r.amount}`}>{chipsText(r.amount)}, doubled after each loss</option>{/if}
                   </optgroup>
                   <optgroup label="Double after a win (paroli)">
-                    {#each BASES as n}<option value={`r:${n}`}>{n}, doubled after each win</option>{/each}
-                    {#if !has(r, 'paroli', BASES)}<option value={`r:${r.amount}`}>{r.amount}, doubled after each win</option>{/if}
+                    {#each BASES as n}<option value={`r:${n}`}>{chipsText(n)}, doubled after each win</option>{/each}
+                    {#if !has(r, 'paroli', BASES)}<option value={`r:${r.amount}`}>{chipsText(r.amount)}, doubled after each win</option>{/if}
                   </optgroup>
                 </select>
               {/if}
@@ -233,7 +235,7 @@
       <div class="bh"><h2>Replay on the last {bt.rounds} rounds</h2><span class="faint small">{dirty ? 'draft' : 'running rules'}</span></div>
       {#if bt.rounds}
         <div class="kpis">
-          <div><div class="eyebrow">Net</div><div class="kv num {tone(net(bt))}">{signed(net(bt))}</div><div class="faint small">1,000 → {fmtN(bt.end)}</div></div>
+          <div><div class="eyebrow">Net</div><div class="kv num {tone(net(bt))}">{signed(net(bt))}</div><div class="faint small">10 → {fmtN(bt.end)} NEAR</div></div>
           <div><div class="eyebrow">Staked</div><div class="kv num">{fmtN(bt.staked)}</div><div class="faint small">{bt.bets} bets · {bt.skips} skipped</div></div>
           <div><div class="eyebrow">Won / lost</div><div class="kv num"><span class="good">{bt.wins}</span> / <span class="burn">{bt.losses}</span></div><div class="faint small">{bt.voids} void</div></div>
         </div>
@@ -241,14 +243,14 @@
           <div class="vs-live small">Draft <b class={tone(net(bt))}>{signed(net(bt))}</b> <span class="faint">vs</span> running rules <b class={tone(net(btLive))}>{signed(net(btLive))}</b> <span class="faint">on the same rounds</span></div>
         {/if}
         <Equity curve={bt.curve} />
-        <p class="faint small">Replays your rules round by round using only what was known before each round. Assumes your own bet would not have changed which side was smaller.</p>
+        <p class="faint small">Replays your rules round by round from 10 NEAR, using only what was known before each round and paying the {fee() / 100}% fee on every bet. Assumes your own bet would not have changed which side was smaller.</p>
         <details class="tbl">
           <summary>Every round in the replay</summary>
           <table>
             <thead><tr><th>Round</th><th>Rules bet</th><th>Smaller side</th><th>Balance</th></tr></thead>
             <tbody>
               {#each [...bt.curve].reverse() as s}
-                <tr><td class="num">#{s.round}</td><td>{s.side ? `${s.stake} on ${label(s.round, s.side)}` : 'skip'}</td><td>{s.outcome === 'void' ? 'void' : label(s.round, s.outcome)}</td><td class="num">{fmtN(s.bal)}</td></tr>
+                <tr><td class="num">#{s.round}</td><td>{s.side ? `${fmtN(s.stake)} on ${label(s.round, s.side)}` : 'skip'}</td><td>{s.outcome === 'void' ? 'void' : label(s.round, s.outcome)}</td><td class="num">{fmtN(s.bal)}</td></tr>
               {/each}
             </tbody>
           </table>

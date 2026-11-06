@@ -72,6 +72,12 @@ test('fixed stakes do not compound (DCA)', () => {
   assert.deepEqual([bt.bets, bt.wins, bt.losses, bt.voids, bt.staked, bt.end], [4, 2, 1, 1, 40, 1010])
 })
 
+test('the replay pays the contract fee: win +stake-fee, loss -stake-fee, void free', () => {
+  // fixed 10 chips, 5% fee: A wins (+9.5), B wins (-10.5), void (0), A wins (+9.5)
+  const bt = backtest([{ cond: { kind: 'always' }, pick: 'A', unit: 'fixed', amount: 10 }], 1, 4, history({ 1: 'A', 2: 'B', 3: 'void', 4: 'A' }), 1000, 500)
+  assert.equal(bt.end, 1000 + 9.5 - 10.5 + 9.5)
+})
+
 test('rules saved by the old percentage-only version still load', () => {
   assert.deepEqual(normalizeRule({ cond: { kind: 'always' }, pick: 'A', pct: 7 }), { cond: { kind: 'always' }, pick: 'A', unit: 'pct', amount: 7 })
 })

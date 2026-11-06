@@ -6,7 +6,7 @@
   import Orbs from '../lib/Orbs.svelte'
   import Icon from '../lib/Icon.svelte'
   import {
-    game, fmt, ONE, commitRound, revealRound, started, msLeft, clock, roundById, myOpen, picks, placeBet, capFor, toast,
+    game, fmt, fmtN, toNear, toYocto, feeFor, GUEST_GAME_NEAR, commitRound, revealRound, started, msLeft, clock, roundById, myOpen, picks, placeBet, capFor, toast,
     type Side,
   } from '../game.svelte'
 
@@ -22,10 +22,12 @@
   const leftReveal = $derived(msLeft(game.status?.reveal_ends_at))
   const mine = $derived(myOpen(r))
   const myPick = $derived(mine ? picks()[r] : undefined)
-  const newcomer = $derived(!game.session || !game.me || (!game.me.faucet_claimed && BigInt(game.me.balance) === 0n))
-  const balance = $derived(newcomer ? BigInt(game.params?.faucet_amount ?? '0') : BigInt(game.me?.balance ?? '0'))
+  const newcomer = $derived(!game.session || !game.me || !game.me.registered)
+  const balance = $derived(newcomer ? GUEST_GAME_NEAR : BigInt(game.me?.balance ?? '0'))
   const cap = $derived(game.params ? capFor(balance) : 0n)
-  const capW = $derived(Number(cap / ONE))
+  // stakes are picked in NEAR, in steps of 0.01 (the smallest bet)
+  const capW = $derived(Math.floor(toNear(cap) * 100) / 100)
+  const minW = $derived(game.params ? toNear(game.params.min_stake) : 0.01)
 
   // crowd hints: what happened last time this question was asked + the recent smaller sides
   const past = $derived.by(() => { game.history; return H.sameQuestion(r, 5) })
@@ -33,9 +35,21 @@
   const lastTime = $derived(past.length ? { t: past[0], o: H.outcome(past[0])!, sp: H.split(past[0]) } : null)
 
   let side = $state<Side | null>(null)
-  let stake = $state(1)
-  $effect(() => { if (stake > capW && capW >= 1) stake = capW })
-  const chips = $derived([1, 10, 50, 100].filter(x => x < capW).concat(capW >= 1 ? [capW] : []))
+  let stake = $state(0.01)
+  $effect(() => { if (stake > capW && capW >= minW) stake = capW })
+  const chips = $derived([0.01, 0.02, 0.05, 0.1, 0.25].filter(x => x < capW).slice(-3).concat(capW >= minW ? [capW] : []))
+  const stakeY = $derived(toYocto(Math.max(minW, Math.round((stake || 0) * 100) / 100)))
+  const feeY = $derived(feeFor(stakeY))
+
+  // mining: the streak this bet would complete if it wins, counted over finished rounds
+  const st = $derived(game.status)
+  const need = $derived(game.params?.streak_min ?? 3)
+  const streak = $derived(game.me?.streak ?? 0)
+  const nextStreak = $derived(streak + 1)
+  const sharesIfWin = $derived(nextStreak >= need ? nextStreak - need + 1 : 0)
+  const dex = $derived(st?.dex)
+  const toGraduate = $derived(st ? Math.min(1, toNear(st.treasury) / Math.max(1e-9, toNear(st.graduate_at))) : 0)
+  const everyMin = $derived(game.params ? Math.round(Number(BigInt(game.params.buyback_every_ns) / 1_000_000_000n) / 60) : 0)
 
   let ctaEl = $state<HTMLButtonElement | null>(null)
   function pickSide(S: Side) {
@@ -49,7 +63,7 @@
   async function seal() {
     if (!side) return
     try {
-      await placeBet(side, BigInt(Math.max(1, Math.floor(stake))) * ONE)
+      await placeBet(side, stakeY)
       side = null
     } catch (e: any) {
       toast('err', String(e.message || e))
@@ -63,7 +77,7 @@
       <div>
         <div class="eyebrow">Round {r} · {started() ? 'taking bets' : 'opens soon'}</div>
         <div class="meta">
-          <span class="pill num"><Icon name="lock" size={14} /> {cur?.commits ?? 0} sealed · {fmt(cur?.committed ?? '0')} in</span>
+          <span class="pill num"><Icon name="lock" size={14} /> {cur?.commits ?? 0} sealed · {fmtN(cur?.committed ?? '0')} NEAR in</span>
         </div>
       </div>
       {#if started()}
@@ -76,7 +90,7 @@
     {#key r}
       <h1 id="q" class="question" in:fade={{ duration: 250 }}>{q.q}</h1>
     {/key}
-    <p class="ask">Don't pick what you like. Pick what you think <b>fewer coins</b> will pick.</p>
+    <p class="ask">Don't pick what you like. Pick what you think <b>less NEAR</b> will be on.</p>
 
     <div class="crowd">
       {#if lastTime}
@@ -104,7 +118,7 @@
         <div class="lockicon"><Icon name="lock" size={26} /></div>
         <div>
           <div class="eyebrow">Sealed in round {r}</div>
-          <div class="sealed-amt"><b class="num">{fmt(mine.amount)}</b> BEFEWER on <b class="side-{myPick?.side}">{myPick ? label(r, myPick.side) : '?'}</b></div>
+          <div class="sealed-amt"><b class="num">{fmtN(mine.amount)}</b> NEAR on <b class="side-{myPick?.side}">{myPick ? label(r, myPick.side) : '?'}</b> <span class="faint small">+{fmtN(mine.fee)} fee</span></div>
           <p class="muted">Nobody, including us, can see your answer until the reveal opens in <b class="num">{clock(leftCommit)}</b>. It opens itself, so you can close this page. The result lands about {Math.round(revealTotal / 1000)} s after that.</p>
         </div>
       </div>
@@ -120,7 +134,7 @@
         {/each}
       </div>
 
-      {#if capW >= 1}
+      {#if capW >= minW}
         <div class="stake">
           <span class="eyebrow">Stake</span>
           <div class="seg" role="radiogroup" aria-label="Stake">
@@ -128,18 +142,18 @@
               <button role="radio" aria-checked={stake === c} class:on={stake === c} onclick={() => (stake = c)}>{c === capW ? `Max ${c}` : c}</button>
             {/each}
           </div>
-          <label class="custom"><span class="sr">Custom stake</span><input type="number" min="1" max={capW} bind:value={stake} inputmode="numeric" /> <span class="faint">BEFEWER</span></label>
+          <label class="custom"><span class="sr">Custom stake</span><input type="number" min={minW} max={capW} step="0.01" bind:value={stake} inputmode="decimal" /> <span class="faint">NEAR</span></label>
         </div>
       {/if}
 
-      <button bind:this={ctaEl} class="btn primary cta" disabled={!side || !!game.busy || capW < 1} onclick={seal}>
+      <button bind:this={ctaEl} class="btn primary cta" disabled={!side || !!game.busy || capW < minW} onclick={seal}>
         {#if game.busy}<span class="spin" aria-hidden="true"></span>{game.busy}…
         {:else if !side}Pick an answer
-        {:else}<Icon name="lock" size={18} /> Seal {stake} BEFEWER on {side === 'A' ? q.a : q.b}{/if}
+        {:else}<Icon name="lock" size={18} /> Seal {fmtN(stakeY)} NEAR on {side === 'A' ? q.a : q.b}{/if}
       </button>
       <p class="fine">
-        {#if newcomer}Your first bet creates a free testnet account in this browser and gives you {fmt(game.params?.faucet_amount ?? '0')} BEFEWER. No wallet, no seed phrase, no popups.
-        {:else}Win: +{stake} (you get {stake * 2} back). Lose: −{stake}. The gap between the two sides burns. Max {capW} per round (25% of your balance).{/if}
+        {#if newcomer}Your first bet creates a free testnet account in this browser with {fmtN(GUEST_GAME_NEAR)} testnet NEAR to play. No wallet, no seed phrase, no popups.
+        {:else}Win: +{fmtN(stakeY)} NEAR (you get {fmtN(stakeY * 2n)} back). Lose: −{fmtN(stakeY)}. Every bet also pays a {(game.params?.fee_bps ?? 0) / 100}% fee ({fmtN(feeY)} NEAR) to the treasury. Max {capW} per round (25% of your balance).{/if}
       </p>
     {/if}
   </section>
@@ -175,7 +189,7 @@
         <Orbs round={lastSettled} />
         <p class="fine center">
           {#if lastSettled.outcome === 'void'}Everyone was on one side, so everyone got their bet back.
-          {:else}<span class="burn"><Icon name="flame" size={14} /> {fmt(lastSettled.burned)} BEFEWER burned</span> · bets on the smaller side won +100%.{/if}
+          {:else}<span class="gold"><Icon name="flame" size={14} /> {fmtN(lastSettled.to_treasury)} NEAR to the treasury</span> · bets on the smaller side won +100%{#if BigInt(lastSettled.reward) > 0n} · <b class="good">{fmt(lastSettled.reward)} BEFEWER mined</b> by streak winners{/if}.{/if}
         </p>
       </section>
     {/if}
@@ -185,13 +199,47 @@
       <a class="card mine" href="#/me">
         <div class="eyebrow">Your last bet · round {x.round}</div>
         <div class="res">
-          {#if x.outcome === 'void'}<b>Refunded {fmt(x.amount)}</b>
-          {:else if x.outcome === x.side}<b class="good">Won +{fmt(x.amount)}</b>
-          {:else}<b class="burn">Lost {fmt(x.amount)}</b>{/if}
+          {#if x.outcome === 'void'}<b>Refunded {fmtN(x.amount + x.fee)} NEAR</b>
+          {:else if x.outcome === x.side}<b class="good">Won +{fmtN(x.amount)} NEAR</b>
+          {:else}<b class="burn">Lost {fmtN(x.amount)} NEAR</b>{/if}
           <span class="muted">· you picked {label(x.round, x.side)}</span>
         </div>
         <Icon name="chevron" size={18} />
       </a>
+    {/if}
+
+    {#if st && game.params}
+      <section class="card mining" aria-labelledby="mine-h">
+        <div class="eyebrow" id="mine-h">Mine BEFEWER</div>
+        <div class="pot"><b class="num">{fmt(st.pot)}</b> BEFEWER in the pot</div>
+        <div class="dots" aria-label="Your streak: {streak} of {need}">
+          {#each Array(need) as _, i}<span class="dot" class:on={i < streak}></span>{/each}
+          <span class="small muted">streak {streak}</span>
+        </div>
+        <p class="fine">
+          {#if sharesIfWin > 0}Win this round and you mine: a {nextStreak}-win streak earns {sharesIfWin} share{sharesIfWin === 1 ? '' : 's'} per 0.001 NEAR staked. Winners split the pot by shares.
+          {:else}Win {need} rounds in a row and that win mines the pot. Win this one for streak {nextStreak} of {need}.{/if}
+          Each round adds {fmt(game.params.reward_per_round)} BEFEWER; nobody else can mint. {fmt(st.issued)} of {fmt(st.max_supply)} issued so far.
+        </p>
+      </section>
+
+      {#if dex}
+        <section class="card treasury" aria-labelledby="tr-h">
+          <div class="eyebrow" id="tr-h">Treasury</div>
+          {#if dex.step < 5}
+            <div class="pot"><b class="num">{fmtN(st.treasury)}</b> of {fmtN(st.graduate_at)} NEAR</div>
+            <div class="bar" aria-label="{Math.round(toGraduate * 100)}% of the way to opening the pool"><span style="width:{toGraduate * 100}%"></span></div>
+            <p class="fine">
+              {#if dex.step > 0}Opening the pool now: step {dex.step} of 5 ({dex.stage}).
+              {:else}At {fmtN(st.graduate_at)} NEAR the contract opens a BEFEWER/NEAR pool on Ref Finance with all of it, plus as many new BEFEWER as have been mined. The pool shares stay locked in the contract.{/if}
+              Fees, the gap between the sides and unopened bets fill it.
+            </p>
+          {:else}
+            <div class="pot"><b class="num">{fmtN(st.treasury)}</b> NEAR</div>
+            <p class="fine">Pool <a href="https://testnet.ref.finance/pool/{dex.pool_id}" target="_blank" rel="noopener">#{dex.pool_id} on Ref Finance</a> is open, its shares locked in the contract. Every {everyMin} min the treasury buys up to {fmtN(game.params.buyback_max)} NEAR of BEFEWER there and burns it: {dex.buybacks} buyback{dex.buybacks === 1 ? '' : 's'} so far, {fmtN(dex.bought_near)} NEAR spent, <b>{fmt(dex.bought_burned)} BEFEWER burned</b>.</p>
+          {/if}
+        </section>
+      {/if}
     {/if}
   </aside>
 </div>
@@ -255,4 +303,12 @@
   .mine .eyebrow { grid-column: 1 }
   .mine .res { grid-column: 1; font-size: 15px }
   .mine :global(svg) { grid-column: 2; grid-row: 1 / span 2; color: var(--fg-3) }
+  .mining, .treasury { padding: 16px 18px }
+  .pot { font-size: 20px; margin-top: 4px; overflow-wrap: anywhere }
+  .dots { display: flex; align-items: center; gap: 6px; margin-top: 10px }
+  .dot { width: 14px; height: 14px; border-radius: 50%; border: 1.5px solid var(--brand); background: transparent }
+  .dot.on { background: var(--brand) }
+  .bar { height: 8px; border-radius: 999px; background: var(--surface-2); border: 1px solid var(--line); margin-top: 10px; overflow: hidden }
+  .bar span { display: block; height: 100%; background: var(--brand); border-radius: 999px }
+  .gold { color: var(--brand) }
 </style>
