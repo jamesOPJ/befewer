@@ -16,6 +16,10 @@ const ROOT_ACCOUNT = 'befewer.testnet'
 const GUEST_NEAR = 5n * 10n ** 22n // 0.05 testnet NEAR for gas
 const PER_IP_PER_HOUR = 3
 const PER_DAY = 300
+// Pages that may call /api/guest besides this server's own host. claude.aifinode.xyz/p/5043/ is
+// the owner's password-gated preview proxy (it rewrites Host to 127.0.0.1:5043 but keeps Origin).
+const ORIGINS = (process.env.FEWER_ORIGINS || 'https://fewer.aifinode.xyz,https://claude.aifinode.xyz').split(',')
+const TRUSTED_ORIGINS = new Set(['https://claude.aifinode.xyz']) // owner-only: not rate limited
 const DIST = path.join(path.dirname(fileURLToPath(import.meta.url)), 'dist')
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.json': 'application/json', '.png': 'image/png', '.mp4': 'video/mp4' }
 
@@ -69,14 +73,15 @@ http.createServer(async (req, res) => {
     let originHost = null
     try { originHost = origin && origin !== 'null' ? new URL(origin).host : null } catch { originHost = 'invalid' }
     const hosts = [req.headers.host, req.headers['x-forwarded-host']].filter(Boolean)
-    if (originHost && !hosts.includes(originHost)) return reject(res, req, 403, 'cross-site request')
+    const sameSite = !originHost || hosts.includes(originHost) || /^(localhost|127\.0\.0\.1)(:\d+)?$/.test(originHost) || ORIGINS.includes(origin)
+    if (!sameSite) return reject(res, req, 403, 'cross-site request')
     let body = ''
     for await (const chunk of req) { body += chunk; if (body.length > 2000) return reject(res, req, 413, 'too large') }
     let pk
     try { pk = JSON.parse(body).publicKey } catch { return reject(res, req, 400, 'bad json') }
     if (typeof pk !== 'string' || !/^ed25519:[1-9A-HJ-NP-Za-km-z]{43,44}$/.test(pk)) return reject(res, req, 400, 'publicKey must be ed25519:<base58>')
     // loopback without a Cloudflare header = someone on this machine or an SSH tunnel: not rate limited
-    const local = !req.headers['cf-connecting-ip'] && /^(::ffff:)?127\.0\.0\.1$|^::1$/.test(req.socket.remoteAddress || '')
+    const local = (!req.headers['cf-connecting-ip'] && /^(::ffff:)?127\.0\.0\.1$|^::1$/.test(req.socket.remoteAddress || '')) || TRUSTED_ORIGINS.has(origin)
     const why = local ? null : allowed(ip)
     if (why) return reject(res, req, 429, why)
     try {
