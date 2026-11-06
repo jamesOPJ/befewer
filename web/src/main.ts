@@ -22,6 +22,7 @@ let rounds: RoundV[] = []
 let busy = ''
 let stakeChoice: number | null = null // the player's slider choice survives re-renders
 let notice = ''
+let failure = '' // last error, shown in a red box until the next action
 
 const now = () => Date.now() + skew
 function left(ns: string): string {
@@ -43,7 +44,10 @@ async function refresh(full = false) {
       for (const r of fresh) byId.set(r.round, r)
       rounds = [...byId.values()].sort((a, b) => Number(b.round) - Number(a.round)).slice(0, 30)
     }
-    if (session) me = await view<PlayerV>('get_player', { account_id: session.accountId })
+    if (session) {
+      me = await view<PlayerV>('get_player', { account_id: session.accountId })
+      await loadResults()
+    }
     render()
   } catch (e) {
     console.error(e)
@@ -87,6 +91,30 @@ function renderMove(_cr: RoundV | undefined): string {
     <p class="fine">Pick the side you think <b>fewer coins</b> will pick. Win: 2× back. Lose: your stake. The gap between the sides burns.</p>
     ${newcomer ? `<p class="fine">Your first tap creates a free testnet account in this browser and gives you ${fmt(params.faucet_amount)} FEWER. No wallet, no seed phrase, no popups.</p>` : ''}
   </div>`
+}
+
+// Results of my finished bets, rebuilt from the picks this browser remembers + the settled rounds.
+type Result = { round: string; side: 'A' | 'B'; amount: bigint; outcome: 'A' | 'B' | 'void' }
+let results: Result[] = []
+const settled = new Map<string, RoundV>()
+async function loadResults() {
+  if (!session || !me) return
+  const picks = loadPicks(session.accountId)
+  const open = new Set(me.open.map(o => o.round))
+  const ids = Object.keys(picks).filter(r => !open.has(r)).sort((a, b) => Number(b) - Number(a)).slice(0, 6)
+  const out: Result[] = []
+  for (const id of ids) {
+    let rv = settled.get(id) ?? roundById(id)
+    if (!rv?.settled) rv = await view<RoundV>('get_round', { round: id })
+    if (!rv.settled || !rv.outcome) continue
+    settled.set(id, rv)
+    out.push({ round: id, side: picks[id].side, amount: BigInt(picks[id].amount), outcome: rv.outcome })
+  }
+  results = out
+}
+function resultText(x: Result): string {
+  if (x.outcome === 'void') return `refunded ${fmt(x.amount)} (everyone was on one side, or a tie)`
+  return x.outcome === x.side ? `<b class="good">won +${fmt(x.amount)}</b> (got ${fmt(2n * x.amount)} back)` : `<b class="burn">lost ${fmt(x.amount)}</b>`
 }
 
 /** Make sure this browser has a testnet account with FEWER in it. */
@@ -148,11 +176,12 @@ function render() {
     <p class="testnet">Testnet demo built for NEAR HACKATHON. Testnet FEWER is free and has no monetary value; there is no token sale.</p>
   </header>
   <section class="live">
-    <div class="card now"><div id="s-round"></div><div id="s-move"></div><div id="s-notice"></div></div>
+    <div class="card now"><div id="s-round"></div><div id="s-last"></div><div id="s-move"></div><div id="s-notice"></div></div>
     <div class="card reveal" id="s-reveal"></div>
   </section>
   <section class="stats" id="s-stats"></section>
   <div id="s-mine"></div>
+  <div id="s-results"></div>
   <section><h2>Recent rounds</h2><div id="s-rounds"></div>
     <p class="fine">Rounds nobody played are skipped. The burn is |A − B| plus any bet that was never opened.</p></section>
   <section><h2>NPC players</h2><p class="fine">Four bots with their own testnet wallets keep every round alive. They play by the same rules as you.</p>
@@ -183,7 +212,7 @@ function render() {
       <div class="k">${cr?.commits ?? 0} sealed bet${cr?.commits === 1 ? '' : 's'} · sides hidden until the reveal opens</div>`)
   setHTML('s-move', renderMove(cr))
   applyStake()
-  setHTML('s-notice', `${notice ? `<p class="notice">${esc(notice)}</p>` : ''}${busy ? `<p class="notice">${esc(busy)}</p>` : ''}`)
+  setHTML('s-notice', `${failure ? `<p class="failure">Your bet did not go through: ${esc(failure)}</p>` : ''}${notice ? `<p class="notice">${esc(notice)}</p>` : ''}${busy ? `<p class="notice busy">${esc(busy)}</p>` : ''}`)
   setHTML('s-reveal', rr
     ? `<div class="k">Round ${rr.round} · revealing · result in ${timer(status.reveal_ends_at)}</div>
         <div class="vs"><span class="side-A">A ${fmt(rr.revealed_a)}</span><span class="side-B">B ${fmt(rr.revealed_b)}</span></div>
@@ -195,6 +224,10 @@ function render() {
     <div><div class="k">Burned so far</div><div class="v burn">${fmt(burned)}</div><div class="k">${burnPct}% of everything handed out · ${status.rounds_settled} rounds</div></div>
     <div><div class="k">In players' hands</div><div class="v">${fmt(circulating)}</div><div class="k">${fmt(status.escrow)} locked in bets</div></div>
     <div><div class="k">Longest minority streak</div><div class="v">${status.best_streak}</div><div class="k">${status.best_streak_holder ? esc(short(status.best_streak_holder)) : '—'}</div></div>`)
+  const last = results[0]
+  setHTML('s-last', last ? `<p class="last">Round ${last.round}: <b class="side-${last.outcome}">${last.outcome === 'void' ? 'void' : last.outcome}</b>${last.outcome === 'void' ? '' : ' was the smaller side'}. You bet <b class="side-${last.side}">${last.side}</b> → ${resultText(last)}.</p>` : '')
+  setHTML('s-results', results.length ? `<section><h2>Your results</h2><table><tr><th>Round</th><th>Your side</th><th>Stake</th><th>Smaller side</th><th>Result</th></tr>
+    ${results.map(x => `<tr><td>${x.round}</td><td class="side-${x.side}">${x.side}</td><td>${fmt(x.amount)}</td><td>${x.outcome}</td><td>${resultText(x)}</td></tr>`).join('')}</table></section>` : '')
   setHTML('s-mine', session && me && me.open.length ? `<section><h2>Your bets</h2><table><tr><th>Round</th><th>Stake</th><th>Your side</th><th>Status</th></tr>
     ${me.open.map(o => { const p = loadPicks(session!.accountId)[o.round]; const rv = roundById(o.round)
       const st = rv?.settled ? `settled: ${rv.outcome}` : o.side ? 'opened' : 'sealed'
@@ -229,6 +262,7 @@ function renderNpcs() {
 
 async function act(kind: string, el: HTMLElement) {
   notice = ''
+  failure = ''
   try {
     if (kind === 'faucet') {
       await ensurePlayer()
@@ -259,7 +293,8 @@ async function act(kind: string, el: HTMLElement) {
       notice = `Sealed: ${fmt(amount)} FEWER on ${side} in round ${r}.`
     }
   } catch (e: any) {
-    notice = String(e.message || e)
+    failure = String(e.message || e)
+    console.error('FEWER action failed', kind, e)
   } finally {
     busy = ''
     await refresh(true)

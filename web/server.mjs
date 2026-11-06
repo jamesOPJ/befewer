@@ -55,22 +55,33 @@ function json(res, code, body) {
   res.end(JSON.stringify(body))
 }
 
+function reject(res, req, code, error) {
+  console.log(new Date().toISOString(), 'reject', code, req.method, req.url, 'host', req.headers.host, 'origin', req.headers.origin, error)
+  return json(res, code, { error })
+}
+
 http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://x')
+  if (!url.pathname.startsWith('/assets/')) console.log(new Date().toISOString(), req.method, url.pathname, 'via', req.headers['cf-connecting-ip'] ? 'cloudflare' : req.socket.remoteAddress, 'host', req.headers.host, (req.headers['user-agent'] || '').slice(0, 60))
   if (req.method === 'POST' && url.pathname === '/api/guest') {
     const ip = req.headers['cf-connecting-ip'] || req.socket.remoteAddress
     const origin = req.headers.origin
-    if (origin && new URL(origin).host !== req.headers.host) return json(res, 403, { error: 'cross-site request' })
+    let originHost = null
+    try { originHost = origin && origin !== 'null' ? new URL(origin).host : null } catch { originHost = 'invalid' }
+    const hosts = [req.headers.host, req.headers['x-forwarded-host']].filter(Boolean)
+    if (originHost && !hosts.includes(originHost)) return reject(res, req, 403, 'cross-site request')
     let body = ''
-    for await (const chunk of req) { body += chunk; if (body.length > 2000) return json(res, 413, { error: 'too large' }) }
+    for await (const chunk of req) { body += chunk; if (body.length > 2000) return reject(res, req, 413, 'too large') }
     let pk
-    try { pk = JSON.parse(body).publicKey } catch { return json(res, 400, { error: 'bad json' }) }
-    if (typeof pk !== 'string' || !/^ed25519:[1-9A-HJ-NP-Za-km-z]{43,44}$/.test(pk)) return json(res, 400, { error: 'publicKey must be ed25519:<base58>' })
-    const why = allowed(ip)
-    if (why) return json(res, 429, { error: why })
+    try { pk = JSON.parse(body).publicKey } catch { return reject(res, req, 400, 'bad json') }
+    if (typeof pk !== 'string' || !/^ed25519:[1-9A-HJ-NP-Za-km-z]{43,44}$/.test(pk)) return reject(res, req, 400, 'publicKey must be ed25519:<base58>')
+    // loopback without a Cloudflare header = someone on this machine or an SSH tunnel: not rate limited
+    const local = !req.headers['cf-connecting-ip'] && /^(::ffff:)?127\.0\.0\.1$|^::1$/.test(req.socket.remoteAddress || '')
+    const why = local ? null : allowed(ip)
+    if (why) return reject(res, req, 429, why)
     try {
       const accountId = await createGuest(pk)
-      hits.get(ip).push(Date.now())
+      if (!local) hits.get(ip).push(Date.now())
       day.n += 1
       console.log(new Date().toISOString(), 'guest', accountId, 'for', ip)
       return json(res, 200, { accountId })

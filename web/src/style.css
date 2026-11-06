@@ -54,3 +54,7 @@ td.win { color: var(--good); font-weight: 700 }
 .npc { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: .7rem .9rem }
 .rules ol { padding-left: 1.2rem } .rules li { margin: .3rem 0 }
 .testnet { display: inline-block; font-size: .85rem; color: var(--fg-dim); border: 1px solid var(--line); border-radius: 8px; padding: .25rem .6rem; margin: .2rem 0 0 }
+.failure { color: #f3d6d2; background: #3a2220; border: 1px solid #6b3a35; border-radius: 8px; padding: .55rem .75rem; margin: .7rem 0 0 }
+.notice.busy::before { content: '⏳ ' }
+.good { color: var(--good) }
+.last { margin: .7rem 0 0; padding: .5rem .7rem; background: #27241f; border-radius: 8px }
