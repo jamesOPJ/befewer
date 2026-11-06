@@ -1,6 +1,6 @@
 // App-wide reactive state: chain data (polled), the player's session, bets, results, autopilot.
 import {
-  ONE, CHIP, NEAR, view, fmt, fmtN, toNear, toYocto, nsToMs, randomSalt, commitHash, seal, loadSession, saveSession, loadTwin, saveTwin, newKeyPair,
+  ONE, CHIP, NEAR, view, fmt, fmtN, toNear, toYocto, nsToMs, randomSalt, commitHash, seal, loadSession, saveSession, newKeyPair,
   loadPicks, savePick, callContract, type Status, type Params, type RoundV, type PlayerV, type Session,
 } from './chain'
 import * as H from './history'
@@ -48,9 +48,6 @@ export const game = $state({
   now: Date.now(),
   session: loadSession() as Session | null,
   me: null as PlayerV | null,
-  /** second account for both-sides bets (side B), created on the first such bet */
-  twin: loadTwin() as Session | null,
-  twinMe: null as PlayerV | null,
   rounds: [] as RoundV[], // newest first
   history: 0, // bumps whenever the round history changes, so derived views recompute
   results: [] as Result[],
@@ -117,12 +114,6 @@ export async function refresh(full = false) {
         toast('ok', `You mined ${fmt(BigInt(game.me.mined) - BigInt(before.mined))} BEFEWER with a ${game.me.streak}-win streak.`, 9000)
       await loadResults()
     }
-    if (game.twin) {
-      const before = game.twinMe
-      game.twinMe = await view<PlayerV>('get_player', { account_id: game.twin.accountId })
-      if (before && BigInt(game.twinMe.mined) > BigInt(before.mined))
-        toast('ok', `Your second account mined ${fmt(BigInt(game.twinMe.mined) - BigInt(before.mined))} BEFEWER with a ${game.twinMe.streak}-win streak on B.`, 9000)
-    }
     game.ready = true
     game.error = ''
   } catch (e: any) {
@@ -173,86 +164,15 @@ export async function loadNpcs() {
 export async function ensurePlayer() {
   if (!game.session) {
     game.busy = 'Creating your testnet account'
-    game.session = await newGuest()
+    const kp = newKeyPair()
+    const res = await fetch('api/guest', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ publicKey: kp.publicKey }) })
+    const j = await res.json().catch(() => ({}))
+    if (!res.ok) throw new Error(j.error || 'The guest account service is unavailable.')
+    game.session = { accountId: j.accountId, privateKey: kp.privateKey, kind: 'guest' }
     saveSession(game.session)
   }
   game.me = await view<PlayerV>('get_player', { account_id: game.session.accountId })
   if (!game.me.registered) throw new Error('This account has no game balance yet. Reload the page in a few seconds.')
-}
-
-/** A fresh testnet guest account (the server funds its wallet and game balance). */
-async function newGuest(): Promise<Session> {
-  const kp = newKeyPair()
-  const res = await fetch('api/guest', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ publicKey: kp.publicKey }) })
-  const j = await res.json().catch(() => ({}))
-  if (!res.ok) throw new Error(j.error || 'The guest account service is unavailable.')
-  return { accountId: j.accountId, privateKey: kp.privateKey, kind: 'guest' }
-}
-
-/** The second account for both-sides bets. */
-export async function ensureTwin() {
-  if (!game.twin) {
-    game.busy = 'Creating your second account (it takes side B)'
-    game.twin = await newGuest()
-    saveTwin(game.twin)
-  }
-  game.twinMe = await view<PlayerV>('get_player', { account_id: game.twin.accountId })
-  if (!game.twinMe.registered) throw new Error('The second account has no game balance yet. Try again in a few seconds.')
-}
-
-/** Keep the two accounts within 1.5x of each other: the richer one withdraws half the gap to
- *  its wallet and deposits it into the other's game balance. Equal stakes need equal room. */
-async function rebalance() {
-  const m = BigInt(game.me!.balance), t = BigInt(game.twinMe!.balance)
-  const [rich, poor, hi, lo] = m >= t ? [game.session!, game.twin!, m, t] : [game.twin!, game.session!, t, m]
-  if (hi * 2n <= lo * 3n) return
-  const move = (hi - lo) / 2n
-  game.busy = 'Evening out your two accounts'
-  await callContract(rich, 'withdraw', { amount: move.toString() })
-  await callContract(rich, 'deposit', { account_id: poor.accountId }, 30, move)
-  game.me = await view<PlayerV>('get_player', { account_id: game.session!.accountId })
-  game.twinMe = await view<PlayerV>('get_player', { account_id: game.twin!.accountId })
-}
-
-/** Bet `want` (yocto) on A from this account AND the same on B from the second account.
- *  Whichever side wins, one account wins +stake and the other loses it: the round costs both
- *  fees, and one account always carries the winning side's streak (the "all squares" play). */
-export async function placeBoth(want: bigint, by: 'you' | 'autopilot' = 'you') {
-  try {
-    await ensurePlayer()
-    await ensureTwin()
-    await rebalance()
-    const m = BigInt(game.me!.balance), t = BigInt(game.twinMe!.balance)
-    const low = m < t ? m : t
-    const cap = capFor(low)
-    let amount = want > cap ? cap : want
-    const min = BigInt(game.params!.min_stake)
-    if (amount < min) amount = min
-    if (amount > cap) throw new Error(`The smaller of your two balances is too low: each side is capped at 25% of it, and the smallest bet is ${fmtN(min)} NEAR.`)
-    const fee = feeFor(amount)
-    if (amount + fee > low) throw new Error('Not enough NEAR for the stake plus the fee on both accounts.')
-    const st = await view<Status>('get_status')
-    game.status = st
-    const r = Number(st.commit_round)
-    const revealStart = nsToMs(st.commit_ends_at)
-    if (revealStart - (Date.now() + game.skew) < 12000) throw new Error('This round is closing. Wait a few seconds for the next one.')
-    game.busy = 'Sealing both sides with drand'
-    const legs: [Session, Side][] = [[game.session!, 'A'], [game.twin!, 'B']]
-    const ready = await Promise.all(legs.map(async ([s, side]) => {
-      const salt = randomSalt()
-      const hash = await commitHash(s.accountId, r, side, salt)
-      const { sealed, drandRound } = await seal(side, salt, revealStart)
-      savePick(s.accountId, r, { side, salt, amount: amount.toString(), fee: fee.toString(), drandRound })
-      return { s, hash, sealed }
-    }))
-    game.busy = 'Sending both bets'
-    await Promise.all(ready.map(x => callContract(x.s, 'commit', { round: String(r), amount: amount.toString(), hash: x.hash, sealed: x.sealed })))
-    if (by === 'you') toast('ok', `Sealed both sides: ${fmtN(amount)} NEAR on A and on B (+${fmtN(fee)} fee each).`)
-    return { round: r, amount }
-  } finally {
-    game.busy = ''
-    await refresh(true)
-  }
 }
 
 /** Move NEAR from the game balance back to this browser's testnet wallet. */
@@ -308,11 +228,8 @@ export async function placeBet(side: Side, want: bigint, by: 'you' | 'autopilot'
 
 export function forgetDevice() {
   saveSession(null)
-  saveTwin(null)
   game.session = null
   game.me = null
-  game.twin = null
-  game.twinMe = null
   game.results = []
 }
 
@@ -364,17 +281,6 @@ export async function autopilotTick() {
   try {
     if (!game.me) await ensurePlayer()
     // the autopilot counts in chips of 0.01 NEAR (the smallest bet)
-    if (d.side === 'both') {
-      // each side is capped by its own account: size it from the smaller balance
-      const twinBal = game.twinMe ? BigInt(game.twinMe.balance) : GUEST_GAME_NEAR
-      const mine = BigInt(game.me!.balance)
-      const low = Number((mine < twinBal ? mine : twinBal) / CHIP)
-      const chips = stakeFor(d.unit, d.amount, low, me)
-      if (chips < 1) { apLog(r, 'skip', 'Balance too small to bet both sides (each side is capped at 25% of its account).'); return }
-      const placed = await placeBoth(BigInt(chips) * CHIP, 'autopilot')
-      apLog(placed.round, 'bet', `Rule ${d.rule + 1}: both sides, ${fmtN(placed.amount)} NEAR on A here and on B from your second account.`)
-      return
-    }
     const bal = Number(BigInt(game.me!.balance) / CHIP)
     const chips = stakeFor(d.unit, d.amount, bal, me)
     if (chips < 1) { apLog(r, 'skip', 'Balance too small to bet (the cap is 25% of it).'); return }

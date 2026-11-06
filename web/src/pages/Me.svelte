@@ -55,19 +55,6 @@
     </div>
   </section>
 
-  {#if game.twin && game.twinMe}
-    <section class="card twin">
-      <div class="eyebrow">Second account · takes side B in both-sides bets</div>
-      <div class="trow">
-        <span class="num"><b>{fmtN(game.twinMe.balance)}</b> NEAR</span>
-        <span class="num"><b>{fmt(game.twinMe.tokens)}</b> BEFEWER <span class="faint">({fmt(game.twinMe.mined)} mined)</span></span>
-        <span class="num">streak <b>{game.twinMe.streak}</b> <span class="faint">· best {game.twinMe.best_streak}</span></span>
-        <span class="num">won {game.twinMe.wins} · lost {game.twinMe.losses}</span>
-      </div>
-      <div class="faint small">{short(game.twin.accountId)} · kept in this browser. The autopilot moves NEAR between the two accounts when one gets 1.5x the other.</div>
-    </section>
-  {/if}
-
   <section class="stats">
     <div class="card st"><div class="eyebrow">Wins</div><div class="v num good">{me.wins}</div></div>
     <div class="card st"><div class="eyebrow">Losses</div><div class="v num burn">{me.losses}</div></div>
@@ -138,8 +125,6 @@
   .money { font-size: 40px; font-weight: 800; letter-spacing: -0.02em; line-height: 1.1 }
   .money span { font-size: 15px; font-weight: 600; color: var(--fg-3); margin-left: 4px }
   .tok { font-size: 15px; color: var(--fg-2) }
-  .twin { padding: 14px 18px; display: grid; gap: 6px; margin-bottom: 12px }
-  .trow { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 15px }
   .wd { justify-self: start; margin-top: 6px }
   .acct { justify-self: start; display: inline-flex; gap: 6px; align-items: center; padding: 4px 10px; border-radius: 999px; background: var(--surface-2); border: 1px solid var(--line); color: var(--fg-2); font-size: 13px; cursor: pointer }
   .small { font-size: 13px }

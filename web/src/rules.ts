@@ -14,15 +14,13 @@ export type Cond =
   | { kind: 'margin'; mode: 'lopsided' | 'close'; winner: Who } // the round before: smaller side under 30% / at least 40%
   | { kind: 'question'; winner: Who } // the last time this same question was asked
   | { kind: 'mine'; result: 'won' | 'lost' | 'void' } // my most recent settled bet
-/** 'both' = A from this account and the same amount on B from a second account (ORE's "all squares"). */
-export type Pick = 'A' | 'B' | 'same' | 'other' | 'random' | 'both' | 'skip'
-export type BetSide = Side | 'both'
+export type Pick = 'A' | 'B' | 'same' | 'other' | 'random' | 'skip'
 /** Amounts count chips of 0.01 NEAR (the smallest bet).
  *  fixed = N chips every time (DCA); pct = share of balance; martingale = base, doubled after
  *  each loss in a row; paroli = base, doubled after each win, back to base after 3 wins. */
 export type Unit = 'fixed' | 'pct' | 'martingale' | 'paroli'
 export type Rule = { cond: Cond; pick: Pick; unit: Unit; amount: number }
-export type Decision = { side: BetSide; unit: Unit; amount: number; rule: number } | { skip: true; rule: number | null }
+export type Decision = { side: Side; unit: Unit; amount: number; rule: number } | { skip: true; rule: number | null }
 export const MAX_PCT = 25 // the contract caps a bet at 25% of the balance
 export const LOPSIDED = 0.3
 export const CLOSE = 0.4
@@ -52,7 +50,10 @@ function nextMe(me: Me, side: Side, outcome: Outcome): Me {
 }
 
 /** Rules saved by older versions used { pct }; read them as a percentage stake. */
+const PICKS = ['A', 'B', 'same', 'other', 'random', 'skip']
 export function normalizeRule(r: any): Rule {
+  // a pick this version doesn't know (e.g. the short-lived 'both') becomes skip, never a random bet
+  if (r && !PICKS.includes(r.pick)) r = { ...r, pick: 'skip' }
   if (r && r.unit && typeof r.amount === 'number') return r as Rule
   return { cond: r.cond, pick: r.pick, unit: 'pct', amount: typeof r.pct === 'number' ? r.pct : 5 }
 }
@@ -141,8 +142,8 @@ export function decide(rules: Rule[], r: number, L: Lookup, me: Me = NOBODY): De
     const m = matches(cond, r, L, me)
     if (!m.ok) continue
     if (pick === 'skip') return { skip: true, rule: i }
-    let side: BetSide
-    if (pick === 'A' || pick === 'B' || pick === 'both') side = pick
+    let side: Side
+    if (pick === 'A' || pick === 'B') side = pick
     else if (pick === 'random' || !m.side) side = coin(r, i)
     else side = pick === 'same' ? m.side : m.side === 'A' ? 'B' : 'A'
     const amt = unit === 'pct' ? Math.max(1, Math.min(MAX_PCT, Math.round(amount))) : Math.max(1, Math.floor(amount))
@@ -151,63 +152,31 @@ export function decide(rules: Rule[], r: number, L: Lookup, me: Me = NOBODY): De
   return { skip: true, rule: null }
 }
 
-/** `stake` is per side: a 'both' bet stakes it twice. `mined` = this bet would have earned mining shares. */
-export type Step = { round: number; side: BetSide | null; outcome: Outcome; stake: number; bal: number; mined: boolean }
-export type Backtest = {
-  rounds: number; bets: number; wins: number; losses: number; voids: number; skips: number; boths: number
-  /** bets that would have completed a streak of `streakMin`+ wins (and so earned mining shares) */
-  mines: number
-  start: number; end: number; staked: number; curve: Step[]
-}
-/** Chips a 'both' bet stakes on EACH side: each account holds about half the money, and each
- *  is capped at 25% of its own balance. */
-export const bothStake = (unit: Unit, amount: number, bal: number, me: Me = NOBODY) => stakeFor(unit, amount, bal / 2, me)
+export type Step = { round: number; side: Side | null; outcome: Outcome; stake: number; bal: number }
+export type Backtest = { rounds: number; bets: number; wins: number; losses: number; voids: number; skips: number; start: number; end: number; staked: number; curve: Step[] }
 
 /** Replay `rules` over finished rounds from..to, starting with `start` chips. Every bet pays
  *  `feeBps` on top of its stake (refunded on a void), like the contract. The replay keeps
  *  its own "my last bet" state from its own simulated bets. Assumes your own bet would not have
- *  changed which side was smaller.
- *  Streaks are tracked per account like the contract does (a win adds 1, a loss resets, a void
- *  or a skipped round changes nothing): single-side bets come from this account, and a 'both'
- *  bet puts A on this account and B on the second one. */
-export function backtest(rules: Rule[], from: number, to: number, L: Lookup, start = 1000, feeBps = 0, streakMin = 3): Backtest {
-  const bt: Backtest = { rounds: 0, bets: 0, wins: 0, losses: 0, voids: 0, skips: 0, boths: 0, mines: 0, start, end: start, staked: 0, curve: [] }
-  const fee = (x: number) => (x * feeBps) / 10000
+ *  changed which side was smaller. */
+export function backtest(rules: Rule[], from: number, to: number, L: Lookup, start = 1000, feeBps = 0): Backtest {
+  const bt: Backtest = { rounds: 0, bets: 0, wins: 0, losses: 0, voids: 0, skips: 0, start, end: start, staked: 0, curve: [] }
   let bal = start
   let me: Me = NOBODY
-  let main = 0 // this account's win streak
-  let twin = 0 // the second account's (always on B)
   for (let t = from; t <= to; t++) {
     const o = L.outcome(t)
     if (!o) continue // nobody played that round
     bt.rounds++
     const d = decide(rules, t, guard(L, t), me)
-    const both = !('skip' in d) && d.side === 'both'
-    const stake = 'skip' in d ? 0 : both ? bothStake(d.unit, d.amount, bal, me) : stakeFor(d.unit, d.amount, bal, me)
-    if ('skip' in d || stake < 1) { bt.skips++; bt.curve.push({ round: t, side: null, outcome: o, stake: 0, bal, mined: false }); continue }
+    const stake = 'skip' in d ? 0 : stakeFor(d.unit, d.amount, bal, me)
+    if ('skip' in d || stake < 1) { bt.skips++; bt.curve.push({ round: t, side: null, outcome: o, stake: 0, bal }); continue }
     bt.bets++
-    let mined = false
-    if (both) {
-      // one side wins +stake, the other loses its stake: the round costs exactly both fees
-      bt.boths++
-      bt.staked += 2 * stake
-      if (o === 'void') bt.voids++
-      else {
-        bal -= 2 * fee(stake)
-        if (o === 'A') { main++; twin = 0; mined = main >= streakMin }
-        else { twin++; main = 0; mined = twin >= streakMin }
-      }
-      me = nextMe(me, 'A', o) // "my last bet" is this account's half, on A
-    } else {
-      const side = d.side as Side
-      bt.staked += stake
-      if (o === 'void') bt.voids++
-      else if (o === side) { bt.wins++; bal += stake - fee(stake); main++; mined = main >= streakMin }
-      else { bt.losses++; bal -= stake + fee(stake); main = 0 }
-      me = nextMe(me, side, o)
-    }
-    if (mined) bt.mines++
-    bt.curve.push({ round: t, side: d.side, outcome: o, stake, bal, mined })
+    bt.staked += stake
+    if (o === 'void') bt.voids++
+    else if (o === d.side) { bt.wins++; bal += stake - (stake * feeBps) / 10000 }
+    else { bt.losses++; bal -= stake + (stake * feeBps) / 10000 }
+    me = nextMe(me, d.side, o)
+    bt.curve.push({ round: t, side: d.side, outcome: o, stake, bal })
   }
   bt.end = bal
   return bt
@@ -242,7 +211,6 @@ export function describe(r: Rule): string {
     : c.kind === 'mine' ? `If my last bet ${c.result === 'void' ? 'was refunded' : c.result}`
     : c.winner === 'any' ? 'If this question was asked before' : `If ${c.winner} won this question last time`
   if (r.pick === 'skip') return `${cond} → skip the round`
-  if (r.pick === 'both') return `${cond} → bet both sides (A here, B from a second account), ${stakeText(r.unit, r.amount)} each`
   const pick = { same: 'that same side', other: 'the other side', A: 'A', B: 'B', random: 'a random side' }[r.pick]
   return `${cond} → bet ${pick}, ${stakeText(r.unit, r.amount)}`
 }
@@ -258,7 +226,7 @@ export function stakeText(unit: Unit, amount: number): string {
 const R = (cond: Cond, pick: Pick, amount = 10, unit: Unit = 'fixed'): Rule => ({ cond, pick, unit, amount })
 const ALWAYS: Cond = { kind: 'always' }
 export type Preset = { name: string; group: string; about: string; rules: Rule[] }
-export const PRESET_GROUPS = ['Mining', 'Follow the crowd', 'Fade the crowd', 'Memory', 'Money management']
+export const PRESET_GROUPS = ['Follow the crowd', 'Fade the crowd', 'Memory', 'Money management']
 export const PRESETS: Preset[] = [
   { name: 'Echo', group: 'Follow the crowd', about: 'Bet 0.10 NEAR that the last smaller side wins again.',
     rules: [R({ kind: 'last', winner: 'any' }, 'same'), R(ALWAYS, 'random')] },
@@ -282,6 +250,4 @@ export const PRESETS: Preset[] = [
     rules: [R(ALWAYS, 'random', 2, 'martingale')] },
   { name: 'Paroli', group: 'Money management', about: 'Start at 0.05 NEAR, double after every win, back to 0.05 after 3 wins or any loss.',
     rules: [R(ALWAYS, 'random', 5, 'paroli')] },
-  { name: 'All squares', group: 'Mining', about: "Like ORE's all 25 squares: 0.05 NEAR on A from this account and 0.05 on B from a second one, every round. One of them always rides the winning side's streak, so you mine whenever a side wins 3+ in a row. Costs both fees (0.005 NEAR) a round.",
-    rules: [R(ALWAYS, 'both', 5)] },
 ]
