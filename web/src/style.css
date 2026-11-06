@@ -53,3 +53,4 @@ td.win { color: var(--good); font-weight: 700 }
 @media (max-width: 760px) { .npcs { grid-template-columns: 1fr } }
 .npc { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: .7rem .9rem }
 .rules ol { padding-left: 1.2rem } .rules li { margin: .3rem 0 }
+.testnet { display: inline-block; font-size: .85rem; color: var(--fg-dim); border: 1px solid var(--line); border-radius: 8px; padding: .25rem .6rem; margin: .2rem 0 0 }

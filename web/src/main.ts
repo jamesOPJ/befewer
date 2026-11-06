@@ -108,6 +108,7 @@ function render() {
     <h1>$FEWER</h1>
     <p class="tag">Pick the side fewer coins pick.</p>
     <p class="sub">A memecoin whose daily ritual is a sealed-bid minority game on NEAR. The minority doubles, the imbalance burns.</p>
+    <p class="testnet">Testnet demo built for NEAR HACKATHON. Testnet FEWER is free and has no monetary value; there is no token sale.</p>
   </header>
 
   <section class="live">
@@ -164,7 +165,7 @@ function render() {
       <li>The gap between the sides is burned, along with every bet that was never revealed. A tie or a one-sided round refunds everyone.</li>
       <li>Supply only goes down: everything was minted once at launch, there is no mint function and no owner.</li>
     </ol>
-    <p class="fine">Contract <a href="${EXPLORER}/address/${CONTRACT}" target="_blank" rel="noopener">${CONTRACT}</a> · rounds every ${Number(BigInt(params.commit_ns) / 60_000_000_000n)} min on testnet (daily on mainnet).</p>
+    <p class="fine">Contract <a href="${EXPLORER}/address/${CONTRACT}" target="_blank" rel="noopener">${CONTRACT}</a> · this demo runs a round every ${Number(BigInt(params.commit_ns) / 60_000_000_000n)} minutes; the mechanic is designed for one round a day.</p>
   </section>`
   renderNpcs()
 }
