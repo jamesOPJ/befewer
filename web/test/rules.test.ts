@@ -1,7 +1,7 @@
 // node --test web/test/rules.test.ts   (Node 22+ strips the types)
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { decide, backtest, guard, coin, stakeFor, normalizeRule, meFrom, NOBODY, PRESETS, type Lookup, type Outcome, type Rule } from '../src/rules.ts'
+import { decide, backtest, runsAtLeast, guard, coin, stakeFor, normalizeRule, meFrom, NOBODY, PRESETS, type Lookup, type Outcome, type Rule } from '../src/rules.ts'
 
 const Q = 100 // questions in the list
 function history(outcomes: Record<number, Outcome>, splits: Record<number, number> = {}): Lookup {
@@ -76,6 +76,30 @@ test('the replay pays the contract fee: win +stake-fee, loss -stake-fee, void fr
   // fixed 10 chips, 5% fee: A wins (+9.5), B wins (-10.5), void (0), A wins (+9.5)
   const bt = backtest([{ cond: { kind: 'always' }, pick: 'A', unit: 'fixed', amount: 10 }], 1, 4, history({ 1: 'A', 2: 'B', 3: 'void', 4: 'A' }), 1000, 500)
   assert.equal(bt.end, 1000 + 9.5 - 10.5 + 9.5)
+})
+
+test('win streaks are counted like the contract: skips and voids do not break them', () => {
+  // bets on A only when the round number is not 3 (round 3 is skipped)
+  const rules: Rule[] = [{ cond: { kind: 'always' }, pick: 'A', unit: 'fixed', amount: 5 }]
+  // W W (skip-free here) void W L W W W W L W
+  const L = history({ 1: 'A', 2: 'A', 3: 'void', 4: 'A', 5: 'B', 6: 'A', 7: 'A', 8: 'A', 9: 'A', 10: 'B', 11: 'A' })
+  const bt = backtest(rules, 1, 11, L, 1000, 500)
+  assert.equal(bt.bestStreak, 4)
+  assert.deepEqual([bt.runs[1] ?? 0, bt.runs[2] ?? 0, bt.runs[3] ?? 0, bt.runs[4] ?? 0], [1, 0, 1, 1], 'runs of 3 (ended by a loss), 4, and 1 (still going)')
+  assert.equal(runsAtLeast(bt, 3), 2)
+  // rounds that would mine: the 3rd win in a row (round 4), the 3rd and 4th (rounds 8, 9)
+  assert.deepEqual(bt.curve.filter(s => s.mined).map(s => s.round), [4, 8, 9])
+  assert.equal(bt.mines, 3)
+  assert.deepEqual(bt.curve.map(s => s.streak), [1, 2, 2, 3, 0, 1, 2, 3, 4, 0, 1])
+})
+
+test('a skipped round keeps the streak (and the round it skipped can be a loss for others)', () => {
+  // skip whenever A won the last 2 rounds, otherwise bet A
+  const rules: Rule[] = [{ cond: { kind: 'tally', winner: 'A', k: 2, n: 2 }, pick: 'skip', unit: 'fixed', amount: 5 }, { cond: { kind: 'always' }, pick: 'A', unit: 'fixed', amount: 5 }]
+  // r1 A win (1), r2 A win (2), r3 skipped (B won: would have been a loss), r4 A win (3: mines)
+  const bt = backtest(rules, 1, 4, history({ 1: 'A', 2: 'A', 3: 'B', 4: 'A' }), 1000, 0)
+  assert.deepEqual(bt.curve.map(s => [s.side, s.streak]), [['A', 1], ['A', 2], [null, 2], ['A', 3]])
+  assert.deepEqual(bt.curve.filter(s => s.mined).map(s => s.round), [4])
 })
 
 test('a saved rule with an unknown pick loads as skip', () => {

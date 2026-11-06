@@ -3,22 +3,27 @@
   import Icon from '../lib/Icon.svelte'
   import Equity from '../lib/Equity.svelte'
   import { label } from '../questions'
-  import { backtest, describe, chipsText, PRESETS, PRESET_GROUPS, type Rule, type Cond, type Pick, type Unit } from '../rules'
+  import { backtest, runsAtLeast, describe, chipsText, PRESETS, PRESET_GROUPS, type Rule, type Cond, type Pick, type Unit, type Backtest } from '../rules'
   import { game, commitRound, lookup, saveRules, setAutopilot, draftDirty, putDraftLive, discardDraft, toast } from '../game.svelte'
 
   const WINDOW = 60
   // replays count chips of 0.01 NEAR and pay the contract's fee on every bet
   const fee = () => game.params?.fee_bps ?? 0
+  const need = () => game.params?.streak_min ?? 3 // wins in a row before a win mines
+  /** win runs by length: 1, 2, 3, 4, 5+ */
+  const ordinal = (n: number) => n + (n % 10 === 1 && n % 100 !== 11 ? 'st' : n % 10 === 2 && n % 100 !== 12 ? 'nd' : n % 10 === 3 && n % 100 !== 13 ? 'rd' : 'th')
+  const roundsText = (n: number) => `${n} round${n === 1 ? '' : 's'}`
+  const runRows = (b: Backtest) => [1, 2, 3, 4].map(k => [String(k), b.runs[k] ?? 0] as [string, number]).concat([['5+', runsAtLeast(b, 5)]])
   const rules = $derived(game.ap.draft)
   const bt = $derived.by(() => {
     game.history
     const cur = commitRound()
-    return backtest($state.snapshot(game.ap.draft) as Rule[], Math.max(0, cur - WINDOW), cur - 1, lookup, 1000, fee())
+    return backtest($state.snapshot(game.ap.draft) as Rule[], Math.max(0, cur - WINDOW), cur - 1, lookup, 1000, fee(), need())
   })
   const btLive = $derived.by(() => {
     game.history
     const cur = commitRound()
-    return backtest($state.snapshot(game.ap.live) as Rule[], Math.max(0, cur - WINDOW), cur - 1, lookup, 1000, fee())
+    return backtest($state.snapshot(game.ap.live) as Rule[], Math.max(0, cur - WINDOW), cur - 1, lookup, 1000, fee(), need())
   })
   const dirty = $derived(JSON.stringify(game.ap.draft) !== JSON.stringify(game.ap.live))
   let confirmLive = $state(false)
@@ -26,7 +31,7 @@
   const presetBt = $derived.by(() => {
     game.history
     const cur = commitRound()
-    return PRESETS.map(p => backtest(p.rules, Math.max(0, cur - WINDOW), cur - 1, lookup, 1000, fee()))
+    return PRESETS.map(p => backtest(p.rules, Math.max(0, cur - WINDOW), cur - 1, lookup, 1000, fee(), need()))
   })
 
   const KINDS: [Cond['kind'], string][] = [
@@ -221,7 +226,8 @@
           <button class="preset" onclick={() => use(i)}>
             <span class="pn">{p.name}</span>
             <span class="pa small muted">{p.about}</span>
-            {#if b.rounds}<span class="pr small num">staked {fmtN(b.staked)} → <b class={tone(net(b))}>{signed(net(b))}</b> <span class="faint">· last {b.rounds} rounds</span></span>{/if}
+            {#if b.rounds}<span class="pr small num">staked {fmtN(b.staked)} → <b class={tone(net(b))}>{signed(net(b))}</b> <span class="faint">· last {b.rounds} rounds</span></span>
+              <span class="pr small num">best streak <b>{b.bestStreak}</b> · {need()}+ in a row: <b>{runsAtLeast(b, need())}</b> <span class="faint">· mined in {roundsText(b.mines)}</span></span>{/if}
             <span class="use small">Load into draft</span>
           </button>
         {/each}
@@ -238,19 +244,26 @@
           <div><div class="eyebrow">Net</div><div class="kv num {tone(net(bt))}">{signed(net(bt))}</div><div class="faint small">10 → {fmtN(bt.end)} NEAR</div></div>
           <div><div class="eyebrow">Staked</div><div class="kv num">{fmtN(bt.staked)}</div><div class="faint small">{bt.bets} bets · {bt.skips} skipped</div></div>
           <div><div class="eyebrow">Won / lost</div><div class="kv num"><span class="good">{bt.wins}</span> / <span class="burn">{bt.losses}</span></div><div class="faint small">{bt.voids} void</div></div>
+          <div><div class="eyebrow">Longest streak</div><div class="kv num gold">{bt.bestStreak}</div><div class="faint small">{need()}+ in a row: {runsAtLeast(bt, need())} · mined in {roundsText(bt.mines)}</div></div>
         </div>
+        {#if bt.wins}
+          <div class="runs small" aria-label="Win streaks by length">
+            <span class="faint">Win streaks</span>
+            {#each runRows(bt) as [len, n]}<span class="runchip" class:mine={len === '5+' || Number(len) >= need()} class:zero={n === 0}>{len} in a row: <b class="num">{n}</b></span>{/each}
+          </div>
+        {/if}
         {#if dirty}
           <div class="vs-live small">Draft <b class={tone(net(bt))}>{signed(net(bt))}</b> <span class="faint">vs</span> running rules <b class={tone(net(btLive))}>{signed(net(btLive))}</b> <span class="faint">on the same rounds</span></div>
         {/if}
         <Equity curve={bt.curve} />
-        <p class="faint small">Replays your rules round by round from 10 NEAR, using only what was known before each round and paying the {fee() / 100}% fee on every bet. Assumes your own bet would not have changed which side was smaller.</p>
+        <p class="faint small">Replays your rules round by round from 10 NEAR, using only what was known before each round and paying the {fee() / 100}% fee on every bet. Assumes your own bet would not have changed which side was smaller. Streaks count like the contract: a win adds 1, a loss resets, a void or a skipped round changes nothing. From the {ordinal(need())} win in a row, each win mines a share of that round's pot.</p>
         <details class="tbl">
           <summary>Every round in the replay</summary>
           <table>
-            <thead><tr><th>Round</th><th>Rules bet</th><th>Smaller side</th><th>Balance</th></tr></thead>
+            <thead><tr><th>Round</th><th>Rules bet</th><th>Smaller side</th><th>Streak</th><th>Balance</th></tr></thead>
             <tbody>
               {#each [...bt.curve].reverse() as s}
-                <tr><td class="num">#{s.round}</td><td>{s.side ? `${fmtN(s.stake)} on ${label(s.round, s.side)}` : 'skip'}</td><td>{s.outcome === 'void' ? 'void' : label(s.round, s.outcome)}</td><td class="num">{fmtN(s.bal)}</td></tr>
+                <tr><td class="num">#{s.round}</td><td>{s.side ? `${fmtN(s.stake)} on ${label(s.round, s.side)}` : 'skip'}</td><td>{s.outcome === 'void' ? 'void' : label(s.round, s.outcome)}</td><td class="num">{s.side ? s.streak : ''}{s.mined ? ' · mines' : ''}</td><td class="num">{fmtN(s.bal)}</td></tr>
               {/each}
             </tbody>
           </table>
@@ -326,7 +339,13 @@
   .preset:hover { border-color: var(--fg-3) }
   .pn { font-weight: 750 }
   .use { color: var(--brand); font-weight: 650; margin-top: 4px }
-  .kpis { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-bottom: 8px }
+  .kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-bottom: 8px }
+  @media (max-width: 520px) { .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)) } }
+  .runs { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 4px 0 10px }
+  .runchip { white-space: nowrap; display: inline-flex; gap: 4px; align-items: baseline; padding: 3px 9px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface-2); color: var(--fg-2) }
+  .runchip.mine { border-color: rgba(232, 182, 94, 0.45); color: var(--fg) }
+  .runchip.zero { opacity: 0.5 }
+  .gold { color: var(--brand) }
   .kv { font-size: 22px; font-weight: 800; margin-top: 2px }
   details.tbl { margin-top: 8px }
   details.tbl summary { cursor: pointer; color: var(--fg-2); font-size: 14px }

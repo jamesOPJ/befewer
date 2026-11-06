@@ -152,32 +152,60 @@ export function decide(rules: Rule[], r: number, L: Lookup, me: Me = NOBODY): De
   return { skip: true, rule: null }
 }
 
-export type Step = { round: number; side: Side | null; outcome: Outcome; stake: number; bal: number }
-export type Backtest = { rounds: number; bets: number; wins: number; losses: number; voids: number; skips: number; start: number; end: number; staked: number; curve: Step[] }
+/** `streak` = wins in a row after this round (as the contract counts them); `mined` = this win
+ *  completed a streak of `streakMin`+ and so would have earned a share of the pot. */
+export type Step = { round: number; side: Side | null; outcome: Outcome; stake: number; bal: number; streak: number; mined: boolean }
+export type Backtest = {
+  rounds: number; bets: number; wins: number; losses: number; voids: number; skips: number; start: number; end: number; staked: number; curve: Step[]
+  /** longest run of wins in a row */
+  bestStreak: number
+  /** runs[k] = how many runs of exactly k wins in a row (a run ends at a loss, or at the end of the replay) */
+  runs: number[]
+  /** wins that were the `streakMin`-th or later in a row: the rounds that would have mined */
+  mines: number
+}
+/** Runs of at least k wins in a row. */
+export const runsAtLeast = (bt: Backtest, k: number) => bt.runs.reduce((n, c, len) => (len >= k ? n + c : n), 0)
 
 /** Replay `rules` over finished rounds from..to, starting with `start` chips. Every bet pays
  *  `feeBps` on top of its stake (refunded on a void), like the contract. The replay keeps
  *  its own "my last bet" state from its own simulated bets. Assumes your own bet would not have
  *  changed which side was smaller. */
-export function backtest(rules: Rule[], from: number, to: number, L: Lookup, start = 1000, feeBps = 0): Backtest {
-  const bt: Backtest = { rounds: 0, bets: 0, wins: 0, losses: 0, voids: 0, skips: 0, start, end: start, staked: 0, curve: [] }
+export function backtest(rules: Rule[], from: number, to: number, L: Lookup, start = 1000, feeBps = 0, streakMin = 3): Backtest {
+  const bt: Backtest = { rounds: 0, bets: 0, wins: 0, losses: 0, voids: 0, skips: 0, start, end: start, staked: 0, curve: [], bestStreak: 0, runs: [], mines: 0 }
   let bal = start
   let me: Me = NOBODY
+  // like the contract: a win adds 1, a loss resets, a void or a skipped round changes nothing
+  let streak = 0
+  const endRun = () => { if (streak > 0) bt.runs[streak] = (bt.runs[streak] ?? 0) + 1 }
   for (let t = from; t <= to; t++) {
     const o = L.outcome(t)
     if (!o) continue // nobody played that round
     bt.rounds++
     const d = decide(rules, t, guard(L, t), me)
     const stake = 'skip' in d ? 0 : stakeFor(d.unit, d.amount, bal, me)
-    if ('skip' in d || stake < 1) { bt.skips++; bt.curve.push({ round: t, side: null, outcome: o, stake: 0, bal }); continue }
+    if ('skip' in d || stake < 1) { bt.skips++; bt.curve.push({ round: t, side: null, outcome: o, stake: 0, bal, streak, mined: false }); continue }
     bt.bets++
     bt.staked += stake
+    let mined = false
     if (o === 'void') bt.voids++
-    else if (o === d.side) { bt.wins++; bal += stake - (stake * feeBps) / 10000 }
-    else { bt.losses++; bal -= stake + (stake * feeBps) / 10000 }
+    else if (o === d.side) {
+      bt.wins++
+      bal += stake - (stake * feeBps) / 10000
+      streak++
+      bt.bestStreak = Math.max(bt.bestStreak, streak)
+      mined = streak >= streakMin
+      if (mined) bt.mines++
+    } else {
+      bt.losses++
+      bal -= stake + (stake * feeBps) / 10000
+      endRun()
+      streak = 0
+    }
     me = nextMe(me, d.side, o)
-    bt.curve.push({ round: t, side: d.side, outcome: o, stake, bal })
+    bt.curve.push({ round: t, side: d.side, outcome: o, stake, bal, streak, mined })
   }
+  endRun()
   bt.end = bal
   return bt
 }

@@ -45,7 +45,7 @@
   </svg>
   {#if step}
     <div class="tip" style="left:{Math.min(Math.max(x(hover!), 90), w - 90)}px">
-      <b>Round {step.round}</b> · {step.side ? `bet ${fmtN(step.stake)} NEAR on ${label(step.round, step.side)}` : 'skipped'} ·
+      <b>Round {step.round}</b> · {step.side ? `bet ${fmtN(step.stake)} NEAR on ${label(step.round, step.side)}` : 'skipped'}{step.side ? ` · streak ${step.streak}${step.mined ? ' (mines)' : ''}` : ''} ·
       {step.outcome === 'void' ? 'void' : `${label(step.round, step.outcome)} was smaller`} → <b>{fmtN(step.bal)}</b>
     </div>
   {/if}
