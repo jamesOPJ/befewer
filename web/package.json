@@ -1,0 +1,21 @@
+{
+  "name": "fewer-web",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@near-wallet-selector/core": "^10.1.4",
+    "@near-wallet-selector/intear-wallet": "^10.1.4",
+    "@near-wallet-selector/meteor-wallet": "^10.1.4",
+    "@near-wallet-selector/my-near-wallet": "^10.1.4",
+    "drand-client": "^1.2.5",
+    "near-api-js": "^7.4.0",
+    "tlock-js": "^0.9.0",
+    "typescript": "^5.9.3",
+    "vite": "^8.3.6"
+  }
+}

@@ -6,3 +6,6 @@ node_modules/
 secrets/
 neardev/
 keeper/state/
+keeper/logs/
+web/server.log
+web/dist/

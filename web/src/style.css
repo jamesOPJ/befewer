@@ -1,0 +1,55 @@
+:root {
+  --bg: #1b1917; --surface: #232120; --line: #332f2b; --fg: #c8c2b8; --fg-dim: #948b81;
+  --accent: #e0b25c; --a: #d7a85a; --b: #7fa6c4; --good: #7fae74; --burn: #d0796f;
+  font: 16px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+* { box-sizing: border-box }
+body { margin: 0; background: var(--bg); color: var(--fg) }
+main { max-width: 980px; margin: 0 auto; padding: 1.2rem }
+a { color: var(--accent); text-decoration: none } a:hover { text-decoration: underline }
+header h1 { font-size: 3rem; margin: .4rem 0 0; letter-spacing: -.02em; color: var(--accent) }
+.tag { font-size: 1.4rem; margin: 0; color: var(--fg) }
+.sub, .fine, .k { color: var(--fg-dim) }
+.fine { font-size: .85rem }
+.k { font-size: .9rem }
+section { margin: 1.6rem 0 }
+h2 { font-size: 1.1rem; margin: 0 0 .6rem }
+.live { display: grid; grid-template-columns: 1.3fr 1fr; gap: 1rem }
+@media (max-width: 760px) { .live { grid-template-columns: 1fr } header h1 { font-size: 2.4rem } }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 1rem 1.1rem }
+.big { font-size: 2.4rem; font-weight: 700; margin: .2rem 0 }
+.big span { font-size: 1rem; font-weight: 400; color: var(--fg-dim) }
+.t { font-variant-numeric: tabular-nums; color: var(--fg) }
+.move { margin-top: .9rem; border-top: 1px solid var(--line); padding-top: .9rem }
+.lead { margin: 0 0 .6rem }
+.who { font-size: .9rem; color: var(--fg-dim); margin-bottom: .6rem }
+.who b { color: var(--fg) }
+button { font: inherit; border-radius: 10px; border: 1px solid var(--line); background: #2c2926; color: var(--fg); padding: .6rem 1rem; cursor: pointer }
+button:disabled { opacity: .5; cursor: default }
+button.primary { background: var(--accent); color: #1b1917; border: 0; font-weight: 700 }
+.pick { display: flex; gap: .8rem; margin: .7rem 0 }
+.pick button { flex: 1; font-size: 2rem; font-weight: 800; padding: .7rem 0 }
+.pick .side-A { border-color: var(--a); color: var(--a) }
+.pick .side-B { border-color: var(--b); color: var(--b) }
+.stake { display: flex; gap: .6rem; align-items: center; flex-wrap: wrap }
+.stake input { flex: 1; min-width: 140px; accent-color: var(--accent) }
+.side-A { color: var(--a) } .side-B { color: var(--b) }
+.locked { margin: 0 }
+.notice { color: var(--accent); margin: .6rem 0 0 }
+.vs { display: flex; justify-content: space-between; font-size: 1.3rem; font-weight: 700; margin: .6rem 0 .3rem }
+.bar { display: flex; height: 14px; border-radius: 7px; overflow: hidden; background: var(--line) }
+.bar .a { background: var(--a) } .bar .b { background: var(--b) }
+.stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem }
+@media (max-width: 760px) { .stats { grid-template-columns: repeat(2, 1fr) } }
+.stats > div { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: .8rem 1rem }
+.v { font-size: 1.5rem; font-weight: 700; font-variant-numeric: tabular-nums }
+.burn { color: var(--burn) }
+table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; font-size: .92rem }
+th, td { text-align: right; padding: .35rem .5rem; border-bottom: 1px solid var(--line) }
+th:first-child, td:first-child { text-align: left }
+th { color: var(--fg-dim); font-weight: 500 }
+td.win { color: var(--good); font-weight: 700 }
+.npcs { display: grid; grid-template-columns: repeat(2, 1fr); gap: .8rem }
+@media (max-width: 760px) { .npcs { grid-template-columns: 1fr } }
+.npc { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: .7rem .9rem }
+.rules ol { padding-left: 1.2rem } .rules li { margin: .3rem 0 }

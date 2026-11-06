@@ -6,6 +6,7 @@
 //        FEWER_CONTRACT=v2.befewer.testnet node run.mjs --setup    (create + fund NPC/keeper accounts, claim faucet)
 //        FEWER_KEEPER_ONLY=1 ... node run.mjs                       (no NPCs, just reveal + claim)
 import fs from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import tlock from 'tlock-js'
 import { actions } from 'near-api-js'
 import { loadAccount, hasKey, newKeyFor, view, call, newSalt, commitHash, ONE, fmt, sleep, log } from './lib.mjs'
@@ -30,7 +31,7 @@ export const NPCS = [
 
 const STATE_DIR = new URL('./state/', import.meta.url)
 fs.mkdirSync(STATE_DIR, { recursive: true })
-const STATE_FILE = new URL(`./state/${CONTRACT}.json`, import.meta.url)
+const STATE_FILE = fileURLToPath(new URL(`./state/${CONTRACT}.json`, import.meta.url))
 const state = fs.existsSync(STATE_FILE) ? JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')) : { plans: {}, salts: {}, gas: [] }
 const save = () => {
   fs.writeFileSync(STATE_FILE + '.tmp', JSON.stringify(state))
