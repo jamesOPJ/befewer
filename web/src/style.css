@@ -82,3 +82,17 @@ th, td { overflow-wrap: anywhere }
 .chip.c-A { color: var(--a); border: 1px solid var(--a) } .chip.c-B { color: var(--b); border: 1px solid var(--b) } .chip.c-void { color: var(--fg-dim); border: 1px solid var(--line) }
 .score { font-size: .9rem; color: var(--fg-dim); margin: -.3rem 0 .6rem }
 .score b { color: var(--fg) } .score b.good { color: var(--good) } .score b.burn { color: var(--burn) }
+.autopilot { margin: 1rem 0 }
+.autopilot h2 { margin: 0 0 .2rem }
+.presets { display: flex; flex-wrap: wrap; gap: .4rem; align-items: center; margin: .6rem 0; font-size: .9rem; color: var(--fg-dim) }
+button.mini { padding: .25rem .6rem; font-size: .85rem; border-radius: 8px }
+.rule { display: grid; grid-template-columns: 1.6rem 1fr auto; gap: .5rem; align-items: start; padding: .55rem 0; border-top: 1px solid var(--line) }
+.rule .n { color: var(--accent); font-weight: 700; padding-top: .25rem }
+.rule .sentence { line-height: 2.1 }
+.rule .ops { display: flex; gap: .25rem }
+select { font: inherit; font-size: .9rem; background: #2c2926; color: var(--fg); border: 1px solid var(--line); border-radius: 7px; padding: .15rem .35rem; max-width: 100% }
+.add { margin: .5rem 0 0 }
+.bt { margin: .7rem 0; padding: .6rem .75rem; background: #27241f; border-radius: 8px; font-size: .92rem }
+.ap-on { display: flex; gap: .5rem; align-items: center; margin: .4rem 0; font-weight: 600 }
+.ap-st { margin: .2rem 0 0 }
+@media (max-width: 760px) { .rule { grid-template-columns: 1.3rem 1fr } .rule .ops { grid-column: 2 } }

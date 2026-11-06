@@ -5,6 +5,7 @@ import {
 } from './chain'
 import { questionFor, label, QUESTIONS } from './questions'
 import * as H from './history'
+import { decide, backtest, guard, PRESETS, type Rule, type Cond, type Pick, type Lookup } from './rules'
 
 const $ = (sel: string) => document.querySelector(sel) as HTMLElement
 const esc = (s: string) => s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!)
@@ -223,6 +224,14 @@ function render() {
     <div class="card now"><div id="s-round"></div><div id="s-last"></div><div id="s-move"></div><div id="s-notice"></div></div>
     <div class="card reveal" id="s-reveal"></div>
   </section>
+  <section class="card autopilot"><h2>Autopilot</h2>
+    <p class="fine">Write rules and let them bet for you. Rules are checked top to bottom; the first one that fits decides. They only look at rounds that already finished.</p>
+    <div class="presets">Start from: ${PRESETS.map((x, i) => `<button class="mini" data-act="ap-preset" data-i="${i}" title="${esc(x.about)}">${esc(x.name)}</button>`).join('')}</div>
+    <div id="ap-rules"></div>
+    <div id="ap-bt"></div>
+    <label class="ap-on"><input type="checkbox" id="ap-on"> Run my rules every round while this page is open</label>
+    <div id="ap-status"></div>
+  </section>
   <section class="stats" id="s-stats"></section>
   <div id="s-mine"></div>
   <div id="s-results"></div>
@@ -282,6 +291,7 @@ function render() {
       <td class="burn">${r.settled ? fmt(r.burned) : ''}</td></tr>`).join('')}
     </table>`)
   renderNpcs()
+  apRender()
   tick()
 }
 
@@ -300,6 +310,28 @@ function renderNpcs() {
   }).join(''))
 }
 
+/** Seal a side with drand and commit it to the round taking bets right now. */
+async function placeBet(side: 'A' | 'B', want: bigint, who = 'you'): Promise<{ round: number; amount: bigint }> {
+  const cap = (BigInt(me!.balance) * BigInt(params.max_stake_bps)) / 10000n
+  let amount = want > cap ? cap : want
+  if (amount < BigInt(params.min_stake)) amount = BigInt(params.min_stake)
+  status = await view<Status>('get_status')
+  const r = Number(status.commit_round)
+  const revealStart = nsToMs(status.commit_ends_at)
+  if (revealStart - now() < 8000) throw new Error('This round is closing; wait a few seconds for the next one.')
+  busy = `Sealing ${who === 'you' ? 'your' : 'the autopilot\'s'} side with drand…`
+  render()
+  const salt = randomSalt()
+  const hash = await commitHash(session!.accountId, r, side, salt)
+  const { sealed, drandRound } = await seal(side, salt, revealStart)
+  savePick(session!.accountId, r, { side, salt, amount: amount.toString(), drandRound })
+  busy = 'Sending the sealed bet…'
+  render()
+  await callContract(session!, 'commit', { round: String(r), amount: amount.toString(), hash, sealed })
+  notice = `Sealed${who === 'you' ? '' : ' by the autopilot'}: ${fmt(amount)} BEFEWER on ${side} · ${label(r, side)} in round ${r}.`
+  return { round: r, amount }
+}
+
 async function act(kind: string, el: HTMLElement) {
   notice = ''
   failure = ''
@@ -313,24 +345,11 @@ async function act(kind: string, el: HTMLElement) {
       me = null
     } else if (kind === 'commit') {
       const side = el.dataset.side as 'A' | 'B'
-      let amount = BigInt((document.getElementById('amt') as HTMLInputElement).value) * ONE // read before re-rendering
+      const amount = BigInt((document.getElementById('amt') as HTMLInputElement).value) * ONE // read before re-rendering
       await ensurePlayer()
-      const cap = (BigInt(me!.balance) * BigInt(params.max_stake_bps)) / 10000n
-      if (amount > cap) amount = cap
-      status = await view<Status>('get_status')
-      const r = Number(status.commit_round)
-      const revealStart = nsToMs(status.commit_ends_at)
-      if (revealStart - now() < 8000) throw new Error('This round is closing; wait a few seconds for the next one.')
-      busy = 'Sealing your side with drand…'
-      render()
-      const salt = randomSalt()
-      const hash = await commitHash(session!.accountId, r, side, salt)
-      const { sealed, drandRound } = await seal(side, salt, revealStart)
-      savePick(session!.accountId, r, { side, salt, amount: amount.toString(), drandRound })
-      busy = 'Sending your sealed bet…'
-      render()
-      await callContract(session!, 'commit', { round: String(r), amount: amount.toString(), hash, sealed })
-      notice = `Sealed: ${fmt(amount)} BEFEWER on ${side} in round ${r}.`
+      await placeBet(side, amount)
+    } else if (kind.startsWith('ap-')) {
+      apAction(kind, el)
     }
   } catch (e: any) {
     failure = String(e.message || e)
@@ -341,11 +360,126 @@ async function act(kind: string, el: HTMLElement) {
   }
 }
 
+// ---------------- Autopilot ----------------
+const AP_KEY = 'befewer.ap.rules'
+let apRules: Rule[] = (() => {
+  try { return JSON.parse(localStorage.getItem(AP_KEY) || 'null') ?? structuredClone(PRESETS[1].rules) } catch { return structuredClone(PRESETS[1].rules) }
+})()
+let apOn = localStorage.getItem('befewer.ap.on') === '1'
+let apStatus = ''
+const apDone = new Set<number>() // rounds the autopilot already decided in this tab
+const lookup: Lookup = { recent: H.recent, sameQuestion: H.sameQuestion, outcome: H.outcome }
+const saveRules = () => localStorage.setItem(AP_KEY, JSON.stringify(apRules))
+
+const sel = (i: number, field: string, value: string, options: [string, string][]) =>
+  `<select data-ap="${field}" data-i="${i}">${options.map(([v, t]) => `<option value="${v}"${v === value ? ' selected' : ''}>${t}</option>`).join('')}</select>`
+
+function ruleHTML(r: Rule, i: number): string {
+  const c = r.cond
+  const kind = sel(i, 'kind', c.kind, [['last', 'the round before'], ['streak', 'the last few rounds'], ['question', 'last time this question was asked'], ['always', 'anything else']])
+  const n = c.kind === 'streak' ? sel(i, 'n', String(c.n), [2, 3, 4, 5, 6].map(x => [String(x), `${x} rounds`])) : ''
+  const winner = c.kind === 'always' ? '' : sel(i, 'winner', c.winner, [['A', c.kind === 'streak' ? 'were all won by A' : 'was won by A'], ['B', c.kind === 'streak' ? 'were all won by B' : 'was won by B'], ['any', c.kind === 'streak' ? 'were all won by one side' : 'had a winner']])
+  const picks: [string, string][] = c.kind === 'always'
+    ? [['A', 'A'], ['B', 'B'], ['random', 'a random side'], ['skip', 'nothing (skip)']]
+    : [['same', 'that same side'], ['other', 'the other side'], ['A', 'A'], ['B', 'B'], ['random', 'a random side'], ['skip', 'nothing (skip)']]
+  const pick = sel(i, 'pick', picks.some(([v]) => v === r.pick) ? r.pick : picks[0][0], picks)
+  const pct = r.pick === 'skip' ? '' : `with ${sel(i, 'pct', String(r.pct), [1, 2, 5, 10, 15, 20, 25].map(x => [String(x), `${x}%`]))} of my balance`
+  return `<div class="rule"><span class="n">${i + 1}</span><div class="sentence">${c.kind === 'always' ? 'For' : 'If'} ${kind} ${n} ${winner} → bet ${pick} ${pct}</div>
+    <div class="ops"><button class="mini" data-act="ap-up" data-i="${i}" title="move up" ${i === 0 ? 'disabled' : ''}>↑</button><button class="mini" data-act="ap-down" data-i="${i}" title="move down" ${i === apRules.length - 1 ? 'disabled' : ''}>↓</button><button class="mini" data-act="ap-del" data-i="${i}" title="remove">✕</button></div></div>`
+}
+
+function apRender() {
+  if (!document.getElementById('ap-rules')) return
+  setHTML('ap-rules', `${apRules.map(ruleHTML).join('')}<button class="mini add" data-act="ap-add">+ add a rule</button>
+    <p class="fine">If no rule fits, the autopilot skips the round.</p>`)
+  const cur = Number(status.commit_round)
+  const from = Math.max(0, cur - 60)
+  const bt = backtest(apRules, from, cur - 1, lookup, 1000)
+  setHTML('ap-bt', bt.rounds
+    ? `<div class="bt">Over the last <b>${bt.rounds}</b> finished rounds these rules would have bet <b>${bt.bets}</b> times:
+       won <b class="good">${bt.wins}</b>, lost <b class="burn">${bt.losses}</b>${bt.voids ? `, ${bt.voids} void` : ''} → 1,000 becomes <b class="${bt.end >= 1000 ? 'good' : 'burn'}">${bt.end.toLocaleString('en-US')}</b>.
+       <span class="fine">Assumes your bet would not have changed which side was smaller.</span></div>`
+    : `<div class="bt fine">No finished rounds to test on yet.</div>`)
+  const box = document.getElementById('ap-on') as HTMLInputElement
+  if (box && box.checked !== apOn) box.checked = apOn
+  setHTML('ap-status', apOn ? `<p class="fine ap-st">${esc(apStatus || 'Waiting for the right moment in this round (after the previous round finishes)…')}</p>` : '')
+}
+
+function apAction(kind: string, el: HTMLElement) {
+  const i = Number(el.dataset.i)
+  if (kind === 'ap-preset') apRules = structuredClone(PRESETS[i].rules)
+  else if (kind === 'ap-add') apRules.splice(Math.max(0, apRules.length - (apRules.at(-1)?.cond.kind === 'always' ? 1 : 0)), 0, { cond: { kind: 'last', winner: 'any' }, pick: 'other', pct: 5 })
+  else if (kind === 'ap-del') apRules.splice(i, 1)
+  else if (kind === 'ap-up' && i > 0) [apRules[i - 1], apRules[i]] = [apRules[i], apRules[i - 1]]
+  else if (kind === 'ap-down' && i < apRules.length - 1) [apRules[i + 1], apRules[i]] = [apRules[i], apRules[i + 1]]
+  saveRules()
+  apRender()
+}
+
+function apChange(el: HTMLSelectElement) {
+  const i = Number(el.dataset.i)
+  const r = apRules[i]
+  const v = el.value
+  switch (el.dataset.ap) {
+    case 'kind': {
+      const w = 'winner' in r.cond ? r.cond.winner : 'any'
+      r.cond = v === 'always' ? { kind: 'always' } : v === 'streak' ? { kind: 'streak', winner: w, n: 3 } : ({ kind: v, winner: w } as Cond)
+      if (v === 'always' && (r.pick === 'same' || r.pick === 'other')) r.pick = 'random'
+      break
+    }
+    case 'n': if (r.cond.kind === 'streak') r.cond.n = Number(v); break
+    case 'winner': if ('winner' in r.cond) r.cond.winner = v as any; break
+    case 'pick': r.pick = v as Pick; break
+    case 'pct': r.pct = Number(v); break
+  }
+  saveRules()
+  apRender()
+}
+
+/** Each poll: if the autopilot is on and this round is still open, decide once and bet. */
+async function autopilotTick() {
+  if (!apOn || busy || !status || !params) return
+  const r = Number(status.commit_round)
+  if (apDone.has(r) || BigInt(status.now) < BigInt(params.genesis_ns)) return
+  if (me?.open.some(o => o.round === String(r))) { apDone.add(r); return }
+  const left = nsToMs(status.commit_ends_at) - now()
+  if (left < 25_000) return // too close to the deadline: wait for the next round
+  // "the round before" must mean the same thing as in the backtest: wait until it has finished
+  const prev = H.round(r - 1)
+  if (prev && !prev.settled) { apStatus = `Round ${r}: waiting for round ${r - 1} to finish before deciding…`; return }
+  apDone.add(r)
+  const d = decide(apRules, r, guard(lookup, r))
+  if ('skip' in d) { apStatus = `Round ${r}: skipped (${d.rule == null ? 'no rule fit' : `rule ${d.rule + 1} says skip`}).`; return }
+  try {
+    if (!session || !me) await ensurePlayer()
+    const want = (BigInt(me!.balance) * BigInt(d.pct)) / 100n
+    const placed = await placeBet(d.side, want, 'autopilot')
+    apStatus = `Round ${placed.round}: rule ${d.rule + 1} bet ${fmt(placed.amount)} BEFEWER on ${d.side} · ${label(placed.round, d.side)}.`
+  } catch (e: any) {
+    apStatus = `Round ${r}: the autopilot could not bet: ${String(e.message || e)}`
+  } finally {
+    busy = ''
+    await refresh(true)
+  }
+}
+
 document.addEventListener('click', e => {
   const el = (e.target as HTMLElement).closest('[data-act]') as HTMLElement | null
   if (!el) return
   e.preventDefault()
+  if (el.dataset.act!.startsWith('ap-')) return apAction(el.dataset.act!, el)
   act(el.dataset.act!, el)
+})
+document.addEventListener('change', e => {
+  const t = e.target as HTMLElement
+  if (t instanceof HTMLSelectElement && t.dataset.ap) apChange(t)
+  if (t instanceof HTMLInputElement && t.id === 'ap-on') {
+    apOn = t.checked
+    localStorage.setItem('befewer.ap.on', apOn ? '1' : '0')
+    apStatus = ''
+    apRender()
+    autopilotTick()
+  }
 })
 document.addEventListener('input', e => {
   const t = e.target as HTMLInputElement
@@ -355,7 +489,7 @@ document.addEventListener('input', e => {
   }
 })
 setInterval(tick, 1000)
-setInterval(() => !busy && refresh(), 6000)
+setInterval(async () => { if (!busy) { await refresh(); await autopilotTick() } }, 6000)
 setInterval(() => loadNpcs(), 30000)
 // handy for anyone poking at the game from the console (and for our browser tests)
 ;(window as any).befewer = { history: H, render: () => render() }
