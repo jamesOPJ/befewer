@@ -24,8 +24,8 @@ const other = s => (s === 'A' ? 'B' : 'A')
 // Personalities. pick(h) gets the last settled round's outcome.
 export const NPCS = [
   { id: `npc-coin.${ROOT}`, play: 0.85, stake: [0.04, 0.18], about: 'flips a coin', pick: () => coin() },
-  { id: `npc-echo.${ROOT}`, play: 0.75, stake: [0.04, 0.15], about: 'bets the last minority wins again', pick: h => (h.last === 'A' || h.last === 'B' ? h.last : coin()) },
-  { id: `npc-flip.${ROOT}`, play: 0.75, stake: [0.04, 0.15], about: 'bets the crowd over-corrects', pick: h => (h.last === 'A' || h.last === 'B' ? other(h.last) : coin()) },
+  { id: `npc-echo.${ROOT}`, play: 0.95, stake: [0.04, 0.15], about: 'bets the last minority wins again', pick: h => (h.last === 'A' || h.last === 'B' ? h.last : coin()) },
+  { id: `npc-flip.${ROOT}`, play: 0.95, stake: [0.04, 0.15], about: 'bets the crowd over-corrects', pick: h => (h.last === 'A' || h.last === 'B' ? other(h.last) : coin()) },
   { id: `npc-whale.${ROOT}`, play: 0.5, stake: [0.18, 0.25], about: 'bets big on a hunch', pick: () => coin() },
 ]
 
