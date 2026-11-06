@@ -17,7 +17,9 @@ const [URL = 'http://127.0.0.1:5043/', OUT = '/root/scratch/near-hack/shots', W 
   console.log(`[${W}px] A/B visible on landing: yes, B button at y=${Math.round(box.y)} (viewport height ${mobile ? 844 : 1300})`)
   await p.screenshot({ path: `${OUT}/new-${W}-1-landing.png` })
   await p.click('.pick .side-B')
-  await p.waitForFunction(() => /You're in round/.test(document.body.innerText) || (document.querySelector('.notice') && !/Creating|Claiming|Sealing|Sending/.test(document.querySelector('.notice').textContent) && document.querySelectorAll('.notice').length && !document.querySelector('.pick button[disabled]')), { timeout: 120000 })
+  await p.waitForFunction(() => /You're in round/.test(document.body.innerText) || document.querySelector('.failure'), { timeout: 120000 })
+  const fail = await p.$('.failure')
+  if (fail) { console.log(`[${W}px] FAILED with red box:`, await p.evaluate(e => e.textContent, fail)); await b.close(); process.exit(1) }
   console.log(`[${W}px] after one tap:`, (await p.$eval('.card.now', e => e.innerText)).replace(/\s+/g, ' ').slice(0, 330))
   await p.screenshot({ path: `${OUT}/new-${W}-2-after.png` })
   console.log(`[${W}px] console errors:`, errors.length ? errors.slice(0, 5) : 'none')

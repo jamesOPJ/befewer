@@ -66,14 +66,17 @@ function bar(a: bigint, b: bigint): string {
 
 function renderMove(_cr: RoundV | undefined): string {
   const r = Number(status.commit_round)
+  if (BigInt(status.now) < BigInt(params.genesis_ns)) {
+    return `<div class="move"><p class="lead">The game opens in ${timer(params.genesis_ns)}. Round 0 takes bets right after.</p></div>`
+  }
   const head = session && me
-    ? `<div class="who">${esc(short(session.accountId))} · <b>${fmt(me.balance)}</b> FEWER
+    ? `<div class="who">${esc(short(session.accountId))} · <b>${fmt(me.balance)}</b> BEFEWER
        · streak ${me.streak} (best ${me.best_streak}) · <a href="#" data-act="logout">forget this device</a></div>`
     : ''
   const mine = me?.open.find(o => o.round === String(r))
   if (session && mine) {
     const pick = loadPicks(session.accountId)[r]
-    return `<div class="move">${head}<p class="locked">You're in round ${r}: <b>${fmt(mine.amount)}</b> FEWER on
+    return `<div class="move">${head}<p class="locked">You're in round ${r}: <b>${fmt(mine.amount)}</b> BEFEWER on
       <b class="side-${pick?.side ?? 'x'}">${pick?.side ?? '?'}</b>, sealed until drand #${pick?.drandRound ?? '?'}.
       Nobody, including us, can see your side until the reveal opens. It reveals itself; the result shows up here.</p></div>`
   }
@@ -85,11 +88,11 @@ function renderMove(_cr: RoundV | undefined): string {
   const maxW = Number(cap / ONE)
   const def = Math.max(1, Math.round(maxW / 2)) // the player's own choice is applied after painting (applyStake)
   return `<div class="move">${head}
-    <label class="stake">Stake <input id="amt" type="range" min="1" max="${maxW}" value="${def}"><b id="amtv">${def}</b> FEWER <span class="fine">(max 25% of balance)</span></label>
+    <label class="stake">Stake <input id="amt" type="range" min="1" max="${maxW}" value="${def}"><b id="amtv">${def}</b> BEFEWER <span class="fine">(max 25% of balance)</span></label>
     <div class="pick"><button class="side-A" data-act="commit" data-side="A" ${busy ? 'disabled' : ''}>A</button>
     <button class="side-B" data-act="commit" data-side="B" ${busy ? 'disabled' : ''}>B</button></div>
     <p class="fine">Pick the side you think <b>fewer coins</b> will pick. Win: 2× back. Lose: your stake. The gap between the sides burns.</p>
-    ${newcomer ? `<p class="fine">Your first tap creates a free testnet account in this browser and gives you ${fmt(params.faucet_amount)} FEWER. No wallet, no seed phrase, no popups.</p>` : ''}
+    ${newcomer ? `<p class="fine">Your first tap creates a free testnet account in this browser and gives you ${fmt(params.faucet_amount)} BEFEWER. No wallet, no seed phrase, no popups.</p>` : ''}
   </div>`
 }
 
@@ -117,7 +120,7 @@ function resultText(x: Result): string {
   return x.outcome === x.side ? `<b class="good">won +${fmt(x.amount)}</b> (got ${fmt(2n * x.amount)} back)` : `<b class="burn">lost ${fmt(x.amount)}</b>`
 }
 
-/** Make sure this browser has a testnet account with FEWER in it. */
+/** Make sure this browser has a testnet account with BEFEWER in it. */
 async function ensurePlayer() {
   if (!session) {
     busy = 'Creating your testnet account…'
@@ -131,7 +134,7 @@ async function ensurePlayer() {
   }
   me = await view<PlayerV>('get_player', { account_id: session.accountId })
   if (!me.faucet_claimed && BigInt(me.balance) === 0n) {
-    busy = `Claiming ${fmt(params.faucet_amount)} FEWER…`
+    busy = `Claiming ${fmt(params.faucet_amount)} BEFEWER…`
     render()
     await callContract(session, 'faucet', {})
     me = await view<PlayerV>('get_player', { account_id: session.accountId })
@@ -170,10 +173,10 @@ function render() {
   if (!skeleton) {
     $('#app').innerHTML = `
   <header>
-    <h1>$FEWER</h1>
+    <h1>$BEFEWER</h1>
     <p class="tag">Pick the side fewer coins pick.</p>
     <p class="sub">A memecoin whose daily ritual is a sealed-bid minority game on NEAR. The minority doubles, the imbalance burns.</p>
-    <p class="testnet">Testnet demo built for NEAR HACKATHON. Testnet FEWER is free and has no monetary value; there is no token sale.</p>
+    <p class="testnet">Testnet demo built for NEAR HACKATHON. Testnet BEFEWER is free and has no monetary value; there is no token sale.</p>
   </header>
   <details class="rules" id="rules">
     <summary><b>How to play</b> <span class="gist">Bet on the side you think <b>fewer coins</b> will pick. Win: 2× back. Lose: your stake. The gap burns.</span></summary>
@@ -181,7 +184,7 @@ function render() {
     <ol>
       <li>Every round you can bet up to 25% of your balance on A or B. Your side is sealed: the contract stores only a hash.</li>
       <li>Your browser also locks your side with a <a href="https://drand.love" target="_blank" rel="noopener">drand</a> timelock that opens when the reveal window opens. Then anyone can open it and reveal it for you, so you never have to come back.</li>
-      <li>After the reveal window, the side with <b>less</b> revealed FEWER wins. Winners get exactly 2× their stake. Losers lose their stake.</li>
+      <li>After the reveal window, the side with <b>less</b> revealed BEFEWER wins. Winners get exactly 2× their stake. Losers lose their stake.</li>
       <li>The gap between the sides is burned, along with every bet that was never revealed. A tie or a one-sided round refunds everyone.</li>
       <li>Supply only goes down: everything was minted once at launch, there is no mint function and no owner.</li>
     </ol>
@@ -214,7 +217,7 @@ function render() {
   const burnPct = handedOut > 0n ? Number((burned * 100000n) / handedOut) / 1000 : 0
 
   setHTML('s-round', `<div class="k">Round ${status.commit_round} · bets close in ${timer(status.commit_ends_at)}</div>
-      <div class="big">${fmt(cr?.committed ?? '0')} <span>FEWER in</span></div>
+      <div class="big">${fmt(cr?.committed ?? '0')} <span>BEFEWER in</span></div>
       <div class="k">${cr?.commits ?? 0} sealed bet${cr?.commits === 1 ? '' : 's'} · sides hidden until the reveal opens</div>`)
   setHTML('s-move', renderMove(cr))
   applyStake()
@@ -262,7 +265,7 @@ function renderNpcs() {
   setHTML('npcs', NPCS.map(([id, name, about]) => {
     const p = npcCache[id]
     return `<div class="npc"><b>${name}</b> <span class="fine">${about}</span>
-      <div>${p ? `${fmt(p.balance)} FEWER · W ${p.wins} L ${p.losses} · streak ${p.streak}` : '…'}</div></div>`
+      <div>${p ? `${fmt(p.balance)} BEFEWER · W ${p.wins} L ${p.losses} · streak ${p.streak}` : '…'}</div></div>`
   }).join(''))
 }
 
@@ -296,11 +299,11 @@ async function act(kind: string, el: HTMLElement) {
       busy = 'Sending your sealed bet…'
       render()
       await callContract(session!, 'commit', { round: String(r), amount: amount.toString(), hash, sealed })
-      notice = `Sealed: ${fmt(amount)} FEWER on ${side} in round ${r}.`
+      notice = `Sealed: ${fmt(amount)} BEFEWER on ${side} in round ${r}.`
     }
   } catch (e: any) {
     failure = String(e.message || e)
-    console.error('FEWER action failed', kind, e)
+    console.error('BEFEWER action failed', kind, e)
   } finally {
     busy = ''
     await refresh(true)

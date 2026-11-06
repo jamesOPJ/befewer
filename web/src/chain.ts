@@ -7,7 +7,7 @@ import tlock from 'tlock-js'
 
 const { timelockEncrypt, roundAt, roundTime, mainnetClient } = tlock as any
 
-export const CONTRACT: string = import.meta.env.VITE_CONTRACT || 'v2.befewer.testnet'
+export const CONTRACT: string = import.meta.env.VITE_CONTRACT || 'v3.befewer.testnet'
 export const NETWORK = 'testnet'
 export const EXPLORER = 'https://testnet.nearblocks.io'
 export const ONE = 10n ** 18n

@@ -24,5 +24,18 @@
       "min_stake": "1000000000000000000",
       "faucet_amount": "1000000000000000000000"
     }
+  },
+  "v3.befewer.testnet": {
+    "deployed_at": "2026-11-06T10:01:39.412Z",
+    "tx": "6Cexb7EyZcz6HWrXK1dTR8JnMcu55tPrhxUXnBkpNuX3",
+    "code_sha256": "ad1d86fd5a56e2104dd0686c89a3940b7f1cd0084e4c6445cff7b164ca60ec4a",
+    "params": {
+      "genesis_ns": "1793959440000000000",
+      "commit_ns": "180000000000",
+      "reveal_ns": "90000000000",
+      "max_stake_bps": 2500,
+      "min_stake": "1000000000000000000",
+      "faucet_amount": "1000000000000000000000"
+    }
   }
 }

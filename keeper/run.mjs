@@ -1,9 +1,9 @@
-// FEWER testnet runner: four NPC players with their own wallets + a keeper that
+// BEFEWER testnet runner: four NPC players with their own wallets + a keeper that
 // opens drand timelocks, reveals every sealed commit and pays out every finished round.
 // Everything the keeper does is permissionless: anyone can run this file against the contract.
 //
-// usage: FEWER_CONTRACT=v2.befewer.testnet node run.mjs            (loop forever)
-//        FEWER_CONTRACT=v2.befewer.testnet node run.mjs --setup    (create + fund NPC/keeper accounts, claim faucet)
+// usage: FEWER_CONTRACT=v3.befewer.testnet node run.mjs            (loop forever)
+//        FEWER_CONTRACT=v3.befewer.testnet node run.mjs --setup    (create + fund NPC/keeper accounts, claim faucet)
 //        FEWER_KEEPER_ONLY=1 ... node run.mjs                       (no NPCs, just reveal + claim)
 import fs from 'node:fs'
 import { fileURLToPath } from 'node:url'
@@ -12,7 +12,7 @@ import { actions } from 'near-api-js'
 import { loadAccount, hasKey, newKeyFor, view, call, newSalt, commitHash, ONE, fmt, sleep, log } from './lib.mjs'
 
 const { timelockEncrypt, timelockDecrypt, roundAt, roundTime, mainnetClient } = tlock
-const CONTRACT = process.env.FEWER_CONTRACT || 'v2.befewer.testnet'
+const CONTRACT = process.env.FEWER_CONTRACT || 'v3.befewer.testnet'
 const ROOT = 'befewer.testnet'
 const KEEPER = `keeper.${ROOT}`
 const KEEPER_ONLY = process.env.FEWER_KEEPER_ONLY === '1'
@@ -108,7 +108,7 @@ async function npcTick(st) {
       const res = await loadAccount(n.id).callFunctionRaw({ contractId: CONTRACT, methodName: 'commit', args: { round: String(r), amount: amount.toString(), hash, sealed }, gas: 30_000_000_000_000n })
       noteGas('commit', res)
       const f = failed(res)
-      log(n.id, f ? `commit FAILED ${f}` : `committed ${fmt(amount)} FEWER to round ${r} (sealed for drand #${dr})`)
+      log(n.id, f ? `commit FAILED ${f}` : `committed ${fmt(amount)} BEFEWER to round ${r} (sealed for drand #${dr})`)
     } catch (e) {
       log(n.id, 'commit error', String(e.message || e).slice(0, 200))
     }
