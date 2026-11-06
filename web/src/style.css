@@ -75,3 +75,10 @@ td .fine { font-size: .78rem; font-weight: 400; color: var(--fg-dim); text-align
 th, td { overflow-wrap: anywhere }
 .vs span { overflow-wrap: anywhere; min-width: 0 }
 @media (max-width: 760px) { .rounds th:nth-child(2), .rounds td:nth-child(2) { display: none } }
+.hist { margin: .55rem 0 0; font-size: .9rem; color: var(--fg-dim) }
+.hist b { color: var(--fg) }
+.chips { display: flex; flex-wrap: wrap; gap: .25rem; align-items: center; margin-top: .4rem }
+.chip { display: inline-grid; place-items: center; width: 1.45rem; height: 1.45rem; border-radius: 6px; font-size: .8rem; font-weight: 700; background: #2c2926 }
+.chip.c-A { color: var(--a); border: 1px solid var(--a) } .chip.c-B { color: var(--b); border: 1px solid var(--b) } .chip.c-void { color: var(--fg-dim); border: 1px solid var(--line) }
+.score { font-size: .9rem; color: var(--fg-dim); margin: -.3rem 0 .6rem }
+.score b { color: var(--fg) } .score b.good { color: var(--good) } .score b.burn { color: var(--burn) }

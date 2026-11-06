@@ -4,6 +4,7 @@ import {
   newKeyPair, loadPicks, savePick, callContract, type Status, type Params, type RoundV, type PlayerV, type Session,
 } from './chain'
 import { questionFor, label, QUESTIONS } from './questions'
+import * as H from './history'
 
 const $ = (sel: string) => document.querySelector(sel) as HTMLElement
 const esc = (s: string) => s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!)
@@ -45,6 +46,8 @@ async function refresh(full = false) {
       for (const r of fresh) byId.set(r.round, r)
       rounds = [...byId.values()].sort((a, b) => Number(b.round) - Number(a.round)).slice(0, 30)
     }
+    H.remember(rounds)
+    await H.loadDeep(Number(status.commit_round))
     if (session) {
       me = await view<PlayerV>('get_player', { account_id: session.accountId })
       await loadResults()
@@ -70,9 +73,11 @@ function renderMove(_cr: RoundV | undefined): string {
   if (BigInt(status.now) < BigInt(params.genesis_ns)) {
     return `<div class="move"><p class="lead">The game opens in ${timer(params.genesis_ns)}. Round 0 takes bets right after.</p></div>`
   }
+  const decided = me ? me.wins + me.losses : 0
   const head = session && me
     ? `<div class="who">${esc(short(session.accountId))} · <b>${fmt(me.balance)}</b> BEFEWER
-       · streak ${me.streak} (best ${me.best_streak}) · <a href="#" data-act="logout">forget this device</a></div>`
+       · streak ${me.streak} (best ${me.best_streak}) · <a href="#" data-act="logout">forget this device</a></div>
+       ${decided ? `<div class="score">You picked the smaller side <b>${me.wins} of ${decided}</b> times (<b class="${me.wins * 2 > decided ? 'good' : me.wins * 2 < decided ? 'burn' : ''}">${Math.round((me.wins * 100) / decided)}%</b>). A coin flip gets 50%.</div>` : ''}`
     : ''
   const mine = me?.open.find(o => o.round === String(r))
   if (session && mine) {
@@ -119,6 +124,28 @@ async function loadResults() {
 function resultText(x: Result): string {
   if (x.outcome === 'void') return `refunded ${fmt(x.amount)} (everyone was on one side, or a tie)`
   return x.outcome === x.side ? `<b class="good">won +${fmt(x.amount)}</b> (got ${fmt(2n * x.amount)} back)` : `<b class="burn">lost ${fmt(x.amount)}</b>`
+}
+
+/** What the crowd did before: last time this question was asked + the recent smaller sides. */
+function historyHTML(r: number): string {
+  const past = H.sameQuestion(r, 5)
+  let q = `<span class="fine">First time this question comes up in this game.</span>`
+  if (past.length) {
+    const t = past[0]
+    const sp = H.split(t)
+    const o = H.outcome(t)!
+    const pct = (x: number) => `${Math.round(x * 100)}%`
+    q = `Last time (round ${t}): ${esc(label(t, 'A'))} ${sp ? pct(sp.a) : '—'} · ${esc(label(t, 'B'))} ${sp ? pct(sp.b) : '—'} of the coins → ${o === 'void' ? 'void (everyone on one side)' : `<b class="side-${o}">${esc(label(t, o))}</b> was the smaller side`}.`
+    if (past.length > 1) {
+      const n = (s: string) => past.filter(x => H.outcome(x) === s).length
+      q += ` <span class="fine">Asked ${past.length} times: ${esc(label(t, 'A'))} won ${n('A')}, ${esc(label(t, 'B'))} won ${n('B')}${n('void') ? `, void ${n('void')}` : ''}.</span>`
+    }
+  }
+  const rec = H.recent(r, 12)
+  const chips = rec.length
+    ? `<div class="chips" title="Smaller side of the last rounds, newest first">${rec.map(x => `<span class="chip c-${x.outcome}" title="Round ${x.round}: ${esc(questionFor(x.round).q)} → ${esc(label(x.round, x.outcome))}">${x.outcome === 'void' ? '·' : x.outcome}</span>`).join('')}<span class="fine"> ← newest</span></div>`
+    : ''
+  return `<div class="hist">${q}${chips}</div>`
 }
 
 /** Make sure this browser has a testnet account with BEFEWER in it. */
@@ -220,7 +247,8 @@ function render() {
 
   setHTML('s-round', `<div class="k">Round ${status.commit_round} · bets close in ${timer(status.commit_ends_at)}</div>
       <div class="q">${esc(questionFor(status.commit_round).q)}</div>
-      <div class="k"><b class="amt">${fmt(cr?.committed ?? '0')}</b> BEFEWER in · ${cr?.commits ?? 0} sealed bet${cr?.commits === 1 ? '' : 's'} · sides hidden until the reveal opens</div>`)
+      <div class="k"><b class="amt">${fmt(cr?.committed ?? '0')}</b> BEFEWER in · ${cr?.commits ?? 0} sealed bet${cr?.commits === 1 ? '' : 's'} · sides hidden until the reveal opens</div>
+      ${historyHTML(Number(status.commit_round))}`)
   setHTML('s-move', renderMove(cr))
   applyStake()
   setHTML('s-notice', `${failure ? `<p class="failure">Your bet did not go through: ${esc(failure)}</p>` : ''}${notice ? `<p class="notice">${esc(notice)}</p>` : ''}${busy ? `<p class="notice busy">${esc(busy)}</p>` : ''}`)
@@ -329,5 +357,7 @@ document.addEventListener('input', e => {
 setInterval(tick, 1000)
 setInterval(() => !busy && refresh(), 6000)
 setInterval(() => loadNpcs(), 30000)
+// handy for anyone poking at the game from the console (and for our browser tests)
+;(window as any).befewer = { history: H, render: () => render() }
 await refresh(true)
 loadNpcs()
