@@ -3,7 +3,7 @@
   import { label } from '../questions'
   import type { RoundV } from '../chain'
   // Two orbs whose AREA is the BEFEWER revealed on each answer. The smaller orb is the minority:
-  // it doubles. The gap between them is what burns.
+  // its bets win +100%. The gap between them is what burns.
   let { round, compact = false }: { round: RoundV; compact?: boolean } = $props()
   const r = $derived(Number(round.round))
   const a = $derived(Number(BigInt(round.revealed_a) / 10n ** 15n) / 1000)
@@ -36,7 +36,7 @@
       <div class="lg">
         <div class="ans"><span class="letter {s}">{s}</span>{label(r, s)}</div>
         <div class="amt num">{fmt(raw as string)} <span class="faint">· {pct(v as number)}% · {n} bet{n === 1 ? '' : 's'}</span></div>
-        {#if outcome === s}<div class="tag good">smaller side · ×2</div>
+        {#if outcome === s}<div class="tag good">smaller side · wins +100%</div>
         {:else if outcome && outcome !== 'void'}<div class="tag burn">bigger side · loses</div>{/if}
       </div>
     {/each}

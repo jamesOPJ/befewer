@@ -42,7 +42,7 @@
 <header class="ph">
   <div>
     <h1>Rounds</h1>
-    <p class="muted">Every round so far. The smaller side doubled; the gap between the sides burned.</p>
+    <p class="muted">Every round so far. Bets on the smaller side won +100%; the gap between the sides burned.</p>
   </div>
 </header>
 
@@ -88,7 +88,7 @@
           <span class="res">
             {#if st !== 'settled'}<span class="pill">{st === 'betting' ? 'Live' : 'Opening'}</span>
             {:else if x.outcome === 'void'}<span class="pill">Void</span>
-            {:else}<span class="win side-{x.outcome}">{label(n, x.outcome!)} ×2</span><span class="burn small num"><Icon name="flame" size={13} /> {fmt(x.burned)}</span>{/if}
+            {:else}<span class="win side-{x.outcome}">{label(n, x.outcome!)} won</span><span class="burn small num"><Icon name="flame" size={13} /> {fmt(x.burned)}</span>{/if}
             {#if my}<span class="mine-tag">you: {label(n, my.side)}</span>{/if}
           </span>
         </button>

@@ -139,7 +139,7 @@
       </button>
       <p class="fine">
         {#if newcomer}Your first bet creates a free testnet account in this browser and gives you {fmt(game.params?.faucet_amount ?? '0')} BEFEWER. No wallet, no seed phrase, no popups.
-        {:else}Win: 2× back. Lose: your stake. The gap between the two sides burns. Max {capW} per round (25% of your balance).{/if}
+        {:else}Win: +{stake} (you get {stake * 2} back). Lose: −{stake}. The gap between the two sides burns. Max {capW} per round (25% of your balance).{/if}
       </p>
     {/if}
   </section>
@@ -161,7 +161,7 @@
           <p class="fine center">{revealing.commits} sealed bet{revealing.commits === 1 ? '' : 's'}. drand has just published the key for this round; the keeper is opening them now.</p>
         {:else}
           <Orbs round={revealing} />
-          <p class="fine center">{revealing.reveals_a + revealing.reveals_b} of {revealing.commits} bets open. The smaller side doubles when the timer ends.</p>
+          <p class="fine center">{revealing.reveals_a + revealing.reveals_b} of {revealing.commits} bets open. Bets on the smaller side win +100% when the timer ends.</p>
         {/if}
       </section>
     {:else if lastSettled}
@@ -175,7 +175,7 @@
         <Orbs round={lastSettled} />
         <p class="fine center">
           {#if lastSettled.outcome === 'void'}Everyone was on one side, so everyone got their bet back.
-          {:else}<span class="burn"><Icon name="flame" size={14} /> {fmt(lastSettled.burned)} BEFEWER burned</span> · the smaller side doubled.{/if}
+          {:else}<span class="burn"><Icon name="flame" size={14} /> {fmt(lastSettled.burned)} BEFEWER burned</span> · bets on the smaller side won +100%.{/if}
         </p>
       </section>
     {/if}

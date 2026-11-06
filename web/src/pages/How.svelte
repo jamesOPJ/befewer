@@ -18,13 +18,13 @@
 <section class="hero">
   <div class="eyebrow">How it works</div>
   <h1>Be fewer.</h1>
-  <p class="lede">A memecoin whose daily ritual is a sealed-bid minority game. Every round asks a question with two answers. The answer that gets <b>fewer coins</b> doubles. The gap between the two sides burns.</p>
+  <p class="lede">A memecoin whose daily ritual is a sealed-bid minority game. Every round asks a question with two answers. The answer that gets <b>fewer coins</b> wins: every bet on it earns <b>+100%</b> (bet 10, get 20 back). The gap between the two sides burns.</p>
 </section>
 
 <section class="steps">
   <div class="card step"><span class="si"><Icon name="eye" size={22} /></span><h3>1 · Read the crowd</h3><p>Don't pick what you like. Pick the answer you think fewer coins will pick, knowing everyone else is trying to do the same.</p></div>
   <div class="card step"><span class="si"><Icon name="lock" size={22} /></span><h3>2 · Seal your bet</h3><p>Bet up to 25% of your balance. Your answer is sealed: the chain stores only a fingerprint, and a drand timelock keeps it shut until betting closes.</p></div>
-  <div class="card step"><span class="si"><Icon name="flame" size={22} /></span><h3>3 · The smaller side doubles</h3><p>When the reveal ends, the side with less BEFEWER gets exactly 2× back. The other side loses its stake, and the difference between the two sides is burned.</p></div>
+  <div class="card step"><span class="si"><Icon name="flame" size={22} /></span><h3>3 · The smaller side wins +100%</h3><p>When the reveal ends, everyone on the side with less BEFEWER gets their stake back plus the same amount again (bet 10, get 20 back). The other side loses its stake, and the difference between the two sides is burned.</p></div>
 </section>
 
 <section class="card block">
@@ -33,7 +33,7 @@
     <div class="fact"><Icon name="lock" /><div><b>Nobody sees sides early.</b> A bet is stored as sha256 of your account, the round, your answer and a random secret. It can't be reversed, and changing the answer changes the fingerprint.</div></div>
     <div class="fact"><Icon name="clock" /><div><b>It opens itself.</b> Your browser also locks the answer to a <a href="https://drand.love" target="_blank" rel="noopener">drand</a> round published when betting closes. After that anyone can open it and reveal it for you, but only to the answer you sealed. You never have to come back.</div></div>
     <div class="fact"><Icon name="shield" /><div><b>No owner, no admin.</b> Every rule above is enforced by the contract. Its parameters were fixed at launch and there is no method that can change them, mint more, or move anyone's coins.</div></div>
-    <div class="fact"><Icon name="dice" /><div><b>Hedging doesn't pay.</b> Betting both sides from two accounts and revealing only the winner can never beat simply betting the difference, because a win pays exactly 2×. We checked 80,000 cases and the contract tests prove it.</div></div>
+    <div class="fact"><Icon name="dice" /><div><b>Hedging doesn't pay.</b> Betting both sides from two accounts and revealing only the winner can never beat simply betting the difference, because a win pays exactly +100% of the stake, never more. We checked 80,000 cases and the contract tests prove it.</div></div>
     <div class="fact"><Icon name="users" /><div><b>Whales are the crowd.</b> A big bet makes its own side bigger, so large holders win less often. Splitting coins across many accounts changes nothing: outcomes are weighted by coins, not by accounts.</div></div>
   </div>
 </section>
