@@ -4,29 +4,31 @@
   import Equity from '../lib/Equity.svelte'
   import { label } from '../questions'
   import { backtest, describe, chipsText, PRESETS, PRESET_GROUPS, type Rule, type Cond, type Pick, type Unit } from '../rules'
-  import { game, commitRound, lookup, saveRules, setAutopilot, draftDirty, putDraftLive, discardDraft, toast } from '../game.svelte'
+  import { game, commitRound, lookup, saveRules, setAutopilot, draftDirty, putDraftLive, discardDraft, toast, fmtN as fmtNear, GUEST_GAME_NEAR } from '../game.svelte'
 
   const WINDOW = 60
   // replays count chips of 0.01 NEAR and pay the contract's fee on every bet
   const fee = () => game.params?.fee_bps ?? 0
+  const need = () => game.params?.streak_min ?? 3
   const rules = $derived(game.ap.draft)
   const bt = $derived.by(() => {
     game.history
     const cur = commitRound()
-    return backtest($state.snapshot(game.ap.draft) as Rule[], Math.max(0, cur - WINDOW), cur - 1, lookup, 1000, fee())
+    return backtest($state.snapshot(game.ap.draft) as Rule[], Math.max(0, cur - WINDOW), cur - 1, lookup, 1000, fee(), need())
   })
   const btLive = $derived.by(() => {
     game.history
     const cur = commitRound()
-    return backtest($state.snapshot(game.ap.live) as Rule[], Math.max(0, cur - WINDOW), cur - 1, lookup, 1000, fee())
+    return backtest($state.snapshot(game.ap.live) as Rule[], Math.max(0, cur - WINDOW), cur - 1, lookup, 1000, fee(), need())
   })
   const dirty = $derived(JSON.stringify(game.ap.draft) !== JSON.stringify(game.ap.live))
+  const usesBoth = $derived(game.ap.draft.some(r => r.pick === 'both') || game.ap.live.some(r => r.pick === 'both'))
   let confirmLive = $state(false)
   function goLive() { putDraftLive(); confirmLive = false; toast('ok', game.ap.on ? 'New rules are running from the next round.' : 'New rules saved as the running rules.') }
   const presetBt = $derived.by(() => {
     game.history
     const cur = commitRound()
-    return PRESETS.map(p => backtest(p.rules, Math.max(0, cur - WINDOW), cur - 1, lookup, 1000, fee()))
+    return PRESETS.map(p => backtest(p.rules, Math.max(0, cur - WINDOW), cur - 1, lookup, 1000, fee(), need()))
   })
 
   const KINDS: [Cond['kind'], string][] = [
@@ -34,9 +36,10 @@
     ['question', 'last time this question was asked'], ['mine', 'my last bet'], ['always', 'anything else'],
   ]
   function picksFor(c: Cond): [Pick, string][] {
-    if (c.kind === 'always') return [['A', 'A'], ['B', 'B'], ['random', 'a random side'], ['skip', 'nothing (skip)']]
+    const both: [Pick, string] = ['both', 'both sides (2 accounts)']
+    if (c.kind === 'always') return [['A', 'A'], ['B', 'B'], ['random', 'a random side'], both, ['skip', 'nothing (skip)']]
     const same = c.kind === 'mine' ? 'the side I picked' : 'that same side'
-    return [['same', same], ['other', 'the other side'], ['A', 'A'], ['B', 'B'], ['random', 'a random side'], ['skip', 'nothing (skip)']]
+    return [['same', same], ['other', 'the other side'], ['A', 'A'], ['B', 'B'], ['random', 'a random side'], both, ['skip', 'nothing (skip)']]
   }
   function winners(c: Cond): [string, string][] {
     if (c.kind === 'margin') return [['any', 'whoever won it'], ['A', 'and A won it'], ['B', 'and B won it']]
@@ -221,7 +224,7 @@
           <button class="preset" onclick={() => use(i)}>
             <span class="pn">{p.name}</span>
             <span class="pa small muted">{p.about}</span>
-            {#if b.rounds}<span class="pr small num">staked {fmtN(b.staked)} → <b class={tone(net(b))}>{signed(net(b))}</b> <span class="faint">· last {b.rounds} rounds</span></span>{/if}
+            {#if b.rounds}<span class="pr small num">staked {fmtN(b.staked)} → <b class={tone(net(b))}>{signed(net(b))}</b> <span class="faint">· mined in {b.mines} · last {b.rounds} rounds</span></span>{/if}
             <span class="use small">Load into draft</span>
           </button>
         {/each}
@@ -237,20 +240,22 @@
         <div class="kpis">
           <div><div class="eyebrow">Net</div><div class="kv num {tone(net(bt))}">{signed(net(bt))}</div><div class="faint small">10 → {fmtN(bt.end)} NEAR</div></div>
           <div><div class="eyebrow">Staked</div><div class="kv num">{fmtN(bt.staked)}</div><div class="faint small">{bt.bets} bets · {bt.skips} skipped</div></div>
-          <div><div class="eyebrow">Won / lost</div><div class="kv num"><span class="good">{bt.wins}</span> / <span class="burn">{bt.losses}</span></div><div class="faint small">{bt.voids} void</div></div>
+          <div><div class="eyebrow">Won / lost</div><div class="kv num"><span class="good">{bt.wins}</span> / <span class="burn">{bt.losses}</span></div><div class="faint small">{bt.voids} void{bt.boths ? ` · ${bt.boths} both sides` : ''}</div></div>
+          <div><div class="eyebrow">Would have mined</div><div class="kv num gold">{bt.mines}</div><div class="faint small">rounds with a {need()}+ win streak</div></div>
         </div>
         {#if dirty}
           <div class="vs-live small">Draft <b class={tone(net(bt))}>{signed(net(bt))}</b> <span class="faint">vs</span> running rules <b class={tone(net(btLive))}>{signed(net(btLive))}</b> <span class="faint">on the same rounds</span></div>
         {/if}
         <Equity curve={bt.curve} />
-        <p class="faint small">Replays your rules round by round from 10 NEAR, using only what was known before each round and paying the {fee() / 100}% fee on every bet. Assumes your own bet would not have changed which side was smaller.</p>
+        <p class="faint small">Replays your rules round by round from 10 NEAR, using only what was known before each round and paying the {fee() / 100}% fee on every bet. Assumes your own bet would not have changed which side was smaller. "Would have mined" counts rounds where your bet would have earned a share of the pot; how much depends on everyone else's streaks that round.</p>
+        {#if usesBoth}<p class="faint small">Both-sides bets put A on this account and the same amount on B from a second testnet account in this browser, created on the first such bet with its own {fmtNear(GUEST_GAME_NEAR)} NEAR. One of the two always carries the winning side's streak, so the play mines whenever a side wins {need()}+ in a row, and every round costs both fees. Its balance and mined BEFEWER are on the Me page.</p>{/if}
         <details class="tbl">
           <summary>Every round in the replay</summary>
           <table>
             <thead><tr><th>Round</th><th>Rules bet</th><th>Smaller side</th><th>Balance</th></tr></thead>
             <tbody>
               {#each [...bt.curve].reverse() as s}
-                <tr><td class="num">#{s.round}</td><td>{s.side ? `${fmtN(s.stake)} on ${label(s.round, s.side)}` : 'skip'}</td><td>{s.outcome === 'void' ? 'void' : label(s.round, s.outcome)}</td><td class="num">{fmtN(s.bal)}</td></tr>
+                <tr><td class="num">#{s.round}</td><td>{s.side === 'both' ? `${fmtN(s.stake)} on each side` : s.side ? `${fmtN(s.stake)} on ${label(s.round, s.side)}` : 'skip'}{s.mined ? ' · mines' : ''}</td><td>{s.outcome === 'void' ? 'void' : label(s.round, s.outcome)}</td><td class="num">{fmtN(s.bal)}</td></tr>
               {/each}
             </tbody>
           </table>
@@ -326,7 +331,8 @@
   .preset:hover { border-color: var(--fg-3) }
   .pn { font-weight: 750 }
   .use { color: var(--brand); font-weight: 650; margin-top: 4px }
-  .kpis { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-bottom: 8px }
+  .kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-bottom: 8px }
+  @media (max-width: 520px) { .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)) } }
   .kv { font-size: 22px; font-weight: 800; margin-top: 2px }
   details.tbl { margin-top: 8px }
   details.tbl summary { cursor: pointer; color: var(--fg-2); font-size: 14px }
@@ -336,4 +342,5 @@
   .log { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px }
   .log li { display: grid; grid-template-columns: 44px minmax(0, 1fr) auto; gap: 10px; font-size: 14px; padding: 8px 10px; border-radius: 10px; background: var(--surface-2) }
   .log li.err { background: var(--err-bg); color: var(--err-fg) }
+  .gold { color: var(--brand) }
 </style>

@@ -78,6 +78,38 @@ test('the replay pays the contract fee: win +stake-fee, loss -stake-fee, void fr
   assert.equal(bt.end, 1000 + 9.5 - 10.5 + 9.5)
 })
 
+test('both sides: every decided round costs exactly both fees, voids are free', () => {
+  // 10 chips each side (balance split in two: 25% of 500 caps at 125, so 10 stands), 5% fee
+  const bt = backtest([{ cond: { kind: 'always' }, pick: 'both', unit: 'fixed', amount: 10 }], 1, 4, history({ 1: 'A', 2: 'B', 3: 'void', 4: 'A' }), 1000, 500)
+  assert.equal(bt.end, 1000 - 3 * 2 * 0.5)
+  assert.deepEqual([bt.bets, bt.boths, bt.wins, bt.losses, bt.voids, bt.staked], [4, 4, 0, 0, 1, 80])
+})
+
+test('both sides: one account always rides the winning run, so it mines from the 3rd win in a row', () => {
+  // A A A B B void B A: main (A) streak 1,2,3 -> mines at round 3; twin (B) 1,2,(void),3 -> mines at round 7
+  const L = history({ 1: 'A', 2: 'A', 3: 'A', 4: 'B', 5: 'B', 6: 'void', 7: 'B', 8: 'A' })
+  const bt = backtest([{ cond: { kind: 'always' }, pick: 'both', unit: 'fixed', amount: 5 }], 1, 8, L, 1000, 500)
+  assert.deepEqual(bt.curve.filter(s => s.mined).map(s => s.round), [3, 7])
+  assert.equal(bt.mines, 2)
+})
+
+test('both sides: a win on the other side resets the run', () => {
+  // B A B B: the second account wins, loses, wins, wins -> streak 2 at most, nobody mines
+  const bt = backtest([{ cond: { kind: 'always' }, pick: 'both', unit: 'fixed', amount: 5 }], 1, 4, history({ 1: 'B', 2: 'A', 3: 'B', 4: 'B' }), 1000, 500)
+  assert.equal(bt.mines, 0)
+})
+
+test('single side: mining needs this account to win 3 in a row (skips do not break it)', () => {
+  const L = history({ 1: 'A', 2: 'A', 3: 'B', 4: 'A', 5: 'A', 6: 'A' })
+  const onA = backtest([{ cond: { kind: 'always' }, pick: 'A', unit: 'fixed', amount: 5 }], 1, 6, L, 1000, 500)
+  assert.deepEqual(onA.curve.filter(s => s.mined).map(s => s.round), [6])
+})
+
+test('both-sides stakes are capped per account (25% of half the money)', () => {
+  const bt = backtest([{ cond: { kind: 'always' }, pick: 'both', unit: 'fixed', amount: 500 }], 1, 1, history({ 1: 'A' }), 1000, 0)
+  assert.equal(bt.curve[0].stake, 125)
+})
+
 test('rules saved by the old percentage-only version still load', () => {
   assert.deepEqual(normalizeRule({ cond: { kind: 'always' }, pick: 'A', pct: 7 }), { cond: { kind: 'always' }, pick: 'A', unit: 'pct', amount: 7 })
 })

@@ -107,6 +107,14 @@ export function loadSession(): Session | null {
 export function saveSession(s: Session | null) {
   s ? localStorage.setItem(SESSION_KEY, JSON.stringify(s)) : localStorage.removeItem(SESSION_KEY)
 }
+/** The second account used by both-sides bets (always takes side B). */
+const TWIN_KEY = `fewer.twin.${CONTRACT}`
+export function loadTwin(): Session | null {
+  try { return JSON.parse(localStorage.getItem(TWIN_KEY) || 'null') } catch { return null }
+}
+export function saveTwin(s: Session | null) {
+  s ? localStorage.setItem(TWIN_KEY, JSON.stringify(s)) : localStorage.removeItem(TWIN_KEY)
+}
 export function newKeyPair(): { publicKey: string; privateKey: string } {
   const kp = KeyPair.fromRandom('ed25519')
   return { publicKey: kp.getPublicKey().toString(), privateKey: kp.toString() }
