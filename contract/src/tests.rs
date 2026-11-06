@@ -78,7 +78,7 @@ fn hash_hex(who: &AccountId, r: u64, side: &str, salt: &str) -> String {
 fn commit(c: &mut Contract, who: &AccountId, r: u64, side: &str, amount: u128) {
     ctx(who, t_commit(r));
     let s = salt(who, r);
-    let got = c.commit(U128(amount), hash_hex(who, r, side, &s), None);
+    let got = c.commit(U64(r), U128(amount), hash_hex(who, r, side, &s), None);
     assert_eq!(got.0, r);
 }
 
@@ -215,7 +215,7 @@ fn commit_hash_is_bound_to_account() {
     let s = salt(&a, 0);
     let h = hash_hex(&a, 0, "A", &s);
     ctx(&b, t_commit(0));
-    c.commit(U128(10 * ONE), h, None);
+    c.commit(U64(0), U128(10 * ONE), h, None);
     ctx(&b, t_reveal(0));
     c.reveal(U64(0), "A".into(), s, None);
 }
@@ -318,7 +318,7 @@ fn rounds_overlap_commit_next_while_revealing_previous() {
     assert_eq!(st.commit_round.0, 1);
     assert_eq!(st.reveal_round.map(|x| x.0), Some(0));
     let s = salt(&a, 1);
-    assert_eq!(c.commit(U128(10 * ONE), hash_hex(&a, 1, "B", &s), None).0, 1);
+    assert_eq!(c.commit(U64(1), U128(10 * ONE), hash_hex(&a, 1, "B", &s), None).0, 1);
     c.reveal(U64(0), "A".into(), salt(&a, 0), None);
 }
 
@@ -477,11 +477,12 @@ fn keeper_reveals_from_the_sealed_ciphertext() {
     for (who, side, amt) in [(&a, "A", 10 * ONE), (&b, "B", 20 * ONE)] {
         ctx(who, t_commit(0));
         let s = salt(who, 0);
-        c.commit(U128(amt), hash_hex(who, 0, side, &s), Some(format!("tlock-ciphertext-of-{}:{}", side, s)));
+        c.commit(U64(0), U128(amt), hash_hex(who, 0, side, &s), Some(format!("tlock-ciphertext-of-{}:{}", side, s)));
     }
     let list = c.get_round_commits(U64(0), 0, 10);
     assert_eq!(list.len(), 2);
     assert!(list.iter().all(|x| x.side.is_none() && x.sealed.is_some()));
+    assert_eq!(list[0].hash, hash_hex(&a, 0, "A", &salt(&a, 0)), "view exposes the commitment");
     // the keeper (not the players) reveals both after opening the timelock
     ctx(&keeper, t_reveal(0));
     c.reveal(U64(0), "A".into(), salt(&a, 0), Some(a.clone()));
@@ -517,5 +518,16 @@ fn sealed_ciphertext_is_bounded() {
     faucet(&mut c, &a);
     ctx(&a, t_commit(0));
     let s = salt(&a, 0);
-    c.commit(U128(10 * ONE), hash_hex(&a, 0, "A", &s), Some("x".repeat(MAX_SEALED_LEN + 1)));
+    c.commit(U64(0), U128(10 * ONE), hash_hex(&a, 0, "A", &s), Some("x".repeat(MAX_SEALED_LEN + 1)));
+}
+
+#[test]
+#[should_panic(expected = "is not taking commits")]
+fn late_commit_is_refused_not_moved_to_the_next_round() {
+    let mut c = setup();
+    let a = acc("alice.testnet");
+    faucet(&mut c, &a);
+    let s = salt(&a, 0);
+    ctx(&a, G + C + 1); // round 0's window closed one nanosecond ago
+    c.commit(U64(0), U128(10 * ONE), hash_hex(&a, 0, "A", &s), None);
 }

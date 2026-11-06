@@ -1,0 +1,28 @@
+{
+  "v1.befewer.testnet": {
+    "deployed_at": "2026-11-06T07:26:14.402Z",
+    "tx": "Ce4Pt3BWPnRnxUqCjiYDnrnnyyfaJ1jALBsRgCEk17x4",
+    "code_sha256": "d06fa665a937f61f53d7035a8df9253da2a766da24f73db2efcf325866520321",
+    "params": {
+      "genesis_ns": "1793950140000000000",
+      "commit_ns": "300000000000",
+      "reveal_ns": "180000000000",
+      "max_stake_bps": 2500,
+      "min_stake": "1000000000000000000",
+      "faucet_amount": "1000000000000000000000"
+    }
+  },
+  "v2.befewer.testnet": {
+    "deployed_at": "2026-11-06T07:30:19.476Z",
+    "tx": "23697vgRNFfHqYvm5mio9u9Tw6xDEmVsQfaiD7n7CWqB",
+    "code_sha256": "ad1d86fd5a56e2104dd0686c89a3940b7f1cd0084e4c6445cff7b164ca60ec4a",
+    "params": {
+      "genesis_ns": "1793950380000000000",
+      "commit_ns": "300000000000",
+      "reveal_ns": "180000000000",
+      "max_stake_bps": 2500,
+      "min_stake": "1000000000000000000",
+      "faucet_amount": "1000000000000000000000"
+    }
+  }
+}

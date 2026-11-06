@@ -1,0 +1,10 @@
+{
+  "name": "fewer-keeper",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "drand-client": "^1.2.5",
+    "near-api-js": "^7.4.0",
+    "tlock-js": "^0.9.0"
+  }
+}

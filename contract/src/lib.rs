@@ -193,6 +193,8 @@ pub struct RoundCommitView {
     pub amount: U128,
     /// "A", "B", or null if not revealed yet.
     pub side: Option<String>,
+    /// The sha256 commitment (hex), so keepers can check a decrypted side+salt before sending.
+    pub hash: String,
     pub sealed: Option<String>,
 }
 
@@ -338,10 +340,14 @@ impl Contract {
     /// `sealed` (optional) is the drand timelock ciphertext of "<A|B>:<salt>" so that a
     /// keeper can reveal for the player; without it the player must reveal manually.
     /// No attached deposit, so the app's function-call key can sign it without a popup.
-    pub fn commit(&mut self, amount: U128, hash: String, sealed: Option<String>) -> U64 {
+    /// `round` must be the round currently taking commits: the hash binds the round, so a
+    /// commit that lands after the window closed is refused instead of silently moving to
+    /// the next round (where it could never be revealed).
+    pub fn commit(&mut self, round: U64, amount: U128, hash: String, sealed: Option<String>) -> U64 {
         let who = env::predecessor_account_id();
         let now = env::block_timestamp();
         let r = self.commit_round_at(now);
+        require!(round.0 == r, format!("round {} is not taking commits (current: {})", round.0, r));
         let amount = amount.0;
         let hash = parse_hash(&hash);
         if let Some(s) = &sealed {
@@ -603,6 +609,7 @@ impl Contract {
                     account_id: a.clone(),
                     amount: U128(c.amount),
                     side: side_str(c.side),
+                    hash: c.hash.iter().map(|b| format!("{:02x}", b)).collect(),
                     sealed: c.sealed.clone(),
                 })
             })
