@@ -5,7 +5,7 @@ import {
 } from './chain'
 import * as H from './history'
 import { label } from './questions'
-import { decide, guard, PRESETS, type Rule, type Lookup } from './rules'
+import { decide, guard, normalizeRule, stakeFor, PRESETS, type Rule, type Lookup } from './rules'
 
 export type Side = 'A' | 'B'
 export type Result = { round: number; side: Side; amount: bigint; outcome: 'A' | 'B' | 'void' }
@@ -15,9 +15,10 @@ export type ApLog = { at: number; round: number; text: string; kind: 'bet' | 'sk
 const AP_KEY = 'befewer.ap.rules'
 function loadRules(): Rule[] {
   try {
-    return JSON.parse(localStorage.getItem(AP_KEY) || 'null') ?? structuredClone(PRESETS[1].rules)
+    const saved = JSON.parse(localStorage.getItem(AP_KEY) || 'null')
+    return Array.isArray(saved) ? saved.map(normalizeRule) : structuredClone(PRESETS[0].rules)
   } catch {
-    return structuredClone(PRESETS[1].rules)
+    return structuredClone(PRESETS[0].rules)
   }
 }
 
@@ -228,7 +229,10 @@ export async function autopilotTick() {
   }
   try {
     if (!game.me) await ensurePlayer()
-    const want = (BigInt(game.me!.balance) * BigInt(d.pct)) / 100n
+    const bal = Number(BigInt(game.me!.balance) / ONE)
+    const coins = stakeFor(d.unit, d.amount, bal)
+    if (coins < 1) { apLog(r, 'skip', 'Balance too small to bet (the cap is 25% of it).'); return }
+    const want = BigInt(coins) * ONE
     const placed = await placeBet(d.side, want, 'autopilot')
     apLog(placed.round, 'bet', `Rule ${d.rule + 1}: ${fmt(placed.amount)} BEFEWER on ${label(placed.round, d.side)} (${d.side}).`)
   } catch (e: any) {

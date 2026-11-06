@@ -3,7 +3,7 @@
   import Icon from '../lib/Icon.svelte'
   import Equity from '../lib/Equity.svelte'
   import { label } from '../questions'
-  import { backtest, PRESETS, type Rule, type Cond, type Pick } from '../rules'
+  import { backtest, PRESETS, type Rule, type Cond, type Pick, type Unit } from '../rules'
   import { game, commitRound, lookup, saveRules, setAutopilot } from '../game.svelte'
 
   const WINDOW = 60
@@ -40,7 +40,7 @@
   }
   function add() {
     const at = game.ap.rules.length && game.ap.rules[game.ap.rules.length - 1].cond.kind === 'always' ? game.ap.rules.length - 1 : game.ap.rules.length
-    game.ap.rules.splice(at, 0, { cond: { kind: 'last', winner: 'any' }, pick: 'other', pct: 5 })
+    game.ap.rules.splice(at, 0, { cond: { kind: 'last', winner: 'any' }, pick: 'other', unit: 'fixed', amount: 10 })
     commit()
   }
   function del(i: number) { game.ap.rules.splice(i, 1); commit() }
@@ -52,6 +52,17 @@
   }
   function use(i: number) { game.ap.rules = structuredClone(PRESETS[i].rules); commit() }
   const fmtN = (v: number) => v.toLocaleString('en-US')
+  const FIXED = [1, 2, 5, 10, 20, 50, 100]
+  const PCTS = [1, 2, 5, 10, 25]
+  function setStake(i: number, v: string) {
+    const [u, n] = v.split(':')
+    game.ap.rules[i].unit = (u === 'p' ? 'pct' : 'fixed') as Unit
+    game.ap.rules[i].amount = Number(n)
+    commit()
+  }
+  const net = (b: { end: number; start: number }) => b.end - b.start
+  const tone = (v: number) => (v > 0 ? 'good' : v < 0 ? 'burn' : '')
+  const signed = (v: number) => (v > 0 ? '+' : v < 0 ? '−' : '±') + fmtN(Math.abs(v))
   const ago = (t: number) => { const s = Math.round((Date.now() - t) / 1000); return s < 60 ? `${s}s ago` : `${Math.round(s / 60)}m ago` }
 </script>
 
@@ -102,10 +113,14 @@
               </select>
               {#if r.pick !== 'skip'}
                 <span class="w">with</span>
-                <select aria-label="Stake" value={String(r.pct)} onchange={e => { r.pct = Number((e.currentTarget as HTMLSelectElement).value); commit() }}>
-                  {#each [1, 2, 5, 10, 15, 20, 25] as p}<option value={String(p)}>{p}%</option>{/each}
+                <select aria-label="Stake" value={`${r.unit === 'pct' ? 'p' : 'f'}:${r.amount}`} onchange={e => setStake(i, (e.currentTarget as HTMLSelectElement).value)}>
+                  {#each FIXED as n}<option value={`f:${n}`}>{n} BEFEWER</option>{/each}
+                  {#if r.unit === 'fixed' && !FIXED.includes(r.amount)}<option value={`f:${r.amount}`}>{r.amount} BEFEWER</option>{/if}
+                  <optgroup label="Share of my balance">
+                    {#each PCTS as n}<option value={`p:${n}`}>{n}% of balance</option>{/each}
+                    {#if r.unit === 'pct' && !PCTS.includes(r.amount)}<option value={`p:${r.amount}`}>{r.amount}% of balance</option>{/if}
+                  </optgroup>
                 </select>
-                <span class="w">of my balance</span>
               {/if}
             </div>
             <div class="ops">
@@ -127,7 +142,7 @@
           <button class="preset" onclick={() => use(i)}>
             <span class="pn">{p.name}</span>
             <span class="pa small muted">{p.about}</span>
-            {#if b.rounds}<span class="pr small num">1,000 → <b class={b.end >= 1000 ? 'good' : 'burn'}>{fmtN(b.end)}</b> <span class="faint">· last {b.rounds} rounds</span></span>{/if}
+            {#if b.rounds}<span class="pr small num">staked {fmtN(b.staked)} → <b class={tone(net(b))}>{signed(net(b))}</b> <span class="faint">· last {b.rounds} rounds</span></span>{/if}
             <span class="use small">Use this</span>
           </button>
         {/each}
@@ -140,8 +155,8 @@
       <div class="bh"><h2>Replay on the last {bt.rounds} rounds</h2></div>
       {#if bt.rounds}
         <div class="kpis">
-          <div><div class="eyebrow">Balance</div><div class="kv num {bt.end >= 1000 ? 'good' : 'burn'}">{fmtN(bt.end)}</div><div class="faint small">from 1,000</div></div>
-          <div><div class="eyebrow">Bets</div><div class="kv num">{bt.bets}</div><div class="faint small">{bt.skips} skipped</div></div>
+          <div><div class="eyebrow">Net</div><div class="kv num {tone(net(bt))}">{signed(net(bt))}</div><div class="faint small">1,000 → {fmtN(bt.end)}</div></div>
+          <div><div class="eyebrow">Staked</div><div class="kv num">{fmtN(bt.staked)}</div><div class="faint small">{bt.bets} bets · {bt.skips} skipped</div></div>
           <div><div class="eyebrow">Won / lost</div><div class="kv num"><span class="good">{bt.wins}</span> / <span class="burn">{bt.losses}</span></div><div class="faint small">{bt.voids} void</div></div>
         </div>
         <Equity curve={bt.curve} />
