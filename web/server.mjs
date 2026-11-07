@@ -14,7 +14,7 @@ import { loadAccount, NEAR } from '../keeper/lib.mjs'
 const PORT = Number(process.env.PORT || 5043)
 const HOST = process.env.HOST || '127.0.0.1'
 const ROOT_ACCOUNT = 'befewer.testnet'
-const CONTRACT = process.env.FEWER_CONTRACT || 'v5.befewer.testnet'
+const CONTRACT = process.env.FEWER_CONTRACT || 'v6.befewer.testnet'
 const GUEST_NEAR = NEAR / 20n // 0.05 testnet NEAR in the wallet, for gas
 const GUEST_PLAY = (NEAR * 3n) / 10n // 0.3 testnet NEAR in the game balance (0.01 of it pays the storage fee)
 const PER_IP_PER_HOUR = 3
@@ -51,12 +51,27 @@ function allowed(ip) {
   return null
 }
 
-async function createGuest(publicKey) {
+// Guests are created one at a time: two transactions signed by the root key at once collide on
+// the key's nonce and one of them fails. A failed attempt is retried once.
+let queue = Promise.resolve()
+const serial = fn => { const p = queue.then(fn, fn); queue = p.catch(() => {}); return p }
+async function createGuestOnce(publicKey) {
   const id = `g${crypto.randomBytes(6).toString('hex')}.${ROOT_ACCOUNT}`
   const root = loadAccount(ROOT_ACCOUNT)
   await root.createSubAccount({ accountOrPrefix: id, publicKey, nearToTransfer: GUEST_NEAR })
   await root.callFunction({ contractId: CONTRACT, methodName: 'deposit', args: { account_id: id }, gas: 30_000_000_000_000n, deposit: GUEST_PLAY })
   return id
+}
+function createGuest(publicKey) {
+  return serial(async () => {
+    try {
+      return await createGuestOnce(publicKey)
+    } catch (e) {
+      console.error(new Date().toISOString(), 'guest attempt failed, retrying', e.message)
+      await new Promise(r => setTimeout(r, 1500))
+      return createGuestOnce(publicKey)
+    }
+  })
 }
 
 function json(res, code, body) {

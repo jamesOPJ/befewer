@@ -7,7 +7,8 @@ import { Account, JsonRpcProvider, FailoverRpcProvider, KeyPairSigner, KeyPair }
 
 export const NETWORK = process.env.NEAR_NETWORK || 'testnet'
 if (NETWORK !== 'testnet') throw new Error('these scripts are testnet-only')
-const RPCS = (process.env.NEAR_RPCS || 'https://test.rpc.fastnear.com,https://rpc.testnet.near.org').split(',')
+// rpc.testnet.near.org is deprecated (answers 429); fastnear rate-limits per IP, so fall back to dRPC, then Intear
+const RPCS = (process.env.NEAR_RPCS || 'https://test.rpc.fastnear.com,https://near-testnet.drpc.org,https://testnet-rpc.intea.rs').split(',')
 export const provider = new FailoverRpcProvider(RPCS.map(url => new JsonRpcProvider({ url })))
 const CRED_DIR = path.join(os.homedir(), '.near-credentials', NETWORK)
 
@@ -37,12 +38,12 @@ export async function call(account, contractId, methodName, args = {}, { gas = 5
   return account.callFunction({ contractId, methodName, args, gas, deposit })
 }
 
-// Commit-reveal helpers. Preimage format is fixed by the contract: fewer:<account>:<round>:<A|B>:<salt>
+// Commit-reveal helpers. Preimage format is fixed by the contract: fewer:<account>:<slot>:<round>:<A|B>:<salt>
 export function newSalt() {
   return crypto.randomBytes(16).toString('hex') // 128-bit, 32 chars
 }
-export function commitHash(accountId, round, side, salt) {
-  return crypto.createHash('sha256').update(`fewer:${accountId}:${round}:${side}:${salt}`).digest('hex')
+export function commitHash(accountId, slot, round, side, salt) {
+  return crypto.createHash('sha256').update(`fewer:${accountId}:${slot}:${round}:${side}:${salt}`).digest('hex')
 }
 
 export const TOKEN = 10n ** 18n // 1 BEFEWER

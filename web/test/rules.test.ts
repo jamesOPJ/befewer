@@ -1,7 +1,7 @@
 // node --test web/test/rules.test.ts   (Node 22+ strips the types)
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { decide, backtest, runsAtLeast, guard, coin, stakeFor, normalizeRule, meFrom, NOBODY, PRESETS, type Lookup, type Outcome, type Rule } from '../src/rules.ts'
+import { decide, backtest, runsAtLeast, cleanPattern, SLOT_SETS, guard, coin, stakeFor, normalizeRule, meFrom, NOBODY, PRESETS, type Lookup, type Outcome, type Rule } from '../src/rules.ts'
 
 const Q = 100 // questions in the list
 function history(outcomes: Record<number, Outcome>, splits: Record<number, number> = {}): Lookup {
@@ -100,6 +100,31 @@ test('a skipped round keeps the streak (and the round it skipped can be a loss f
   const bt = backtest(rules, 1, 4, history({ 1: 'A', 2: 'A', 3: 'B', 4: 'A' }), 1000, 0)
   assert.deepEqual(bt.curve.map(s => [s.side, s.streak]), [['A', 1], ['A', 2], [null, 2], ['A', 3]])
   assert.deepEqual(bt.curve.filter(s => s.mined).map(s => s.round), [4])
+})
+
+test('loop follows its pattern by round number', () => {
+  const rules: Rule[] = [{ cond: { kind: 'always' }, pick: 'loop', unit: 'fixed', amount: 1, pattern: 'AAB' }]
+  const sides = [9, 10, 11, 12].map(r => (decide(rules, r, history({})) as any).side)
+  assert.deepEqual(sides, ['A', 'A', 'B', 'A'], 'round mod 3: 9->0 A, 10->1 A, 11->2 B, 12->0 A')
+  assert.equal(cleanPattern('a b x a'), 'ABA')
+})
+
+test('loop with rest sits out the rest of the cycle after a loss', () => {
+  const rules: Rule[] = [{ cond: { kind: 'always' }, pick: 'loop', unit: 'fixed', amount: 5, pattern: 'AAA', rest: true }]
+  // rounds 0..5: B wins round 1 -> loss; rounds 2 skipped (same cycle 0..2); round 3 starts a new cycle
+  const L = history({ 0: 'A', 1: 'B', 2: 'A', 3: 'A', 4: 'A', 5: 'A' })
+  const bt = backtest(rules, 0, 5, L, 1000, 0)
+  assert.deepEqual(bt.curve.map(s => s.side), ['A', 'A', null, 'A', 'A', 'A'])
+  assert.deepEqual(bt.curve.filter(s => s.mined).map(s => s.round), [5], 'the new cycle wins 3 in a row (rounds 3, 4, 5)')
+})
+
+test('the 8 sequences: every 3-round cycle exactly one slot wins three in a row', () => {
+  const set = SLOT_SETS.find(x => x.slots.length === 8)!
+  // any outcomes: here B, A, A then A, B, A
+  const L = history({ 0: 'B', 1: 'A', 2: 'A', 3: 'A', 4: 'B', 5: 'A' })
+  let mines = 0
+  for (const s of set.slots) mines += backtest(s.rules, 0, 5, L, 1000, 0).mines
+  assert.equal(mines, 2)
 })
 
 test('a saved rule with an unknown pick loads as skip', () => {

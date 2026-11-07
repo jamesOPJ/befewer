@@ -7,7 +7,7 @@ import tlock from 'tlock-js'
 
 const { timelockEncrypt, roundAt, roundTime, mainnetClient } = tlock as any
 
-export const CONTRACT: string = import.meta.env.VITE_CONTRACT || 'v5.befewer.testnet'
+export const CONTRACT: string = import.meta.env.VITE_CONTRACT || 'v6.befewer.testnet'
 export const NETWORK = 'testnet'
 export const EXPLORER = 'https://testnet.nearblocks.io'
 export const TOKEN = 10n ** 18n // 1 BEFEWER
@@ -17,7 +17,8 @@ export const ONE = TOKEN
 
 export const provider = new FailoverRpcProvider([
   new JsonRpcProvider({ url: 'https://test.rpc.fastnear.com' }),
-  new JsonRpcProvider({ url: 'https://rpc.testnet.near.org' }),
+  new JsonRpcProvider({ url: 'https://near-testnet.drpc.org' }), // rpc.testnet.near.org is deprecated
+  new JsonRpcProvider({ url: 'https://testnet-rpc.intea.rs' }),
 ])
 
 export async function view<T = any>(method: string, args: Record<string, unknown> = {}): Promise<T> {
@@ -35,6 +36,7 @@ export interface Status {
   reveal_round: string | null; reveal_ends_at: string | null
   treasury: string; treasury_spendable: string; treasury_in: string; graduate_at: string
   balances_total: string; escrow: string; storage_fees: string
+  storage_held: string; bounties_paid: string; reveal_bounty_bps: number; unsettled: number; dust_to_pot: string
   total_supply: string; max_supply: string; issued: string; mined: string; pot: string; total_burned: string
   unrefined_total: string; refine_fee_bps: number; refine_fees: string; refine_to_pot: string; claimed: string
   rounds_settled: string; best_streak: number; best_streak_holder: string | null
@@ -44,11 +46,11 @@ export interface Status {
 export interface Params {
   genesis_ns: string; commit_ns: string; reveal_ns: string; max_stake_bps: number; min_stake: string
   fee_bps: number; reward_per_round: string; max_supply: string; streak_min: number; graduate_at: string
-  dex: string; wnear: string; pool_fee: number; buyback_max: string; buyback_every_ns: string; refine_fee_bps: number
+  dex: string; wnear: string; pool_fee: number; buyback_max: string; buyback_every_ns: string; refine_fee_bps: number; reveal_bounty_bps: number
 }
 export interface RoundV {
   round: string; commit_starts_at: string; reveal_starts_at: string; reveal_ends_at: string
-  committed: string; fees: string; revealed_a: string; revealed_b: string; shares_a: string; shares_b: string
+  committed: string; fees: string; bounties: string; reward_booked: string; revealed_a: string; revealed_b: string; shares_a: string; shares_b: string
   commits: number; reveals_a: number; reveals_b: number
   claims: number; settled: boolean; outcome: 'A' | 'B' | 'void' | null
   to_treasury: string; emission: string; reward: string; reward_shares: string
@@ -58,8 +60,19 @@ export interface PlayerV {
   wins: number; losses: number; voids: number; forfeits: number; mined: string
   /** mined BEFEWER still in the game (claiming costs the refining fee on it) and the share of others' fees (no fee) */
   unrefined: string; refined: string
-  open: { round: string; amount: string; fee: string; side: 'A' | 'B' | null; streak_if_win: number; shares: string }[]
+  open: OpenBet[]
+  /** slots: independent bettors inside the account (slot 0 is the one manual bets use) */
+  slot_count: number; slots: SlotV[]
+  /** settled but not booked yet: NEAR booking adds (storage included) and BEFEWER mined */
+  pending_near: string; pending_mined: string
 }
+export interface OpenBet {
+  round: string; amount: string; fee: string; bounty: string; storage: string; side: 'A' | 'B' | null
+  streak_if_win: number; shares: string
+  /** once settled, before booking: what booking will do */
+  result: 'win' | 'loss' | 'void' | 'forfeit' | null; payout: string; mined: string
+}
+export interface SlotV { slot: number; streak: number; best_streak: number; wins: number; losses: number; voids: number; forfeits: number; open: OpenBet[] }
 
 export const nsToMs = (ns: string | bigint) => Number(BigInt(ns) / 1_000_000n)
 /** BEFEWER (18 decimals). Small amounts keep enough digits to not read as 0. */
@@ -84,8 +97,8 @@ export function randomSalt(): string {
   crypto.getRandomValues(b)
   return [...b].map(x => x.toString(16).padStart(2, '0')).join('')
 }
-export async function commitHash(accountId: string, round: number, side: 'A' | 'B', salt: string): Promise<string> {
-  const d = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`fewer:${accountId}:${round}:${side}:${salt}`))
+export async function commitHash(accountId: string, slot: number, round: number, side: 'A' | 'B', salt: string): Promise<string> {
+  const d = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`fewer:${accountId}:${slot}:${round}:${side}:${salt}`))
   return [...new Uint8Array(d)].map(x => x.toString(16).padStart(2, '0')).join('')
 }
 
@@ -132,11 +145,15 @@ export type Pick = { side: 'A' | 'B'; salt: string; amount: string; fee?: string
 export function loadPicks(accountId: string): Record<string, Pick> {
   try { return JSON.parse(localStorage.getItem(`${PICKS_KEY}.${accountId}`) || '{}') } catch { return {} }
 }
-export function savePick(accountId: string, round: number, p: Pick) {
+/** Picks are keyed by round for slot 0 and by "slot:round" for other slots. */
+export const pickKey = (slot: number, round: number | string) => (slot === 0 ? String(round) : `${slot}:${round}`)
+export function savePick(accountId: string, round: number, p: Pick, slot = 0) {
   const all = loadPicks(accountId)
-  all[round] = p
+  all[pickKey(slot, round)] = p
   localStorage.setItem(`${PICKS_KEY}.${accountId}`, JSON.stringify(all))
 }
+/** NEAR the contract holds for a bet's storage (same formula as the contract; returned when booked). */
+export const storageFor = (accountId: string, sealedLen: number) => BigInt(2 * accountId.length + sealedLen + 260) * 10n ** 19n
 
 export async function callContract(s: Session, methodName: string, args: Record<string, unknown>, gasT = 30, deposit = 0n) {
   const res: any = await accountFor(s).callFunctionRaw({ contractId: CONTRACT, methodName, args, gas: BigInt(gasT) * 10n ** 12n, deposit })

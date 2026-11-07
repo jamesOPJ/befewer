@@ -14,24 +14,27 @@ export type Cond =
   | { kind: 'margin'; mode: 'lopsided' | 'close'; winner: Who } // the round before: smaller side under 30% / at least 40%
   | { kind: 'question'; winner: Who } // the last time this same question was asked
   | { kind: 'mine'; result: 'won' | 'lost' | 'void' } // my most recent settled bet
-export type Pick = 'A' | 'B' | 'same' | 'other' | 'random' | 'skip'
+/** 'loop' = follow `pattern` (e.g. "AAB") by round number: round r bets pattern[r mod length]. */
+export type Pick = 'A' | 'B' | 'same' | 'other' | 'random' | 'loop' | 'skip'
 /** Amounts count chips of 0.01 NEAR (the smallest bet).
  *  fixed = N chips every time (DCA); pct = share of balance; martingale = base, doubled after
  *  each loss in a row; paroli = base, doubled after each win, back to base after 3 wins. */
 export type Unit = 'fixed' | 'pct' | 'martingale' | 'paroli'
-export type Rule = { cond: Cond; pick: Pick; unit: Unit; amount: number }
+/** `pattern` and `rest` only matter for pick 'loop'. rest = after a loss, sit out until the pattern starts over. */
+export type Rule = { cond: Cond; pick: Pick; unit: Unit; amount: number; pattern?: string; rest?: boolean }
 export type Decision = { side: Side; unit: Unit; amount: number; rule: number } | { skip: true; rule: number | null }
 export const MAX_PCT = 25 // the contract caps a bet at 25% of the balance
 export const LOPSIDED = 0.3
 export const CLOSE = 0.4
 const MAX_DOUBLINGS = 6
 
-/** My own recent record: the last settled bet and the current run of wins or losses (voids don't break it). */
-export type Me = { last: { side: Side; outcome: Outcome } | null; wins: number; losses: number }
-export const NOBODY: Me = { last: null, wins: 0, losses: 0 }
+/** My own recent record: the last settled bet, the current run of wins or losses (voids don't
+ *  break it) and the round of my most recent loss. */
+export type Me = { last: { side: Side; outcome: Outcome } | null; wins: number; losses: number; lossRound?: number | null }
+export const NOBODY: Me = { last: null, wins: 0, losses: 0, lossRound: null }
 
 /** Build `Me` from settled bets, newest first. */
-export function meFrom(bets: { side: Side; outcome: Outcome }[]): Me {
+export function meFrom(bets: { side: Side; outcome: Outcome; round?: number }[]): Me {
   if (!bets.length) return NOBODY
   let wins = 0, losses = 0
   for (const b of bets) {
@@ -41,17 +44,21 @@ export function meFrom(bets: { side: Side; outcome: Outcome }[]): Me {
     else if (!won && wins === 0) losses++
     else break
   }
-  return { last: { side: bets[0].side, outcome: bets[0].outcome }, wins, losses }
+  const lost = bets.find(b => b.outcome !== 'void' && b.outcome !== b.side)
+  return { last: { side: bets[0].side, outcome: bets[0].outcome }, wins, losses, lossRound: lost?.round ?? null }
 }
-function nextMe(me: Me, side: Side, outcome: Outcome): Me {
+function nextMe(me: Me, side: Side, outcome: Outcome, round: number): Me {
   if (outcome === 'void') return { ...me, last: { side, outcome } }
   const won = outcome === side
-  return { last: { side, outcome }, wins: won ? me.wins + 1 : 0, losses: won ? 0 : me.losses + 1 }
+  return { last: { side, outcome }, wins: won ? me.wins + 1 : 0, losses: won ? 0 : me.losses + 1, lossRound: won ? me.lossRound ?? null : round }
 }
+/** A loop pattern made only of A and B, 1 to 8 letters; anything else is cleaned up. */
+export const cleanPattern = (p: string | undefined) => (p || 'A').toUpperCase().replace(/[^AB]/g, '').slice(0, 8) || 'A'
 
 /** Rules saved by older versions used { pct }; read them as a percentage stake. */
-const PICKS = ['A', 'B', 'same', 'other', 'random', 'skip']
+const PICKS = ['A', 'B', 'same', 'other', 'random', 'loop', 'skip']
 export function normalizeRule(r: any): Rule {
+  if (r && r.pick === 'loop') r = { ...r, pattern: cleanPattern(r.pattern), rest: !!r.rest }
   // a pick this version doesn't know (e.g. the short-lived 'both') becomes skip, never a random bet
   if (r && !PICKS.includes(r.pick)) r = { ...r, pick: 'skip' }
   if (r && r.unit && typeof r.amount === 'number') return r as Rule
@@ -143,7 +150,13 @@ export function decide(rules: Rule[], r: number, L: Lookup, me: Me = NOBODY): De
     if (!m.ok) continue
     if (pick === 'skip') return { skip: true, rule: i }
     let side: Side
-    if (pick === 'A' || pick === 'B') side = pick
+    if (pick === 'loop') {
+      const pat = cleanPattern(rules[i].pattern)
+      const at = r % pat.length
+      // rest: a loss already broke this cycle's streak, so sit out until the pattern starts over
+      if (rules[i].rest && me.lossRound != null && me.lossRound >= r - at) return { skip: true, rule: i }
+      side = pat[at] as Side
+    } else if (pick === 'A' || pick === 'B') side = pick
     else if (pick === 'random' || !m.side) side = coin(r, i)
     else side = pick === 'same' ? m.side : m.side === 'A' ? 'B' : 'A'
     const amt = unit === 'pct' ? Math.max(1, Math.min(MAX_PCT, Math.round(amount))) : Math.max(1, Math.floor(amount))
@@ -202,7 +215,7 @@ export function backtest(rules: Rule[], from: number, to: number, L: Lookup, sta
       endRun()
       streak = 0
     }
-    me = nextMe(me, d.side, o)
+    me = nextMe(me, d.side, o, t)
     bt.curve.push({ round: t, side: d.side, outcome: o, stake, bal, streak, mined })
   }
   endRun()
@@ -239,6 +252,7 @@ export function describe(r: Rule): string {
     : c.kind === 'mine' ? `If my last bet ${c.result === 'void' ? 'was refunded' : c.result}`
     : c.winner === 'any' ? 'If this question was asked before' : `If ${c.winner} won this question last time`
   if (r.pick === 'skip') return `${cond} → skip the round`
+  if (r.pick === 'loop') return `${cond} → follow ${cleanPattern(r.pattern)} over and over${r.rest ? ' (after a loss, wait for the next cycle)' : ''}, ${stakeText(r.unit, r.amount)}`
   const pick = { same: 'that same side', other: 'the other side', A: 'A', B: 'B', random: 'a random side' }[r.pick]
   return `${cond} → bet ${pick}, ${stakeText(r.unit, r.amount)}`
 }
@@ -255,6 +269,17 @@ const R = (cond: Cond, pick: Pick, amount = 10, unit: Unit = 'fixed'): Rule => (
 const ALWAYS: Cond = { kind: 'always' }
 export type Preset = { name: string; group: string; about: string; rules: Rule[] }
 export const PRESET_GROUPS = ['Follow the crowd', 'Fade the crowd', 'Memory', 'Money management']
+
+/** Strategies that run several slots at once (each slot is its own bettor with its own streak). */
+export type SlotSet = { name: string; about: string; slots: { name: string; rules: Rule[] }[] }
+const loop = (pattern: string, rest = false, amount = 1): Rule => ({ cond: { kind: 'always' }, pick: 'loop', unit: 'fixed', amount, pattern, rest })
+const SEQ8 = ['AAA', 'AAB', 'ABA', 'ABB', 'BAA', 'BAB', 'BBA', 'BBB']
+export const SLOT_SETS: SlotSet[] = [
+  { name: 'A and B', about: 'Slot 0 always bets A, slot 1 always B, 0.01 NEAR each. One of them always rides the winning side, so you mine whenever a side wins 3+ in a row. Costs both fees every round.',
+    slots: [{ name: 'Always A', rules: [loop('A')] }, { name: 'Always B', rules: [loop('B')] }] },
+  { name: 'All 8 three-round sequences', about: 'Eight slots follow AAA, AAB, … BBB, 0.01 NEAR each; after a loss a slot waits for the next 3-round cycle. Every cycle, exactly one slot wins three in a row.',
+    slots: SEQ8.map(p => ({ name: p, rules: [loop(p, true)] })) },
+]
 export const PRESETS: Preset[] = [
   { name: 'Echo', group: 'Follow the crowd', about: 'Bet 0.10 NEAR that the last smaller side wins again.',
     rules: [R({ kind: 'last', winner: 'any' }, 'same'), R(ALWAYS, 'random')] },

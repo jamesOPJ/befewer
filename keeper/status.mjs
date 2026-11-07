@@ -1,12 +1,12 @@
 // Print the live state of a BEFEWER v4 contract: phase, treasury, mining, pool, recent rounds, NPC wallets.
 // usage: FEWER_CONTRACT=v4.befewer.testnet node status.mjs
 import { view, fmt, fmtN } from './lib.mjs'
-const C = process.env.FEWER_CONTRACT || 'v5.befewer.testnet'
+const C = process.env.FEWER_CONTRACT || 'v6.befewer.testnet'
 const s = await view(C, 'get_status')
 const now = Number(BigInt(s.now) / 1_000_000n)
 const left = t => `${Math.max(0, Math.round((Number(BigInt(t) / 1_000_000n) - now) / 1000))}s`
 console.log(`${C}  commit round ${s.commit_round} (closes in ${left(s.commit_ends_at)})` + (s.reveal_round != null ? `  reveal round ${s.reveal_round} (closes in ${left(s.reveal_ends_at)})` : ''))
-console.log(`NEAR: players ${fmtN(s.balances_total)}  escrow ${fmtN(s.escrow)}  treasury ${fmtN(s.treasury)} (spendable ${fmtN(s.treasury_spendable)}, pool opens at ${fmtN(s.graduate_at)})  in total ${fmtN(s.treasury_in)}`)
+console.log(`NEAR: players ${fmtN(s.balances_total)}  storage held ${fmtN(s.storage_held ?? '0')}  reveal rewards paid ${fmtN(s.bounties_paid ?? '0')}  rounds waiting to settle ${s.unsettled ?? '-'}  escrow ${fmtN(s.escrow)}  treasury ${fmtN(s.treasury)} (spendable ${fmtN(s.treasury_spendable)}, pool opens at ${fmtN(s.graduate_at)})  in total ${fmtN(s.treasury_in)}`)
 console.log(`BEFEWER: supply ${fmt(s.total_supply)}  issued ${fmt(s.issued)} / ${fmt(s.max_supply)}  mined ${fmt(s.mined)} (unrefined ${fmt(s.unrefined_total ?? '0')}, refining fees ${fmt(s.refine_fees ?? '0')})  pot ${fmt(s.pot)}  burned ${fmt(s.total_burned)}  best streak ${s.best_streak} ${s.best_streak_holder ?? ''}`)
 const d = s.dex
 console.log(`pool: ${d.stage}${d.busy ? ' (in flight)' : ''}  id ${d.pool_id ?? '-'}  NEAR ${fmtN(d.near_amount)} + ${fmt(d.seed)} BEFEWER  buybacks ${d.buybacks} spent ${fmtN(d.bought_near)} burned ${fmt(d.bought_burned)}`)

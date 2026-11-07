@@ -5,7 +5,7 @@ import os from 'node:os'
 import { Account, JsonRpcProvider, KeyPairSigner, actions, PublicKey } from '/root/fewer/keeper/node_modules/near-api-js/lib/index.js'
 export function makeSigner(accountId) {
   const key = JSON.parse(fs.readFileSync(`${os.homedir()}/.near-credentials/testnet/${accountId}.json`, 'utf8')).private_key
-  const account = new Account(accountId, new JsonRpcProvider({ url: 'https://rpc.testnet.near.org' }), KeyPairSigner.fromSecretKey(key))
+  const account = new Account(accountId, new JsonRpcProvider({ url: 'https://near-testnet.drpc.org' }), KeyPairSigner.fromSecretKey(key))
   const toAction = a => a.type === 'AddKey'
     ? actions.addFunctionCallAccessKey(PublicKey.fromString(a.publicKey), a.receiverId, a.methodNames, BigInt(a.allowance))
     : actions.functionCall(a.methodName, a.args, BigInt(a.gas), BigInt(a.deposit))

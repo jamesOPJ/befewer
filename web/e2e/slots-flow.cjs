@@ -1,0 +1,42 @@
+// Multi-slot autopilot on testnet: load "A and B" -> switch on -> both slots bet in one round
+// (slot 0 on A, slot 1 on B, slot 1 opened on chain) -> the page reveals both itself and gets
+// the reveal rewards. usage: node e2e/slots-flow.cjs <url> <contract>
+const puppeteer = require('/root/dota/node_modules/puppeteer')
+const [URL = 'http://127.0.0.1:5044/', CONTRACT = 'v6.befewer.testnet'] = process.argv.slice(2)
+async function view(m, args) {
+  const r = await fetch('https://near-testnet.drpc.org', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'query', params: { request_type: 'call_function', finality: 'optimistic', account_id: CONTRACT, method_name: m, args_base64: Buffer.from(JSON.stringify(args)).toString('base64') } }) })
+  return JSON.parse(Buffer.from((await r.json()).result.result).toString())
+}
+const sleep = ms => new Promise(r => setTimeout(r, ms))
+;(async () => {
+  const b = await puppeteer.launch({ headless: 'new', args: ['--no-sandbox'], protocolTimeout: 15 * 60_000 })
+  const p = await b.newPage()
+  const errors = []
+  p.on('pageerror', e => errors.push(String(e)))
+  await p.setViewport({ width: 1280, height: 900 })
+  await p.goto(URL + '#/autopilot', { waitUntil: 'networkidle2' })
+  await p.waitForSelector('.preset')
+  const ok = await p.evaluate(() => { const x = [...document.querySelectorAll('.preset')].find(e => /A and B/.test(e.textContent)); x?.click(); return !!x })
+  if (!ok) throw new Error('no "A and B" slot set')
+  await sleep(500)
+  console.log('lanes:', await p.$eval('.lanes', e => e.innerText.replace(/\s+/g, ' ')))
+  console.log('running rules:', (await p.$eval('.live-rules', e => e.innerText)).replace(/\s+/g, ' ').slice(0, 260))
+  await p.evaluate(() => document.querySelector('.switch input').click())
+  const t0 = Date.now()
+  await p.waitForFunction(() => [...document.querySelectorAll('.log li')].filter(li => /Always (A|B): Rule/.test(li.innerText)).length >= 2 || [...document.querySelectorAll('.log li.err')].length > 0, { timeout: 10 * 60_000, polling: 2000 })
+  const log = await p.$$eval('.log li', els => els.map(e => e.innerText.replace(/\s+/g, ' ')).slice(0, 4))
+  console.log(`autopilot after ${Math.round((Date.now() - t0) / 1000)} s:`, log)
+  const acc = await p.evaluate(() => JSON.parse(localStorage.getItem(Object.keys(localStorage).find(k => k.startsWith('fewer.session.')))).accountId)
+  let me = await view('get_player', { account_id: acc })
+  console.log('slots on chain:', JSON.stringify(me.slots.map(s => ({ slot: s.slot, open: s.open.map(o => ({ r: o.round, side: o.side, amt: o.amount })) }))))
+  // wait for the reveal window: the page reveals both bets itself (before the keeper's 30 s grace)
+  const st = await view('get_status', {})
+  const r = Number(me.slots[0].open[0]?.round)
+  const revealStart = Number(BigInt((await view('get_round', { round: String(r) })).reveal_starts_at) / 1_000_000n)
+  await sleep(Math.max(0, revealStart - Date.now()) + 20_000)
+  me = await view('get_player', { account_id: acc })
+  const bets = me.slots.map(s => s.open.find(o => Number(o.round) === r)).filter(Boolean)
+  console.log('20 s into the reveal:', JSON.stringify(bets.map(o => ({ side: o.side, bounty: o.bounty }))), '| bounty > 0 means this page revealed it (the keeper waits 30 s)')
+  console.log('errors:', errors.length ? errors : 'none')
+  await b.close()
+})().catch(e => { console.error('E2E FAILED', e.message); process.exit(1) })

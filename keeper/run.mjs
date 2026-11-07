@@ -1,6 +1,7 @@
 // BEFEWER testnet runner: four NPC players betting NEAR from their own wallets + a keeper that
-// opens drand timelocks, reveals every sealed commit, pays out every finished round, opens the
-// DEX pool once the treasury is big enough and runs the treasury buybacks.
+// opens drand timelocks and reveals what players have not revealed themselves (earning the
+// reveal reward), settles finished rounds nobody else settled, opens the DEX pool once the
+// treasury is big enough and runs the treasury buybacks. Bets are booked lazily by the contract.
 // Everything the keeper does is permissionless: anyone can run this file against the contract.
 //
 // usage: FEWER_CONTRACT=v4.befewer.testnet node run.mjs            (loop forever)
@@ -13,7 +14,7 @@ import { actions } from 'near-api-js'
 import { loadAccount, hasKey, newKeyFor, view, call, provider, newSalt, commitHash, NEAR, fmt, fmtN, sleep, log } from './lib.mjs'
 
 const { timelockEncrypt, timelockDecrypt, roundAt, roundTime, mainnetClient } = tlock
-const CONTRACT = process.env.FEWER_CONTRACT || 'v5.befewer.testnet'
+const CONTRACT = process.env.FEWER_CONTRACT || 'v6.befewer.testnet'
 const ROOT = 'befewer.testnet'
 const KEEPER = `keeper.${ROOT}`
 const KEEPER_ONLY = process.env.FEWER_KEEPER_ONLY === '1'
@@ -78,6 +79,12 @@ async function setup() {
       log('deposited', fmtN(NPC_TOP_UP), 'NEAR for', n.id)
     }
   }
+  // the keeper needs a game balance to receive reveal rewards
+  const k = await view(CONTRACT, 'get_player', { account_id: KEEPER })
+  if (!k.registered) {
+    await call(loadAccount(KEEPER), CONTRACT, 'deposit', {}, { deposit: near(0.02) })
+    log('keeper registered for reveal rewards')
+  }
 }
 
 /** Keep each NPC's game balance topped up from its own wallet (never from the root). */
@@ -113,7 +120,7 @@ async function npcTick(st) {
       p = await topUp(n, p)
       if (n.claims && BigInt(p.unrefined) + BigInt(p.refined) > 0n) {
         // the impatient one: claims to its wallet as soon as it mines, so the 10% reaches the holders
-        const res = await loadAccount(n.id).callFunctionRaw({ contractId: CONTRACT, methodName: 'claim_befewer', args: {}, gas: 30_000_000_000_000n })
+        const res = await loadAccount(n.id).callFunctionRaw({ contractId: CONTRACT, methodName: 'claim_befewer', args: { book: [0] }, gas: 50_000_000_000_000n })
         const f = failed(res)
         log(n.id, f ? `claim_befewer FAILED ${f}` : `claimed ${fmt(BigInt(p.unrefined) * 9n / 10n + BigInt(p.refined))} BEFEWER to its wallet`)
       }
@@ -125,13 +132,14 @@ async function npcTick(st) {
       if (amount < BigInt(pr.min_stake)) { log(n.id, 'skips: balance too small'); continue }
       const side = n.pick({ last: lastOutcome })
       const salt = newSalt()
-      const hash = commitHash(n.id, r, side, salt)
+      const hash = commitHash(n.id, 0, r, side, salt)
       let dr = roundAt(end, drandInfo) // roundAt() can return a round published up to 3 s BEFORE `end`
       if (roundTime(drandInfo, dr) < end) dr += 1 // so take the first round published at/after reveal start
       const sealed = await timelockEncrypt(dr, Buffer.from(`${side}:${salt}`), drand)
-      state.salts[key] = { side, salt }
+      state.salts[`${n.id}:0:${r}`] = { side, salt }
       save()
-      const res = await loadAccount(n.id).callFunctionRaw({ contractId: CONTRACT, methodName: 'commit', args: { round: String(r), amount: amount.toString(), hash, sealed }, gas: 30_000_000_000_000n })
+      // committing also books this NPC's finished bets (lazy bookkeeping), so give it room
+      const res = await loadAccount(n.id).callFunctionRaw({ contractId: CONTRACT, methodName: 'commit', args: { round: String(r), slot: 0, amount: amount.toString(), hash, sealed }, gas: 100_000_000_000_000n })
       noteGas('commit', res)
       const f = failed(res)
       log(n.id, f ? `commit FAILED ${f}` : `committed ${fmtN(amount)} NEAR to round ${r} (sealed for drand #${dr})`)
@@ -169,11 +177,18 @@ async function sendBatch(kind, calls, per = 8) {
   }
 }
 
+// Players' own pages reveal their bets first (they get the reveal reward); the keeper waits
+// this long into the reveal window (at most a third of it), then reveals whatever is still sealed.
+const SELF_REVEAL_GRACE_MS = 30_000
 async function revealTick(st) {
   if (st.reveal_round == null) return
   const r = Number(st.reveal_round)
+  const revealEnds = Number(BigInt(st.reveal_ends_at) / 1_000_000n)
+  const windowMs = Number(BigInt((await params()).reveal_ns) / 1_000_000n)
+  const revealStarts = revealEnds - windowMs
+  if (Number(BigInt(st.now) / 1_000_000n) < revealStarts + Math.min(SELF_REVEAL_GRACE_MS, windowMs / 3)) return
   const commits = await allCommits(r)
-  const todo = []
+  const items = []
   for (const c of commits) {
     if (c.side) continue
     let side, salt
@@ -182,44 +197,58 @@ async function revealTick(st) {
         const pt = (await timelockDecrypt(c.sealed, drand)).toString()
         ;[side, salt] = [pt.slice(0, 1), pt.slice(2)]
       } catch (e) {
-        if (!String(e.message || e).includes('too early')) log('keeper', `cannot open ${c.account_id}'s timelock: ${String(e.message || e).slice(0, 120)}`)
+        if (!String(e.message || e).includes('too early')) log('keeper', `cannot open ${c.account_id}/${c.slot}'s timelock: ${String(e.message || e).slice(0, 120)}`)
       }
     }
-    if (!side && state.salts[`${c.account_id}:${r}`]) ({ side, salt } = state.salts[`${c.account_id}:${r}`]) // our own NPC fallback
+    const mine = state.salts[`${c.account_id}:${c.slot}:${r}`] // our own NPCs' fallback
+    if (!side && mine) ({ side, salt } = mine)
     if (!side) continue
-    if (commitHash(c.account_id, r, side, salt) !== c.hash) {
-      log('keeper', `skip ${c.account_id}: opened value does not match its commitment`)
+    if (commitHash(c.account_id, c.slot, r, side, salt) !== c.hash) {
+      log('keeper', `skip ${c.account_id}/${c.slot}: opened value does not match its commitment`)
       continue
     }
-    // reveal also pays out the player's earlier rounds (to fix its streak), so give it room
-    todo.push(['reveal', { round: String(r), side, salt, account_id: c.account_id }, 35_000_000_000_000n])
+    items.push({ round: String(r), slot: c.slot, account_id: c.account_id, side, salt })
   }
-  if (todo.length) await sendBatch('reveal', todo)
+  // one call reveals as many as its gas allows and says how far it got
+  while (items.length) {
+    const chunk = items.splice(0, 60)
+    const res = await loadAccount(KEEPER).callFunctionRaw({ contractId: CONTRACT, methodName: 'reveal_many', args: { items: chunk }, gas: 300_000_000_000_000n })
+    noteGas('reveal', res, chunk.length)
+    const f = failed(res)
+    let done = chunk.length
+    try { done = JSON.parse(Buffer.from(res.status.SuccessValue, 'base64').toString()) } catch {}
+    if (done < chunk.length) items.unshift(...chunk.slice(done))
+    // processed is not revealed: count what is actually open on chain now
+    const after = await allCommits(r)
+    const opened = chunk.slice(0, done).filter(x => after.find(c => c.account_id === x.account_id && c.slot === x.slot)?.side).length
+    log('keeper', f ? `reveal_many FAILED ${f}` : `revealed ${opened} of ${chunk.length} in one call` + (opened < done ? ` (${done - opened} could not be revealed)` : ''))
+    if (f || done === 0) break
+  }
 }
 
 let lastOutcome = null
-async function claimTick(st) {
-  const p = await params()
+/** Rounds settle when anyone bets; if a finished round is still waiting (nobody bet since),
+ *  settle it. Views only: no transaction unless something is due. */
+async function settleTick(st) {
   const now = BigInt(st.now)
-  const c = Number(st.commit_round)
-  for (let r = Math.max(0, c - (state.scannedFrom ?? 300)); r < c; r++) {
-    const rv = await view(CONTRACT, 'get_round', { round: String(r) })
-    if (rv.commits === 0) continue
-    if (now < BigInt(rv.reveal_ends_at)) continue
-    if (rv.settled) lastOutcome = rv.outcome
-    if (rv.claims >= rv.commits) continue
-    const commits = await allCommits(r)
-    const who = [...new Set(commits.map(x => x.account_id))]
-    if (who.length) await sendBatch('claim', who.map(a => ['claim', { account_id: a }, 25_000_000_000_000n]))
-    const after = await view(CONTRACT, 'get_round', { round: String(r) })
-    if (after.settled) {
-      lastOutcome = after.outcome
-      log('round', r, `outcome ${after.outcome}  A ${fmtN(after.revealed_a)} vs B ${fmtN(after.revealed_b)} NEAR  to treasury ${fmtN(after.to_treasury)}` +
-        (BigInt(after.reward) > 0n ? `  mined ${fmt(after.reward)} BEFEWER` : ''))
-    }
+  const rounds = await view(CONTRACT, 'get_rounds', { from: st.commit_round, limit: 8 })
+  const due = rounds.some(rv => !rv.settled && rv.commits > 0 && now >= BigInt(rv.reveal_ends_at))
+  if (due) {
+    const res = await loadAccount(KEEPER).callFunctionRaw({ contractId: CONTRACT, methodName: 'settle_due', args: {}, gas: 100_000_000_000_000n })
+    noteGas('settle', res)
+    const f = failed(res)
+    if (f) log('keeper', `settle_due FAILED ${f}`)
   }
-  state.scannedFrom = 4 // after the first full scan, only look back a few rounds
-  save()
+  for (const rv of [...rounds].reverse()) {
+    if (!rv.settled) continue
+    const r = Number(rv.round)
+    lastOutcome = rv.outcome
+    if ((state.logged ?? -1) >= r) continue
+    state.logged = r
+    save()
+    log('round', r, `outcome ${rv.outcome}  A ${fmtN(rv.revealed_a)} vs B ${fmtN(rv.revealed_b)} NEAR  to treasury ${fmtN(rv.to_treasury)}  reveal rewards ${fmtN(rv.bounties)}` +
+      (BigInt(rv.reward) > 0n ? `  mined ${fmt(rv.reward)} BEFEWER` : ''))
+  }
 }
 
 /** Open the DEX pool step by step once the treasury is big enough, then run the buybacks. */
@@ -245,15 +274,21 @@ async function main() {
     try {
       const st = await view(CONTRACT, 'get_status')
       if (BigInt(st.now) >= BigInt((await params()).genesis_ns)) {
-        await claimTick(st)
-        await revealTick(st)
+        await revealTick(st) // first: it has a deadline
+        await settleTick(st)
         if (!KEEPER_ONLY) await npcTick(st)
         await dexTick().catch(e => log('dex error', String(e.message || e).slice(0, 200)))
       }
     } catch (e) {
       log('tick error', String(e.message || e).slice(0, 300))
     }
-    await sleep(10_000)
+    // poll fast only while a reveal window is open (reveals have a deadline); RPCs rate-limit per IP
+    let wait = 10_000
+    try {
+      const st = await view(CONTRACT, 'get_status')
+      if (st.reveal_round != null) wait = 3_000
+    } catch {}
+    await sleep(wait)
   }
 }
 await main()

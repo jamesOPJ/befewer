@@ -1,7 +1,7 @@
 <script lang="ts">
   import Icon from '../lib/Icon.svelte'
   import { questionFor, label } from '../questions'
-  import { game, fmt, fmtN, netOf, GUEST_GAME_NEAR, short, picks, forgetDevice, toast, commitRound, withdrawAll, claimBefewer, claimPreview, openWallet, depositMore, disconnectWallet } from '../game.svelte'
+  import { game, fmt, fmtN, netOf, GUEST_GAME_NEAR, short, picks, forgetDevice, toast, commitRound, withdrawAll, claimBefewer, claimPreview, openWallet, depositMore, disconnectWallet, closeSlot } from '../game.svelte'
 
   const me = $derived(game.me)
   const decided = $derived(me ? me.wins + me.losses : 0)
@@ -42,6 +42,7 @@
     <div class="card bal">
       <div class="eyebrow">Game balance</div>
       <div class="money num">{fmtN(me.balance)} <span>NEAR</span></div>
+      {#if BigInt(me.pending_near) > 0n}<div class="tok">+{fmtN(me.pending_near)} NEAR from finished bets <span class="faint">· added to the balance on your next bet or withdraw</span></div>{/if}
       <div class="tok"><b class="num">{fmt(me.tokens)}</b> BEFEWER in your wallet <span class="faint">· {fmt(me.mined)} mined by your streaks</span></div>
       <button class="acct" onclick={copy} title="Copy account name"><span class="num">{short(game.session.accountId)}</span><Icon name="copy" size={15} /></button>
       <div class="faint small">{game.session.kind === 'wallet' ? 'Your wallet account · bets signed by a game-only key in this browser' : 'Testnet guest account kept in this browser'} · {me.open.length} bet{me.open.length === 1 ? '' : 's'} waiting to settle</div>
@@ -50,7 +51,7 @@
           {#each [0.5, 1, 2] as n}<button class="btn small" onclick={() => deposit(n)} disabled={!!game.busy}>Deposit {n} NEAR</button>{/each}
         </div>
       {/if}
-      <button class="btn small wd" onclick={withdraw} disabled={!!game.busy || BigInt(me.balance) === 0n}>Withdraw {fmtN(me.balance)} NEAR to the wallet</button>
+      <button class="btn small wd" onclick={withdraw} disabled={!!game.busy || BigInt(me.balance) + BigInt(me.pending_near) === 0n}>Withdraw {fmtN(BigInt(me.balance) + BigInt(me.pending_near))} NEAR to the wallet</button>
     </div>
     <div class="card score">
       <div class="eyebrow">Picked the smaller side</div>
@@ -88,11 +89,27 @@
     <div class="card st"><div class="eyebrow">Streak</div><div class="v num">{me.streak}<span class="faint small"> · best {me.best_streak}</span></div></div>
   </section>
 
-  {#if me.open.length}
+  {#if me.slots.length > 1}
+    <section>
+      <h2 class="h2">Slots</h2>
+      <ul class="list">
+        {#each me.slots as s}
+          <li class="card item">
+            <span class="no num">#{s.slot}</span>
+            <span class="body"><span class="q">{s.slot === 0 ? 'Slot 0 (manual bets)' : `Slot ${s.slot}`}</span>
+              <span class="small muted">streak {s.streak} · best {s.best_streak} · won {s.wins} · lost {s.losses}{s.open.length ? ` · ${s.open.length} bet${s.open.length === 1 ? '' : 's'} in play` : ''}</span></span>
+            {#if s.slot !== 0}<button class="btn small" onclick={() => closeSlot(s.slot)} disabled={!!game.busy || s.open.some(o => !o.result)} title="Returns its 0.002 NEAR">Close</button>{/if}
+          </li>
+        {/each}
+      </ul>
+    </section>
+  {/if}
+
+  {#if me.open.some(o => !o.result)}
     <section>
       <h2 class="h2">Waiting to settle</h2>
       <ul class="list">
-        {#each me.open as o}
+        {#each me.open.filter(o => !o.result) as o}
           {@const n = Number(o.round)}
           <li class="card item">
             <span class="no num">#{n}</span>

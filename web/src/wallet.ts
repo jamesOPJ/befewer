@@ -8,7 +8,7 @@ import { CONTRACT, NETWORK, provider, newKeyPair, type Session } from './chain'
 
 /** What the browser's session key may call. `deposit` is not here: it needs attached NEAR,
  *  which a function-call key can never attach, so deposits always go through the wallet. */
-export const SESSION_METHODS = ['commit', 'reveal', 'claim', 'claim_befewer', 'withdraw']
+export const SESSION_METHODS = ['commit', 'reveal', 'reveal_many', 'claim', 'claim_befewer', 'withdraw', 'open_slot', 'close_slot', 'settle_due']
 /** Gas the session key may spend in total (about 3,000 bets). */
 export const KEY_ALLOWANCE = 10n ** 24n
 const GAS_30T = '30000000000000'

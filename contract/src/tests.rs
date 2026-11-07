@@ -63,6 +63,7 @@ fn params() -> Params {
         buyback_max: U128(N),
         buyback_every_ns: U64(MIN),
         refine_fee_bps: 1000,
+        reveal_bounty_bps: 8000,
     }
 }
 
@@ -105,10 +106,22 @@ fn salt(who: &AccountId, r: u64) -> String {
     format!("salt-{}-{}-0123456789abcdef", who, r)
 }
 fn hash_hex(who: &AccountId, r: u64, side: &str, salt: &str) -> String {
-    env::sha256(commit_preimage(who, r, side, salt).as_bytes()).iter().map(|b| format!("{:02x}", b)).collect()
+    env::sha256(commit_preimage(who, 0, r, side, salt).as_bytes()).iter().map(|b| format!("{:02x}", b)).collect()
 }
 fn fee(x: u128) -> u128 {
     x * 500 / 10_000
+}
+/// Reveal reward: 80% of the fee, paid to whoever reveals.
+fn bounty(x: u128) -> u128 {
+    fee(x) * 8000 / 10_000
+}
+/// What a bet costs in fees when the player reveals it itself (it gets the reward back).
+fn cost(x: u128) -> u128 {
+    fee(x) - bounty(x)
+}
+/// NEAR held for an open bet's storage (no ciphertext), returned when it is booked.
+fn st(who: &AccountId) -> u128 {
+    commit_storage(who, 0)
 }
 
 /// Deposit START (plus the one-time storage fee) for `who`.
@@ -119,12 +132,12 @@ fn join(c: &mut Contract, who: &AccountId) {
 fn commit(c: &mut Contract, who: &AccountId, r: u64, side: &str, amount: u128) {
     ctx(who, t_commit(r));
     let s = salt(who, r);
-    let got = c.commit(U64(r), U128(amount), hash_hex(who, r, side, &s), None);
+    let got = c.commit(U64(r), None, U128(amount), hash_hex(who, r, side, &s), None);
     assert_eq!(got.0, r);
 }
 fn reveal(c: &mut Contract, who: &AccountId, r: u64, side: &str) {
     ctx(who, t_reveal(r));
-    c.reveal(U64(r), side.into(), salt(who, r), None);
+    c.reveal(U64(r), None, side.into(), salt(who, r), None);
 }
 fn bal(c: &Contract, who: &AccountId) -> u128 {
     c.get_player(who.clone()).balance.0
@@ -137,28 +150,31 @@ fn donate(c: &mut Contract, amount: u128, now: u64) {
     c.donate();
 }
 
-/// NEAR: every deposited yocto is in a game balance, in escrow, or went to the treasury.
-/// BEFEWER: balances add up to the supply; supply + burned = everything minted; issuance capped.
+/// NEAR: every deposited yocto is in a game balance, in escrow, held for bets' storage, paid
+/// as a slot fee, or went to the treasury. `players` must list every account that deposited
+/// (START each).
+/// BEFEWER: balances add up to the supply; supply + burned = everything minted; every mined
+/// token is unrefined, claimed, owed as refined, or back in the pot; issuance capped.
 fn check_invariants(c: &Contract, players: &[AccountId], donated: u128) {
     let s = c.get_status();
     let sum: u128 = players.iter().map(|p| bal(c, p)).sum();
     assert_eq!(sum, s.balances_total.0, "player balances add up to balances_total");
     let deposited = players.len() as u128 * START;
+    let slot_fees = s.storage_fees.0 - players.len() as u128 * STORAGE_FEE;
     assert_eq!(
-        s.balances_total.0 + s.escrow.0 + s.treasury_in.0 - donated,
+        s.balances_total.0 + s.escrow.0 + s.storage_held.0 + slot_fees + s.treasury_in.0 - donated,
         deposited,
-        "NEAR conserved: balances + escrow + round inflows = deposits"
+        "NEAR conserved: balances + escrow + storage held + slot fees + round inflows = deposits"
     );
     let holders: u128 = players.iter().map(|p| tokens(c, p)).sum::<u128>() + tokens(c, &me()) + tokens(c, &dex());
     assert_eq!(holders, s.total_supply.0, "token balances add up to total supply");
     assert_eq!(s.total_supply.0 + s.total_burned.0, s.claimed.0 + s.dex.seed.0, "supply + burned = minted (claims + seed)");
     let unrefined: u128 = players.iter().map(|p| c.get_player(p.clone()).unrefined.0).sum();
-    assert_eq!(unrefined, s.unrefined_total.0, "unrefined balances add up");
-    // every mined token is still unrefined, was claimed, is owed as refined, or went back to the pot
+    assert!(unrefined <= s.unrefined_total.0 && s.unrefined_total.0 - unrefined <= 1_000, "unrefined (pending included) adds up: {} vs {}", unrefined, s.unrefined_total.0);
     let owed: u128 = players.iter().map(|p| c.get_player(p.clone()).refined.0).sum();
-    let accounted = s.unrefined_total.0 + s.claimed.0 + owed + s.refine_to_pot.0;
+    let accounted = s.unrefined_total.0 + s.claimed.0 + owed + s.refine_to_pot.0 + s.dust_to_pot.0;
     assert!(accounted <= s.mined.0 && s.mined.0 - accounted <= 1_000, "mining credits conserved (up to rounding dust): mined {} accounted {}", s.mined.0, accounted);
-    assert!(s.issued.0 + s.refine_to_pot.0 >= s.mined.0 + s.pot.0 + s.dex.seed.0, "issued covers mined + pot + seed");
+    assert!(s.issued.0 + s.refine_to_pot.0 + s.dust_to_pot.0 >= s.mined.0 + s.pot.0 + s.dex.seed.0, "issued covers mined + pot + seed");
     assert!(s.issued.0 <= s.max_supply.0, "issuance never above the cap");
 }
 
@@ -203,13 +219,13 @@ fn withdraw_and_failed_withdraw_is_put_back() {
     let a = acc("alice.testnet");
     join(&mut c, &a);
     ctx(&a, G);
-    let _ = c.withdraw(Some(U128(2 * N)));
+    let _ = c.withdraw(Some(U128(2 * N)), None);
     assert_eq!(bal(&c, &a), START - 2 * N);
     callback(G, PromiseResult::Successful(vec![]));
     c.on_withdraw(a.clone(), U128(2 * N));
     assert_eq!(bal(&c, &a), START - 2 * N, "a successful transfer stays withdrawn");
     ctx(&a, G);
-    let _ = c.withdraw(None);
+    let _ = c.withdraw(None, None);
     assert_eq!(bal(&c, &a), 0);
     callback(G, PromiseResult::Failed);
     c.on_withdraw(a.clone(), U128(START - 2 * N));
@@ -224,7 +240,7 @@ fn cannot_withdraw_more_than_the_balance() {
     let a = acc("alice.testnet");
     join(&mut c, &a);
     ctx(&a, G);
-    let _ = c.withdraw(Some(U128(START + 1)));
+    let _ = c.withdraw(Some(U128(START + 1)), None);
 }
 
 // ---------------- the game ----------------
@@ -240,7 +256,8 @@ fn minority_wins_double_and_fees_plus_imbalance_go_to_the_treasury() {
     commit(&mut c, &b, 0, "B", 2 * N);
     commit(&mut c, &ch, 0, "B", N / 2);
     assert_eq!(c.get_status().escrow.0, 3 * N + N / 2 + fee(3 * N + N / 2));
-    assert_eq!(bal(&c, &a), START - N - fee(N), "stake + fee left the balance");
+    assert_eq!(bal(&c, &a), START - N - fee(N) - st(&a), "stake + fee + the bet's storage left the balance");
+    assert_eq!(c.get_status().storage_held.0, st(&a) + st(&b) + st(&ch));
     let open = c.get_player(a.clone()).open;
     assert!(open[0].side.is_none(), "nobody's side is on chain during the commit window");
 
@@ -249,15 +266,17 @@ fn minority_wins_double_and_fees_plus_imbalance_go_to_the_treasury() {
     reveal(&mut c, &ch, 0, "B");
     ctx(&a, t_after(0));
     for p in [&a, &b, &ch] {
-        assert_eq!(c.claim(Some(p.clone())), 1);
+        assert_eq!(c.claim(Some(p.clone()), None), 1);
     }
-    assert_eq!(bal(&c, &a), START - N - fee(N) + 2 * N, "winner: 2x the stake, fee not refunded");
-    assert_eq!(bal(&c, &b), START - 2 * N - fee(2 * N));
-    assert_eq!(bal(&c, &ch), START - N / 2 - fee(N / 2));
+    // each revealed its own bet, so each got the reveal reward (80% of its fee) back
+    assert_eq!(bal(&c, &a), START - N - cost(N) + 2 * N, "winner: 2x the stake, fee paid, storage back");
+    assert_eq!(bal(&c, &b), START - 2 * N - cost(2 * N));
+    assert_eq!(bal(&c, &ch), START - N / 2 - cost(N / 2));
+    assert_eq!(c.get_status().storage_held.0, 0, "all storage returned once booked");
     let r = c.get_round(U64(0));
     assert_eq!(r.outcome.as_deref(), Some("A"));
-    let fees = fee(N) + fee(2 * N) + fee(N / 2);
-    assert_eq!(r.to_treasury.0, fees + (2 * N + N / 2 - N), "treasury gets the fees + |A - B|");
+    let fees = cost(N) + cost(2 * N) + cost(N / 2);
+    assert_eq!(r.to_treasury.0, fees + (2 * N + N / 2 - N), "treasury gets the fees (after reveal rewards) + |A - B|");
     let s = c.get_status();
     assert_eq!(s.treasury.0, r.to_treasury.0);
     assert_eq!(s.escrow.0, 0);
@@ -291,7 +310,7 @@ fn min_stake_enforced() {
 }
 
 #[test]
-#[should_panic(expected = "stake plus the fee")]
+#[should_panic(expected = "not enough NEAR for the stake, the fee and the bet's storage")]
 fn the_fee_must_fit_in_the_balance() {
     let mut p = params();
     p.max_stake_bps = 10_000; // allow betting everything, so the fee is what does not fit
@@ -310,7 +329,7 @@ fn commit_needs_a_deposit() {
 }
 
 #[test]
-#[should_panic(expected = "already committed")]
+#[should_panic(expected = "already bet in this round")]
 fn one_commit_per_round() {
     let mut c = setup();
     let a = acc("alice.testnet");
@@ -340,9 +359,9 @@ fn commit_hash_is_bound_to_account() {
     let s = salt(&a, 0);
     let h = hash_hex(&a, 0, "A", &s);
     ctx(&b, t_commit(0));
-    c.commit(U64(0), U128(N), h, None);
+    c.commit(U64(0), None, U128(N), h, None);
     ctx(&b, t_reveal(0));
-    c.reveal(U64(0), "A".into(), s, None);
+    c.reveal(U64(0), None, "A".into(), s, None);
 }
 
 #[test]
@@ -353,7 +372,7 @@ fn reveal_too_early_fails() {
     join(&mut c, &a);
     commit(&mut c, &a, 0, "A", N);
     ctx(&a, t_commit(0));
-    c.reveal(U64(0), "A".into(), salt(&a, 0), None);
+    c.reveal(U64(0), None, "A".into(), salt(&a, 0), None);
 }
 
 #[test]
@@ -364,7 +383,7 @@ fn reveal_too_late_fails() {
     join(&mut c, &a);
     commit(&mut c, &a, 0, "A", N);
     ctx(&a, t_after(0));
-    c.reveal(U64(0), "A".into(), salt(&a, 0), None);
+    c.reveal(U64(0), None, "A".into(), salt(&a, 0), None);
 }
 
 #[test]
@@ -382,7 +401,7 @@ fn tie_voids_refunds_stake_and_fee_and_unrevealed_goes_to_the_treasury() {
     ctx(&a, t_after(0));
     c.settle(U64(0));
     for p in [&a, &b, &ch] {
-        c.claim(Some(p.clone()));
+        c.claim(Some(p.clone()), None);
     }
     assert_eq!(c.get_round(U64(0)).outcome.as_deref(), Some("void"));
     assert_eq!(bal(&c, &a), START, "void: stake and fee both come back");
@@ -404,8 +423,8 @@ fn one_sided_round_is_refunded() {
     reveal(&mut c, &a, 0, "A");
     reveal(&mut c, &b, 0, "A");
     ctx(&a, t_after(0));
-    c.claim(Some(a.clone()));
-    c.claim(Some(b.clone()));
+    c.claim(Some(a.clone()), None);
+    c.claim(Some(b.clone()), None);
     assert_eq!(bal(&c, &a), START);
     assert_eq!(bal(&c, &b), START);
     assert_eq!(c.get_status().treasury.0, 0);
@@ -422,10 +441,10 @@ fn claim_waits_for_reveal_end_and_anyone_can_claim_for_you() {
     reveal(&mut c, &a, 0, "A");
     reveal(&mut c, &b, 0, "B");
     ctx(&keeper, t_reveal(0));
-    assert_eq!(c.claim(Some(a.clone())), 0, "nothing claimable before the reveal window ends");
+    assert_eq!(c.claim(Some(a.clone()), None), 0, "nothing claimable before the reveal window ends");
     ctx(&keeper, t_after(0));
-    assert_eq!(c.claim(Some(a.clone())), 1);
-    assert_eq!(bal(&c, &a), START + N - fee(N));
+    assert_eq!(c.claim(Some(a.clone()), None), 1);
+    assert_eq!(bal(&c, &a), START + N - cost(N), "won N, paid the fee, got the reveal reward back");
     assert_eq!(bal(&c, &keeper), 0);
 }
 
@@ -443,8 +462,8 @@ fn rounds_overlap_commit_next_while_revealing_previous() {
     assert_eq!(st.commit_round.0, 1);
     assert_eq!(st.reveal_round.map(|x| x.0), Some(0));
     let s = salt(&a, 1);
-    assert_eq!(c.commit(U64(1), U128(N), hash_hex(&a, 1, "B", &s), None).0, 1);
-    c.reveal(U64(0), "A".into(), salt(&a, 0), None);
+    assert_eq!(c.commit(U64(1), None, U128(N), hash_hex(&a, 1, "B", &s), None).0, 1);
+    c.reveal(U64(0), None, "A".into(), salt(&a, 0), None);
 }
 
 #[test]
@@ -466,26 +485,29 @@ fn streaks_and_records() {
         reveal(&mut c, &ch, r, ch_side);
     }
     ctx(&a, t_after(2));
-    c.claim(Some(a.clone()));
+    c.claim(Some(a.clone()), None);
     let p = c.get_player(a.clone());
     assert_eq!((p.wins, p.losses, p.streak, p.best_streak), (2, 1, 0, 2));
     let s = c.get_status();
     assert_eq!(s.best_streak, 2);
     assert_eq!(s.best_streak_holder, Some(a.clone()));
-    c.claim(Some(b.clone()));
-    c.claim(Some(ch.clone()));
+    c.claim(Some(b.clone()), None);
+    c.claim(Some(ch.clone()), None);
     check_invariants(&c, &[a, b, ch], 0);
 }
 
 #[test]
-#[should_panic(expected = "too many unclaimed rounds")]
-fn open_rounds_are_bounded() {
+fn a_slot_books_its_finished_bets_when_it_bets_again() {
+    // more than MAX_OPEN_ROUNDS bets in a row never hits the limit: each bet books the
+    // finished ones first (nobody calls claim)
     let mut c = setup();
     let a = acc("alice.testnet");
     join(&mut c, &a);
-    for r in 0..=(MAX_OPEN_ROUNDS as u64) {
+    for r in 0..=(MAX_OPEN_ROUNDS as u64) + 2 {
         commit(&mut c, &a, r, "A", N / 100);
+        assert!(c.get_player(a.clone()).open.len() <= 2);
     }
+    check_invariants(&c, &[a], 0);
 }
 
 // ---------------- hedging ----------------
@@ -512,10 +534,10 @@ fn hedging_both_sides_costs_exactly_the_two_fees() {
         }
         ctx(&h1, t_after(0));
         for p in [&h1, &h2, &o1, &o2] {
-            c.claim(Some(p.clone()));
+            c.claim(Some(p.clone()), None);
         }
         let net = (bal(&c, &h1) + bal(&c, &h2)) as i128 - 2 * START as i128;
-        assert_eq!(net, -2 * fee(x) as i128, "hedged round costs both fees, whichever side wins");
+        assert_eq!(net, -2 * cost(x) as i128, "hedged round costs both fees (net of the reveal rewards they got back), whichever side wins");
         check_invariants(&c, &[h1.clone(), h2.clone(), o1.clone(), o2.clone()], 0);
     }
 }
@@ -534,8 +556,8 @@ fn hedging_alone_is_free_but_never_mines() {
         reveal(&mut c, &h2, r, "B");
     }
     ctx(&h1, t_after(4));
-    c.claim(Some(h1.clone()));
-    c.claim(Some(h2.clone()));
+    c.claim(Some(h1.clone()), None);
+    c.claim(Some(h2.clone()), None);
     assert_eq!(bal(&c, &h1) + bal(&c, &h2), 2 * START, "void rounds refund everything");
     assert_eq!(c.get_player(h1.clone()).streak, 0, "a void is not a win");
     assert_eq!(c.get_status().mined.0, 0);
@@ -576,8 +598,8 @@ fn hedging_with_two_accounts_never_beats_betting_the_difference() {
                 reveal(&mut c, &w2, 0, "B");
             }
             ctx(&w1, t_after(0));
-            c.claim(Some(w1.clone()));
-            c.claim(Some(w2.clone()));
+            c.claim(Some(w1.clone()), None);
+            c.claim(Some(w2.clone()), None);
             let net = (bal(&c, &w1) + bal(&c, &w2)) as i128 - 2 * START as i128;
             best = best.max(net);
             let mut all = vec![w1.clone(), w2.clone()];
@@ -627,7 +649,7 @@ fn third_win_in_a_row_mines_the_whole_pot() {
     assert_eq!(c.get_status().mined.0, 0, "wins 1 and 2 mined nothing");
     ctx(&a, t_after(2));
     for p in [&a, &b1, &b2] {
-        c.claim(Some(p.clone()));
+        c.claim(Some(p.clone()), None);
     }
     let s = c.get_status();
     assert_eq!(c.get_player(a.clone()).unrefined.0, 3 * T, "rounds 0 and 1 rolled over into round 2's pot");
@@ -650,7 +672,7 @@ fn longer_streaks_and_bigger_stakes_get_bigger_shares() {
     play_alice_minority(&mut c, 1..4, &a, Some((&e, N / 2)));
     ctx(&a, t_after(3));
     for p in [&a, &e, &b1, &b2] {
-        c.claim(Some(p.clone()));
+        c.claim(Some(p.clone()), None);
     }
     // round 2: alice's 3rd win takes the 3-token pot alone (eve is on her 2nd)
     // round 3: pot of 1 token split 2 shares x 1000 (alice, streak 4) : 1 share x 500 (eve, streak 3)
@@ -681,7 +703,7 @@ fn a_loss_resets_the_streak_and_the_shares() {
     assert_eq!(o.iter().find(|x| x.round.0 == 3).unwrap().streak_if_win, 1);
     ctx(&a, t_after(3));
     for p in [&a, &b1, &b2] {
-        c.claim(Some(p.clone()));
+        c.claim(Some(p.clone()), None);
     }
     // b2's round-2 win was its first: nobody has mined, the 4 tokens are all in the pot
     assert_eq!(c.get_status().mined.0, 0);
@@ -715,7 +737,7 @@ fn skipped_and_void_rounds_keep_the_streak() {
     assert!(last.shares.0 > 0);
     ctx(&a, t_after(4));
     for p in [&a, &b1, &b2] {
-        c.claim(Some(p.clone()));
+        c.claim(Some(p.clone()), None);
     }
     let p = c.get_player(a.clone());
     assert_eq!((p.wins, p.voids, p.streak), (3, 1, 3));
@@ -741,7 +763,7 @@ fn an_unrevealed_bet_resets_the_streak() {
     let o = c.get_player(a.clone()).open;
     assert_eq!(o.iter().find(|x| x.round.0 == 3).unwrap().streak_if_win, 1);
     ctx(&a, t_after(3));
-    c.claim(Some(a.clone()));
+    c.claim(Some(a.clone()), None);
     let p = c.get_player(a.clone());
     assert_eq!((p.wins, p.forfeits, p.streak), (3, 1, 1));
 }
@@ -758,7 +780,7 @@ fn issuance_stops_at_max_supply() {
     play_alice_minority(&mut c, 0..5, &a, None);
     ctx(&a, t_after(4));
     for p in [&a, &b1, &b2] {
-        c.claim(Some(p.clone()));
+        c.claim(Some(p.clone()), None);
     }
     let s = c.get_status();
     assert_eq!(s.issued.0, T * 5 / 2);
@@ -791,7 +813,7 @@ fn give_unrefined(c: &mut Contract, who: &AccountId, amount: u128) {
 }
 fn claim_tokens(c: &mut Contract, who: &AccountId, bps: Option<u16>) -> u128 {
     ctx(who, G);
-    c.claim_befewer(bps).0
+    c.claim_befewer(bps, None).0
 }
 fn view_p(c: &Contract, who: &AccountId) -> PlayerView {
     c.get_player(who.clone())
@@ -806,7 +828,7 @@ fn claiming_alone_costs_10_percent_and_the_fee_goes_back_to_the_pot() {
     }
     play_alice_minority(&mut c, 0..3, &a, None);
     ctx(&a, t_after(2)); // rounds finished but nobody called claim: claim_befewer pays them first
-    assert_eq!(c.claim_befewer(None).0, 3 * T * 9 / 10);
+    assert_eq!(c.claim_befewer(None, None).0, 3 * T * 9 / 10);
     let s = c.get_status();
     assert_eq!(tokens(&c, &a), 3 * T * 9 / 10);
     assert_eq!((s.refine_fees.0, s.refine_to_pot.0, s.pot.0), (3 * T / 10, 3 * T / 10, 3 * T / 10));
@@ -865,6 +887,341 @@ fn claiming_nothing_fails() {
     claim_tokens(&mut c, &a, None);
 }
 
+// ---------------- v6: slots, lazy bookkeeping, reveal rewards ----------------
+
+fn hash_slot(who: &AccountId, slot: u32, r: u64, side: &str, salt: &str) -> String {
+    env::sha256(commit_preimage(who, slot, r, side, salt).as_bytes()).iter().map(|b| format!("{:02x}", b)).collect()
+}
+fn salt_s(who: &AccountId, slot: u32, r: u64) -> String {
+    format!("salt-{}-{}-{}-0123456789abcdef", who, slot, r)
+}
+fn commit_s(c: &mut Contract, who: &AccountId, slot: u32, r: u64, side: &str, amount: u128) {
+    ctx(who, t_commit(r));
+    c.commit(U64(r), Some(slot), U128(amount), hash_slot(who, slot, r, side, &salt_s(who, slot, r)), None);
+}
+fn reveal_s(c: &mut Contract, by: &AccountId, who: &AccountId, slot: u32, r: u64, side: &str) {
+    ctx(by, t_reveal(r));
+    c.reveal(U64(r), Some(slot), side.into(), salt_s(who, slot, r), Some(who.clone()));
+}
+/// `by` reveals `who`'s slot-0 bet made with the plain `commit` helper.
+fn reveal_by(c: &mut Contract, by: &AccountId, who: &AccountId, r: u64, side: &str) {
+    ctx(by, t_reveal(r));
+    c.reveal(U64(r), None, side.into(), salt(who, r), Some(who.clone()));
+}
+fn new_slot(c: &mut Contract, who: &AccountId) -> u32 {
+    ctx(who, G);
+    c.open_slot()
+}
+
+#[test]
+fn slots_bet_independently_share_the_balance_and_closing_refunds_the_fee() {
+    let mut c = setup();
+    let (a, o) = (acc("alice.testnet"), acc("other.testnet"));
+    join(&mut c, &a);
+    join(&mut c, &o);
+    let s1 = new_slot(&mut c, &a);
+    let s2 = new_slot(&mut c, &a);
+    assert_eq!((s1, s2), (1, 2));
+    assert_eq!(bal(&c, &a), START - 2 * SLOT_FEE);
+    // same round, same account: slot 1 on A, slot 2 on B (the contract allows one bet per slot)
+    commit_s(&mut c, &a, s1, 0, "A", N);
+    commit_s(&mut c, &a, s2, 0, "B", N);
+    commit_s(&mut c, &o, 0, 0, "B", N);
+    reveal_s(&mut c, &a, &a, s1, 0, "A");
+    reveal_s(&mut c, &a, &a, s2, 0, "B");
+    reveal_s(&mut c, &o, &o, 0, 0, "B");
+    ctx(&a, t_after(0));
+    c.claim(None, Some(s1));
+    c.claim(None, Some(s2));
+    let p = c.get_player(a.clone());
+    let v1 = p.slots.iter().find(|x| x.slot == s1).unwrap();
+    let v2 = p.slots.iter().find(|x| x.slot == s2).unwrap();
+    assert_eq!((v1.wins, v1.streak, v2.losses, v2.streak), (1, 1, 1, 0), "each slot keeps its own record");
+    // won N on slot 1, lost N on slot 2: the account pays the two fees net of its reveal rewards
+    assert_eq!(bal(&c, &a), START - 2 * SLOT_FEE - 2 * cost(N));
+    ctx(&a, t_after(0));
+    c.close_slot(s2);
+    assert_eq!(bal(&c, &a), START - SLOT_FEE - 2 * cost(N), "closing a slot refunds its fee");
+    assert!(c.get_player(a.clone()).slots.iter().all(|x| x.slot != s2));
+    check_invariants(&c, &[a, o], 0);
+}
+
+#[test]
+#[should_panic(expected = "slot 0 cannot be closed")]
+fn slot_zero_cannot_be_closed() {
+    let mut c = setup();
+    let a = acc("alice.testnet");
+    join(&mut c, &a);
+    ctx(&a, G);
+    c.close_slot(0);
+}
+
+#[test]
+#[should_panic(expected = "has a bet in a round that has not finished")]
+fn a_slot_with_a_running_bet_cannot_be_closed() {
+    let mut c = setup();
+    let a = acc("alice.testnet");
+    join(&mut c, &a);
+    let s1 = new_slot(&mut c, &a);
+    commit_s(&mut c, &a, s1, 0, "A", N);
+    ctx(&a, t_reveal(0));
+    c.close_slot(s1);
+}
+
+#[test]
+#[should_panic(expected = "no such slot")]
+fn betting_from_a_slot_that_does_not_exist_fails() {
+    let mut c = setup();
+    let a = acc("alice.testnet");
+    join(&mut c, &a);
+    commit_s(&mut c, &a, 5, 0, "A", N);
+}
+
+/// One slot always on A, one always on B: whichever side runs three in a row, its slot mines.
+#[test]
+fn an_a_slot_and_a_b_slot_always_carry_the_winning_run() {
+    let mut c = setup();
+    let (a, b1, b2) = (acc("alice.testnet"), acc("b1.testnet"), acc("b2.testnet"));
+    for p in [&a, &b1, &b2] {
+        join(&mut c, p);
+    }
+    let (sa, sb) = (new_slot(&mut c, &a), new_slot(&mut c, &a));
+    // others make A the smaller side three times in a row
+    for r in 0..3u64 {
+        commit_s(&mut c, &a, sa, r, "A", N / 10);
+        commit_s(&mut c, &a, sb, r, "B", N / 10);
+        commit(&mut c, &b1, r, "B", N);
+        commit(&mut c, &b2, r, "A", N / 2);
+        reveal_s(&mut c, &a, &a, sa, r, "A");
+        reveal_s(&mut c, &a, &a, sb, r, "B");
+        reveal(&mut c, &b1, r, "B");
+        reveal(&mut c, &b2, r, "A");
+    }
+    ctx(&b1, t_after(2));
+    c.settle_due(); // anyone settles; nobody books
+    let p = c.get_player(a.clone());
+    let va = p.slots.iter().find(|x| x.slot == sa).unwrap();
+    assert_eq!(va.open.iter().find(|o| o.round.0 == 2).unwrap().streak_if_win, 3);
+    // b2 also won three in a row on A: the 3-token pot splits by stake, 0.1 vs 0.5 NEAR
+    assert_eq!(p.unrefined.0, 3 * T * 100 / 600, "the A slot's share, shown before booking");
+    assert_eq!(c.get_player(b2.clone()).unrefined.0, 3 * T * 500 / 600);
+    let vb = p.slots.iter().find(|x| x.slot == sb).unwrap();
+    assert!(vb.open.iter().all(|o| o.mined.0 == 0), "the B slot lost every round");
+    check_invariants(&c, &[a, b1, b2], 0);
+}
+
+#[test]
+fn views_show_settled_results_before_they_are_booked_and_booking_matches() {
+    let mut c = setup();
+    let (a, b) = (acc("alice.testnet"), acc("bob.testnet"));
+    join(&mut c, &a);
+    join(&mut c, &b);
+    commit(&mut c, &a, 0, "A", N);
+    commit(&mut c, &b, 0, "B", 2 * N);
+    reveal(&mut c, &a, 0, "A");
+    reveal(&mut c, &b, 0, "B");
+    // round 0 finishes; b bets in round 2, which settles round 0 (b is booked, a is not)
+    commit(&mut c, &b, 2, "A", N / 10);
+    assert!(c.get_round(U64(0)).settled, "a later bet settled the finished round");
+    let before = bal(&c, &a);
+    let v = c.get_player(a.clone());
+    assert_eq!(v.open[0].result.as_deref(), Some("win"));
+    assert_eq!(v.pending_near.0, 2 * N + st(&a), "pending = 2x the stake + the storage back");
+    // a's next bet books round 0 before taking the new stake
+    commit(&mut c, &a, 2, "B", N / 10);
+    assert_eq!(bal(&c, &a), before + v.pending_near.0 - N / 10 - fee(N / 10) - st(&a));
+    check_invariants(&c, &[a, b], 0);
+}
+
+#[test]
+fn rounds_settle_in_order_when_anyone_bets() {
+    let mut c = setup();
+    let (a, b, z) = (acc("alice.testnet"), acc("bob.testnet"), acc("zed.testnet"));
+    for p in [&a, &b, &z] {
+        join(&mut c, p);
+    }
+    for r in 0..3u64 {
+        commit(&mut c, &a, r, "A", N);
+        commit(&mut c, &b, r, "B", 3 * N / 2);
+        reveal(&mut c, &a, r, "A");
+        reveal(&mut c, &b, r, "B");
+    }
+    // zed never played those rounds; its bet in round 5 settles rounds 0..2, oldest first
+    commit(&mut c, &z, 5, "A", N / 10);
+    let st = c.get_status();
+    assert_eq!(st.unsettled, 1, "only zed's own round 5 is still waiting");
+    assert_eq!(st.rounds_settled.0, 3);
+    for r in 0..3u64 {
+        assert!(c.get_round(U64(r)).settled);
+    }
+    assert_eq!(st.treasury.0, 3 * (cost(N) + cost(3 * N / 2) + N / 2), "all three rounds paid the treasury");
+    check_invariants(&c, &[a, b, z], 0);
+}
+
+/// A split that does not divide evenly leaves a remainder: once everyone booked, it goes back
+/// to the pot instead of sitting in the unrefined total forever.
+#[test]
+fn the_rounding_remainder_of_a_split_goes_back_to_the_pot() {
+    let mut c = setup();
+    let (a, e, b1, b2) = (acc("alice.testnet"), acc("eve.testnet"), acc("b1.testnet"), acc("b2.testnet"));
+    for p in [&a, &e, &b1, &b2] {
+        join(&mut c, p);
+    }
+    // alice (1 NEAR) and eve (0.3 NEAR) both win rounds 0..2: 3 tokens split 1000:300 shares
+    play_alice_minority(&mut c, 0..3, &a, Some((&e, 3 * N / 10)));
+    ctx(&a, t_after(2));
+    for p in [&a, &e, &b1, &b2] {
+        c.claim(Some(p.clone()), None);
+    }
+    let pa = 3 * T * 1000 / 1300;
+    let pe = 3 * T * 300 / 1300;
+    let dust = 3 * T - pa - pe;
+    assert!(dust > 0, "the split does not divide evenly");
+    let s = c.get_status();
+    assert_eq!((s.dust_to_pot.0, s.pot.0), (dust, dust));
+    assert_eq!(s.unrefined_total.0, pa + pe);
+    check_invariants(&c, &[a, e, b1, b2], 0);
+}
+
+/// Rounds nobody touched pile up; one call settles several, oldest first.
+#[test]
+fn settle_due_catches_up_on_several_rounds() {
+    let mut c = setup();
+    let (a, z) = (acc("alice.testnet"), acc("zed.testnet"));
+    join(&mut c, &a);
+    join(&mut c, &z);
+    for r in 0..3u64 {
+        commit(&mut c, &a, r, "A", N / 10); // never revealed
+    }
+    // alice's round-2 bet settled round 0; rounds 1 and 2 wait for anyone
+    assert_eq!(c.get_status().unsettled, 2);
+    commit(&mut c, &z, 6, "A", N / 10);
+    let st = c.get_status();
+    assert_eq!((st.unsettled, st.rounds_settled.0), (1, 3), "zed's bet settled both, leaving only its own round");
+    check_invariants(&c, &[a, z], 0);
+}
+
+/// The fix for lazy bookkeeping: a mined share collects refining fees from the moment its round
+/// settles, even while its owner has not come back to book it.
+#[test]
+fn an_unbooked_mined_share_still_collects_refining_fees() {
+    let mut c = setup();
+    let (a, b1, b2, x) = (acc("alice.testnet"), acc("b1.testnet"), acc("b2.testnet"), acc("x.testnet"));
+    for p in [&a, &b1, &b2, &x] {
+        join(&mut c, p);
+    }
+    play_alice_minority(&mut c, 0..3, &a, None); // alice mines 3 tokens in round 2, books nothing
+    ctx(&b1, t_after(2));
+    c.settle_due();
+    assert_eq!(c.get_status().unrefined_total.0, 3 * T, "counted as unrefined the moment it was mined");
+    give_unrefined(&mut c, &x, 3 * T);
+    // x claims all: the 0.3 fee splits evenly between x's... nothing (x leaves) and alice's 3
+    claim_tokens(&mut c, &x, None);
+    assert_eq!(c.get_player(a.clone()).refined.0, 3 * T / 10, "alice's unbooked share got the whole fee");
+    // alice comes back and books: she keeps exactly that
+    ctx(&a, t_after(2));
+    c.claim(None, None);
+    let p = c.get_player(a.clone());
+    assert_eq!((p.unrefined.0, p.refined.0), (3 * T, 3 * T / 10));
+    check_invariants(&c, &[a, b1, b2, x], 0);
+}
+
+#[test]
+fn a_registered_keeper_earns_the_reveal_reward_an_unregistered_one_does_not() {
+    let mut c = setup();
+    let (a, b, k, stranger) = (acc("alice.testnet"), acc("bob.testnet"), acc("keeper.testnet"), acc("stranger.testnet"));
+    for p in [&a, &b, &k] {
+        join(&mut c, p);
+    }
+    commit(&mut c, &a, 0, "A", N);
+    commit(&mut c, &b, 0, "B", 2 * N);
+    reveal_by(&mut c, &k, &a, 0, "A");
+    reveal_by(&mut c, &stranger, &b, 0, "B");
+    assert_eq!(bal(&c, &k), START + bounty(N), "the keeper got 80% of alice's fee");
+    assert_eq!(bal(&c, &stranger), 0, "no game balance: no reward (the fee stays with the round)");
+    ctx(&a, t_after(0));
+    c.claim(Some(a.clone()), None);
+    c.claim(Some(b.clone()), None);
+    assert_eq!(bal(&c, &a), START + N - fee(N), "revealed by someone else: alice pays the whole fee");
+    let r = c.get_round(U64(0));
+    assert_eq!(r.to_treasury.0, fee(N) - bounty(N) + fee(2 * N) + N);
+    check_invariants(&c, &[a, b, k], 0);
+}
+
+#[test]
+fn a_void_round_refunds_the_stake_and_the_fee_minus_the_reveal_reward() {
+    let mut c = setup();
+    let (a, k) = (acc("alice.testnet"), acc("keeper.testnet"));
+    join(&mut c, &a);
+    join(&mut c, &k);
+    commit(&mut c, &a, 0, "A", N); // alone: one-sided, void
+    reveal_by(&mut c, &k, &a, 0, "A");
+    ctx(&a, t_after(0));
+    c.claim(None, None);
+    assert_eq!(bal(&c, &a), START - bounty(N), "everything back except the reward the keeper earned");
+    assert_eq!(bal(&c, &k), START + bounty(N));
+    check_invariants(&c, &[a, k], 0);
+}
+
+#[test]
+fn reveal_many_skips_bad_items_instead_of_failing() {
+    let mut c = setup();
+    let (a, b, k) = (acc("alice.testnet"), acc("bob.testnet"), acc("keeper.testnet"));
+    for p in [&a, &b, &k] {
+        join(&mut c, p);
+    }
+    commit(&mut c, &a, 0, "A", N);
+    commit(&mut c, &b, 0, "B", 2 * N);
+    ctx(&k, t_reveal(0));
+    let item = |who: &AccountId, side: &str, salt: String| RevealItem { round: U64(0), slot: 0, account_id: who.clone(), side: side.into(), salt };
+    let items = vec![
+        item(&a, "B", salt(&a, 0)),
+        item(&a, "A", "wrong-salt-0123456789".into()),
+        item(&a, "A", salt(&a, 0)),
+        item(&a, "A", salt(&a, 0)),
+        item(&b, "B", salt(&b, 0)),
+    ];
+    assert_eq!(c.reveal_many(items), 5);
+    let r = c.get_round(U64(0));
+    assert_eq!((r.reveals_a, r.reveals_b), (1, 1));
+    assert_eq!(bal(&c, &k), START + bounty(N) + bounty(2 * N));
+}
+
+#[test]
+fn reveal_many_stops_when_gas_runs_low() {
+    let mut c = setup();
+    let (a, k) = (acc("alice.testnet"), acc("keeper.testnet"));
+    join(&mut c, &a);
+    join(&mut c, &k);
+    commit(&mut c, &a, 0, "A", N);
+    let mut b = VMContextBuilder::new();
+    b.current_account_id(me()).predecessor_account_id(k.clone()).block_timestamp(t_reveal(0))
+        .account_balance(NearToken::from_yoctonear(BIG)).prepaid_gas(Gas::from_tgas(10));
+    testing_env!(b.build());
+    let items = vec![RevealItem { round: U64(0), slot: 0, account_id: a.clone(), side: "A".into(), salt: salt(&a, 0) }];
+    assert_eq!(c.reveal_many(items), 0, "less than the margin left: nothing attempted, caller retries");
+}
+
+#[test]
+fn withdraw_books_the_listed_slots_first() {
+    let mut c = setup();
+    let (a, b) = (acc("alice.testnet"), acc("bob.testnet"));
+    join(&mut c, &a);
+    join(&mut c, &b);
+    let s1 = new_slot(&mut c, &a);
+    commit_s(&mut c, &a, s1, 0, "A", N);
+    commit(&mut c, &b, 0, "B", 2 * N);
+    reveal_s(&mut c, &a, &a, s1, 0, "A");
+    reveal(&mut c, &b, 0, "B");
+    ctx(&a, t_after(0));
+    let _ = c.withdraw(None, Some(vec![0, s1]));
+    // everything left the game: the win from slot 1 was booked first
+    assert_eq!(bal(&c, &a), 0);
+    let p = c.get_player(a.clone());
+    assert!(p.slots.iter().all(|x| x.open.is_empty()) && p.pending_near.0 == 0, "nothing left unbooked");
+    assert_eq!(c.get_status().balances_total.0, bal(&c, &b));
+}
+
 // ---------------- treasury safety ----------------
 
 #[test]
@@ -877,7 +1234,7 @@ fn the_treasury_never_spends_player_money() {
     ctx(&a, t_commit(0)); // a fresh context: same storage_usage as the ones below
     let s = c.get_status();
     let storage = env::storage_usage() as u128 * env::storage_byte_cost().as_yoctonear();
-    let owed = s.balances_total.0 + s.escrow.0 + storage + SAFETY_RESERVE;
+    let owed = s.balances_total.0 + s.escrow.0 + s.storage_held.0 + storage + SAFETY_RESERVE;
     // the contract really holds only 1 NEAR more than it owes: only that 1 NEAR is spendable
     ctx_full(&a, t_commit(0), 0, owed + N, vec![]);
     assert_eq!(c.get_status().treasury_spendable.0, N);
@@ -894,7 +1251,7 @@ fn befewer_sent_to_the_contract_is_burned() {
     }
     play_alice_minority(&mut c, 0..3, &a, None);
     ctx(&a, t_after(2));
-    c.claim_befewer(None); // 3 unrefined -> 2.7 in the wallet (alone, so the 0.3 fee goes to the pot)
+    c.claim_befewer(None, None); // 3 unrefined -> 2.7 in the wallet (alone, so the 0.3 fee goes to the pot)
     ctx_full(&a, t_after(2), 1, BIG, vec![]);
     c.ft_transfer(me(), U128(T), None);
     let s = c.get_status();
@@ -1109,21 +1466,21 @@ fn keeper_reveals_from_the_sealed_ciphertext() {
     for (who, side, amt) in [(&a, "A", N), (&b, "B", 2 * N)] {
         ctx(who, t_commit(0));
         let s = salt(who, 0);
-        c.commit(U64(0), U128(amt), hash_hex(who, 0, side, &s), Some(format!("tlock-ciphertext-of-{}:{}", side, s)));
+        c.commit(U64(0), None, U128(amt), hash_hex(who, 0, side, &s), Some(format!("tlock-ciphertext-of-{}:{}", side, s)));
     }
     let list = c.get_round_commits(U64(0), 0, 10);
     assert_eq!(list.len(), 2);
     assert!(list.iter().all(|x| x.side.is_none() && x.sealed.is_some()));
     assert_eq!(list[0].hash, hash_hex(&a, 0, "A", &salt(&a, 0)), "view exposes the commitment");
     ctx(&keeper, t_reveal(0));
-    c.reveal(U64(0), "A".into(), salt(&a, 0), Some(a.clone()));
-    c.reveal(U64(0), "B".into(), salt(&b, 0), Some(b.clone()));
+    c.reveal(U64(0), None, "A".into(), salt(&a, 0), Some(a.clone()));
+    c.reveal(U64(0), None, "B".into(), salt(&b, 0), Some(b.clone()));
     let list = c.get_round_commits(U64(0), 0, 10);
     assert_eq!(list[0].side.as_deref(), Some("A"));
     assert!(list.iter().all(|x| x.sealed.is_none()), "ciphertext dropped on reveal");
     ctx(&keeper, t_after(0));
-    c.claim(Some(a.clone()));
-    c.claim(Some(b.clone()));
+    c.claim(Some(a.clone()), None);
+    c.claim(Some(b.clone()), None);
     assert_eq!(bal(&c, &a), START + N - fee(N));
     assert_eq!(bal(&c, &b), START - 2 * N - fee(2 * N));
     assert!(c.get_round_commits(U64(0), 0, 10).is_empty(), "round list removed once fully claimed");
@@ -1138,7 +1495,7 @@ fn keeper_cannot_reveal_a_different_side() {
     join(&mut c, &a);
     commit(&mut c, &a, 0, "A", N);
     ctx(&keeper, t_reveal(0));
-    c.reveal(U64(0), "B".into(), salt(&a, 0), Some(a.clone()));
+    c.reveal(U64(0), None, "B".into(), salt(&a, 0), Some(a.clone()));
 }
 
 #[test]
@@ -1149,7 +1506,7 @@ fn sealed_ciphertext_is_bounded() {
     join(&mut c, &a);
     ctx(&a, t_commit(0));
     let s = salt(&a, 0);
-    c.commit(U64(0), U128(N), hash_hex(&a, 0, "A", &s), Some("x".repeat(MAX_SEALED_LEN + 1)));
+    c.commit(U64(0), None, U128(N), hash_hex(&a, 0, "A", &s), Some("x".repeat(MAX_SEALED_LEN + 1)));
 }
 
 #[test]
@@ -1160,7 +1517,7 @@ fn late_commit_is_refused_not_moved_to_the_next_round() {
     join(&mut c, &a);
     let s = salt(&a, 0);
     ctx(&a, G + C + 1); // round 0's window closed one nanosecond ago
-    c.commit(U64(0), U128(N), hash_hex(&a, 0, "A", &s), None);
+    c.commit(U64(0), None, U128(N), hash_hex(&a, 0, "A", &s), None);
 }
 
 /// Pseudo-random play over many rounds: invariants hold after every step.
@@ -1204,7 +1561,7 @@ fn random_play_keeps_invariants() {
         if r % 3 == 2 {
             ctx(&players[0], t_after(r));
             for p in &players {
-                c.claim(Some(p.clone()));
+                c.claim(Some(p.clone()), None);
                 check_invariants(&c, &players, 0);
             }
             // now and then someone claims part of its mined BEFEWER to the wallet
@@ -1212,7 +1569,7 @@ fn random_play_keeps_invariants() {
                 let v = c.get_player(p.clone());
                 if (v.unrefined.0 > 0 || v.refined.0 > 0) && rnd() % 3 == 0 {
                     ctx(p, t_after(r));
-                    c.claim_befewer(Some((rnd() % 10_000 + 1) as u16));
+                    c.claim_befewer(Some((rnd() % 10_000 + 1) as u16), None);
                     check_invariants(&c, &players, 0);
                 }
             }
@@ -1220,7 +1577,7 @@ fn random_play_keeps_invariants() {
     }
     ctx(&players[0], t_after(50));
     for p in &players {
-        c.claim(Some(p.clone()));
+        c.claim(Some(p.clone()), None);
     }
     let s = c.get_status();
     assert_eq!(s.escrow.0, 0, "everything claimed -> nothing left in escrow");

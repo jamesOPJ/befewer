@@ -3,8 +3,8 @@
   import Icon from '../lib/Icon.svelte'
   import Equity from '../lib/Equity.svelte'
   import { label } from '../questions'
-  import { backtest, runsAtLeast, describe, chipsText, PRESETS, PRESET_GROUPS, type Rule, type Cond, type Pick, type Unit, type Backtest } from '../rules'
-  import { game, commitRound, lookup, saveRules, setAutopilot, draftDirty, putDraftLive, discardDraft, toast } from '../game.svelte'
+  import { backtest, runsAtLeast, describe, chipsText, cleanPattern, PRESETS, PRESET_GROUPS, SLOT_SETS, type Rule, type Cond, type Pick, type Unit, type Backtest } from '../rules'
+  import { game, commitRound, lookup, saveRules, setAutopilot, draftDirty, putDraftLive, discardDraft, toast, lane, addLane, removeLane, useSlotSet, todayNet, fmtN as fmtNear } from '../game.svelte'
 
   const WINDOW = 60
   // replays count chips of 0.01 NEAR and pay the contract's fee on every bet
@@ -14,20 +14,39 @@
   const ordinal = (n: number) => n + (n % 10 === 1 && n % 100 !== 11 ? 'st' : n % 10 === 2 && n % 100 !== 12 ? 'nd' : n % 10 === 3 && n % 100 !== 13 ? 'rd' : 'th')
   const roundsText = (n: number) => `${n} round${n === 1 ? '' : 's'}`
   const runRows = (b: Backtest) => [1, 2, 3, 4].map(k => [String(k), b.runs[k] ?? 0] as [string, number]).concat([['5+', runsAtLeast(b, 5)]])
-  const rules = $derived(game.ap.draft)
+  const L = $derived(game.ap.lanes[game.ap.sel] ?? game.ap.lanes[0])
+  const rules = $derived(L.draft)
   const bt = $derived.by(() => {
     game.history
     const cur = commitRound()
-    return backtest($state.snapshot(game.ap.draft) as Rule[], Math.max(0, cur - WINDOW), cur - 1, lookup, 1000, fee(), need())
+    return backtest($state.snapshot(lane().draft) as Rule[], Math.max(0, cur - WINDOW), cur - 1, lookup, 1000, fee(), need())
   })
   const btLive = $derived.by(() => {
     game.history
     const cur = commitRound()
-    return backtest($state.snapshot(game.ap.live) as Rule[], Math.max(0, cur - WINDOW), cur - 1, lookup, 1000, fee(), need())
+    return backtest($state.snapshot(lane().live) as Rule[], Math.max(0, cur - WINDOW), cur - 1, lookup, 1000, fee(), need())
   })
-  const dirty = $derived(JSON.stringify(game.ap.draft) !== JSON.stringify(game.ap.live))
+  const dirty = $derived(JSON.stringify(lane().draft) !== JSON.stringify(lane().live))
   let confirmLive = $state(false)
   function goLive() { putDraftLive(); confirmLive = false; toast('ok', game.ap.on ? 'New rules are running from the next round.' : 'New rules saved as the running rules.') }
+  // every lane's running rules replayed on the same rounds, added up
+  const btAll = $derived.by(() => {
+    game.history
+    const cur = commitRound()
+    const list = game.ap.lanes.map(l => backtest($state.snapshot(l.live) as Rule[], Math.max(0, cur - WINDOW), cur - 1, lookup, 1000, fee(), need()))
+    return { net: list.reduce((t, b) => t + b.end - b.start, 0), staked: list.reduce((t, b) => t + b.staked, 0), mines: list.reduce((t, b) => t + b.mines, 0), n: list.length }
+  })
+  const setBt = $derived.by(() => {
+    game.history
+    const cur = commitRound()
+    return SLOT_SETS.map(set => {
+      const list = set.slots.map(x => backtest(x.rules, Math.max(0, cur - WINDOW), cur - 1, lookup, 1000, fee(), need()))
+      return { net: list.reduce((t, b) => t + b.end - b.start, 0), staked: list.reduce((t, b) => t + b.staked, 0), mines: list.reduce((t, b) => t + b.mines, 0), rounds: list[0]?.rounds ?? 0 }
+    })
+  })
+  const today = $derived.by(() => { game.history; game.resultsBySlot; return todayNet() })
+  function setBudget(on: boolean, near: number) { game.ap.budget.on = on; game.ap.budget.near = Math.max(0.01, Math.round(near * 100) / 100); saveRules() }
+  function useSet(i: number) { useSlotSet(i); toast('info', `${SLOT_SETS[i].name}: ${SLOT_SETS[i].slots.length} slots set up. Each extra slot holds 0.002 NEAR of storage when it first bets.`) }
   const presetBt = $derived.by(() => {
     game.history
     const cur = commitRound()
@@ -39,9 +58,10 @@
     ['question', 'last time this question was asked'], ['mine', 'my last bet'], ['always', 'anything else'],
   ]
   function picksFor(c: Cond): [Pick, string][] {
-    if (c.kind === 'always') return [['A', 'A'], ['B', 'B'], ['random', 'a random side'], ['skip', 'nothing (skip)']]
+    const loop: [Pick, string] = ['loop', 'a fixed pattern (loop)']
+    if (c.kind === 'always') return [['A', 'A'], ['B', 'B'], ['random', 'a random side'], loop, ['skip', 'nothing (skip)']]
     const same = c.kind === 'mine' ? 'the side I picked' : 'that same side'
-    return [['same', same], ['other', 'the other side'], ['A', 'A'], ['B', 'B'], ['random', 'a random side'], ['skip', 'nothing (skip)']]
+    return [['same', same], ['other', 'the other side'], ['A', 'A'], ['B', 'B'], ['random', 'a random side'], loop, ['skip', 'nothing (skip)']]
   }
   function winners(c: Cond): [string, string][] {
     if (c.kind === 'margin') return [['any', 'whoever won it'], ['A', 'and A won it'], ['B', 'and B won it']]
@@ -51,7 +71,7 @@
   const commit = () => saveRules()
 
   function setKind(i: number, v: Cond['kind']) {
-    const r = game.ap.draft[i]
+    const r = lane().draft[i]
     const w = 'winner' in r.cond ? r.cond.winner : 'any'
     r.cond =
       v === 'always' ? { kind: 'always' }
@@ -64,18 +84,18 @@
     commit()
   }
   function add() {
-    const at = game.ap.draft.length && game.ap.draft[game.ap.draft.length - 1].cond.kind === 'always' ? game.ap.draft.length - 1 : game.ap.draft.length
-    game.ap.draft.splice(at, 0, { cond: { kind: 'last', winner: 'any' }, pick: 'other', unit: 'fixed', amount: 10 })
+    const at = lane().draft.length && lane().draft[lane().draft.length - 1].cond.kind === 'always' ? lane().draft.length - 1 : lane().draft.length
+    lane().draft.splice(at, 0, { cond: { kind: 'last', winner: 'any' }, pick: 'other', unit: 'fixed', amount: 10 })
     commit()
   }
-  function del(i: number) { game.ap.draft.splice(i, 1); commit() }
+  function del(i: number) { lane().draft.splice(i, 1); commit() }
   function moveRule(i: number, d: number) {
     const j = i + d
-    if (j < 0 || j >= game.ap.draft.length) return
-    const t = game.ap.draft[i]; game.ap.draft[i] = game.ap.draft[j]; game.ap.draft[j] = t
+    if (j < 0 || j >= lane().draft.length) return
+    const t = lane().draft[i]; lane().draft[i] = lane().draft[j]; lane().draft[j] = t
     commit()
   }
-  function use(i: number) { game.ap.draft = structuredClone(PRESETS[i].rules); commit(); toast('info', `${PRESETS[i].name} loaded into the draft. Put it live when you're ready.`) }
+  function use(i: number) { lane().draft = structuredClone(PRESETS[i].rules); commit(); toast('info', `${PRESETS[i].name} loaded into the draft. Put it live when you're ready.`) }
   const fmtN = (v: number) => (v / 100).toLocaleString('en-US', { maximumFractionDigits: 2 })
   const FIXED = [1, 2, 5, 10, 20, 50, 100]
   const PCTS = [1, 2, 5, 10, 25]
@@ -84,8 +104,8 @@
   const UNIT: Record<string, Unit> = { f: 'fixed', p: 'pct', m: 'martingale', r: 'paroli' }
   function setStake(i: number, v: string) {
     const [u, n] = v.split(':')
-    game.ap.draft[i].unit = UNIT[u]
-    game.ap.draft[i].amount = Number(n)
+    lane().draft[i].unit = UNIT[u]
+    lane().draft[i].amount = Number(n)
     commit()
   }
   const has = (r: Rule, unit: Unit, list: number[]) => r.unit !== unit || list.includes(r.amount)
@@ -114,15 +134,35 @@
     </label>
   </div>
   <div class="live-rules">
-    <div class="eyebrow">Running rules</div>
-    <ol>{#each game.ap.live as lr}<li>{describe(lr)}</li>{/each}</ol>
+    <div class="eyebrow">Running rules{game.ap.lanes.length > 1 ? ` · ${game.ap.lanes.length} slots, each bets on its own` : ''}</div>
+    {#each game.ap.lanes as l}
+      {#if game.ap.lanes.length > 1}<div class="lane-h small"><b>{l.name}</b></div>{/if}
+      <ol>{#each l.live as lr}<li>{describe(lr)}</li>{:else}<li class="faint">no rules: this slot does not bet</li>{/each}</ol>
+    {/each}
+    <div class="budget small">
+      <label><input type="checkbox" checked={game.ap.budget.on} onchange={e => setBudget((e.currentTarget as HTMLInputElement).checked, game.ap.budget.near)} /> Daily budget: stop for the day after losing</label>
+      <input type="number" min="0.01" step="0.1" aria-label="Daily budget in NEAR" value={game.ap.budget.near} onchange={e => setBudget(game.ap.budget.on, Number((e.currentTarget as HTMLInputElement).value))} /> NEAR
+      <span class="faint">· today {today >= 0n ? '+' : '−'}{fmtNear(today >= 0n ? today : -today)} NEAR{game.ap.budget.on && -today >= BigInt(Math.round(game.ap.budget.near * 1e6)) * 10n ** 18n ? ' · paused until tomorrow' : ''}</span>
+    </div>
   </div>
 </section>
 
 <div class="cols">
   <div class="col">
     <section class="card block">
-      <div class="bh"><h2>Draft rules</h2><span class="faint small">checked top to bottom · first match decides</span></div>
+      <div class="lanes" role="tablist" aria-label="Slots">
+        {#each game.ap.lanes as l, i}
+          <button role="tab" aria-selected={game.ap.sel === i} class:on={game.ap.sel === i} onclick={() => (game.ap.sel = i)}>{l.name}<span class="faint">{i === 0 ? ' · slot 0' : l.slot != null ? ` · slot ${l.slot}` : ' · new'}</span></button>
+        {/each}
+        <button class="add" onclick={() => addLane()} aria-label="Add a slot"><Icon name="plus" size={14} /> Slot</button>
+      </div>
+      <div class="bh"><h2>Draft rules{game.ap.lanes.length > 1 ? ` · ${L.name}` : ''}</h2><span class="faint small">checked top to bottom · first match decides</span></div>
+      {#if game.ap.sel > 0}
+        <div class="lanebar small">
+          <label>Name <input aria-label="Slot name" value={L.name} onchange={e => { L.name = (e.currentTarget as HTMLInputElement).value.slice(0, 24) || L.name; commit() }} /></label>
+          <button class="btn small ghost" onclick={() => removeLane(game.ap.sel)}>Stop using this slot</button>
+        </div>
+      {/if}
       <div class="draftbar" class:dirty>
         {#if dirty}
           <span><b>Draft.</b> Changes here don't affect the running rules{game.ap.on ? ', which keep betting' : ''}.</span>
@@ -179,9 +219,13 @@
                 </select>
               {/if}
               <span class="w">→ bet</span>
-              <select aria-label="Bet" value={r.pick} onchange={e => { r.pick = (e.currentTarget as HTMLSelectElement).value as Pick; commit() }}>
+              <select aria-label="Bet" value={r.pick} onchange={e => { r.pick = (e.currentTarget as HTMLSelectElement).value as Pick; if (r.pick === 'loop') { r.pattern = cleanPattern(r.pattern); r.rest = !!r.rest } commit() }}>
                 {#each picksFor(r.cond) as [v, t]}<option value={v}>{t}</option>{/each}
               </select>
+              {#if r.pick === 'loop'}
+                <input class="pat" aria-label="Pattern of A and B" maxlength="8" value={r.pattern ?? 'A'} oninput={e => { const el = e.currentTarget as HTMLInputElement; el.value = el.value.toUpperCase().replace(/[^AB]/g, '') }} onchange={e => { r.pattern = cleanPattern((e.currentTarget as HTMLInputElement).value); commit() }} />
+                <label class="rest small"><input type="checkbox" checked={!!r.rest} onchange={e => { r.rest = (e.currentTarget as HTMLInputElement).checked; commit() }} /> after a loss, wait for the next cycle</label>
+              {/if}
               {#if r.pick !== 'skip'}
                 <span class="w">with</span>
                 <select aria-label="Stake" value={`${CODE[r.unit]}:${r.amount}`} onchange={e => setStake(i, (e.currentTarget as HTMLSelectElement).value)}>
@@ -233,6 +277,18 @@
         {/each}
       </div>
       {/each}
+      <div class="pg eyebrow">Several slots at once</div>
+      <div class="presets">
+        {#each SLOT_SETS as set, i}
+          {@const b = setBt[i]}
+          <button class="preset" onclick={() => useSet(i)}>
+            <span class="pn">{set.name} <span class="faint small">· {set.slots.length} slots</span></span>
+            <span class="pa small muted">{set.about}</span>
+            {#if b.rounds}<span class="pr small num">staked {fmtN(b.staked)} → <b class={tone(b.net)}>{signed(b.net)}</b> · <b class="gold">mined in {roundsText(b.mines)}</b> <span class="faint">· last {b.rounds} rounds</span></span>{/if}
+            <span class="use small">Set up these slots</span>
+          </button>
+        {/each}
+      </div>
     </section>
   </div>
 
@@ -251,6 +307,9 @@
             <span class="faint">Win streaks</span>
             {#each runRows(bt) as [len, n]}<span class="runchip" class:mine={len === '5+' || Number(len) >= need()} class:zero={n === 0}>{len} in a row: <b class="num">{n}</b></span>{/each}
           </div>
+        {/if}
+        {#if btAll.n > 1}
+          <div class="vs-live small">All {btAll.n} slots' running rules together: <b class={tone(btAll.net)}>{signed(btAll.net)}</b> NEAR · staked {fmtN(btAll.staked)} · <b class="gold">mined in {roundsText(btAll.mines)}</b></div>
         {/if}
         {#if dirty}
           <div class="vs-live small">Draft <b class={tone(net(bt))}>{signed(net(bt))}</b> <span class="faint">vs</span> running rules <b class={tone(net(btLive))}>{signed(net(btLive))}</b> <span class="faint">on the same rounds</span></div>
@@ -342,6 +401,17 @@
   .kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-bottom: 8px }
   @media (max-width: 520px) { .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)) } }
   .runs { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 4px 0 10px }
+  .lanes { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px }
+  .lanes button { padding: 5px 11px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface-2); color: var(--fg-2); font-size: 13px; cursor: pointer }
+  .lanes button.on { background: var(--fg); color: var(--bg); border-color: var(--fg) }
+  .lanes .add { display: inline-flex; align-items: center; gap: 4px; border-style: dashed }
+  .lanebar { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; margin: -4px 0 10px }
+  .lanebar input { width: 140px }
+  .lane-h { margin-top: 6px }
+  .pat { width: 88px; text-transform: uppercase; font-family: inherit; letter-spacing: 0.08em }
+  .rest { display: inline-flex; gap: 6px; align-items: center; color: var(--fg-2) }
+  .budget { display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line) }
+  .budget input[type='number'] { width: 76px }
   .runchip { white-space: nowrap; display: inline-flex; gap: 4px; align-items: baseline; padding: 3px 9px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface-2); color: var(--fg-2) }
   .runchip.mine { border-color: rgba(232, 182, 94, 0.45); color: var(--fg) }
   .runchip.zero { opacity: 0.5 }

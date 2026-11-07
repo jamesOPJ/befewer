@@ -1,16 +1,25 @@
-//! BEFEWER v5: a minority game played with NEAR that mines a capped NEP-141 token.
+//! BEFEWER v6: a minority game played with NEAR that mines a capped NEP-141 token.
 //!
 //! Every round, players commit a hidden bet of NEAR on side A or B (commit-reveal, with an
-//! optional drand timelock so a keeper can reveal for them). After the reveal window the side
+//! optional drand timelock so anyone can reveal for them). An account can run any number of
+//! slots: independent bettors with their own bet each round and their own streak, sharing the
+//! account's NEAR balance and mined BEFEWER. After the reveal window the side
 //! with LESS revealed stake wins:
 //!   * winners get exactly 2x their stake back (the bet fee is not refunded),
 //!   * losers lose their stake,
 //!   * every bet pays a fee on top of its stake (`fee_bps`),
 //!   * fees, the imbalance |A - B| and unrevealed stakes go to the treasury,
-//!   * a tie or an empty side voids the round: revealed stakes AND fees are refunded.
+//!   * whoever reveals a bet gets `reveal_bounty_bps` of its fee (keepers get paid for the gas),
+//!   * a tie or an empty side voids the round: revealed stakes and fees are refunded, minus the
+//!     reveal reward already paid.
+//!
+//! Bookkeeping is lazy: a round settles (outcome, treasury, pot) when any later bet or reveal
+//! comes in, or via `settle_due`; each slot's own bets are booked into the account when that
+//! slot bets again, on a withdraw/claim, or by anyone calling `claim`. Views show settled but
+//! unbooked results.
 //!
 //! Mining: each settled round adds `reward_per_round` BEFEWER to a pot. A win that makes a
-//! streak of `streak_min` or more wins in a row earns shares in the pot: a streak of
+//! slot's streak of `streak_min` or more wins in a row earns shares in the pot: a streak of
 //! `streak_min` is 1 share per milli-NEAR staked, `streak_min + 1` is 2 shares, and so on. The
 //! pot is split among that round's winners by shares; if nobody qualifies it rolls over.
 //! Nothing else ever mints BEFEWER and issuance stops at `max_supply`.
@@ -46,8 +55,15 @@ use near_sdk::{
     PromiseOrValue,
 };
 
-/// Max number of rounds an account can have committed-but-unclaimed at once.
+/// Max number of unfinished bets a slot can have at once.
 pub const MAX_OPEN_ROUNDS: usize = 8;
+/// Storage held by each extra slot (refunded when the slot is closed).
+pub const SLOT_FEE: u128 = NEAR / 500;
+/// `reveal_many` stops when less gas than this is left.
+pub const REVEAL_GAS_MARGIN: u64 = 20_000_000_000_000;
+/// Rounds `settle_due` settles per call, and how far `settle` may catch up at once.
+pub const SETTLE_PER_CALL: u32 = 4;
+pub const SETTLE_CATCH_UP: u32 = 50;
 const BPS: u128 = 10_000;
 pub const NEAR: u128 = 1_000_000_000_000_000_000_000_000;
 /// One BEFEWER (18 decimals).
@@ -102,6 +118,7 @@ enum StorageKey {
     Players,
     RoundPlayers,
     Balances,
+    Slots,
 }
 
 /// Launch parameters. Fixed forever once `new` runs.
@@ -141,6 +158,8 @@ pub struct Params {
     /// Fee on claiming unrefined BEFEWER to the wallet, in basis points (1000 = 10%), shared
     /// among everyone still holding unrefined BEFEWER.
     pub refine_fee_bps: u16,
+    /// Share of a bet's fee paid to whoever reveals it, in basis points of the fee (8000 = 80%).
+    pub reveal_bounty_bps: u16,
 }
 
 #[near(serializers = [borsh])]
@@ -150,9 +169,11 @@ pub struct Round {
     pub committed: u128,
     /// Sum of fees paid by commits.
     pub fees: u128,
+    /// Reveal rewards paid out of this round's fees to whoever revealed.
+    pub bounties: u128,
     pub revealed_a: u128,
     pub revealed_b: u128,
-    /// Fees of revealed commits (refunded if the round is void).
+    /// Fees of revealed commits (a void round refunds them, minus the reveal rewards).
     pub revealed_fees: u128,
     /// Mining shares of revealed commits on each side.
     pub shares_a: u128,
@@ -160,11 +181,12 @@ pub struct Round {
     pub commits: u32,
     pub reveals_a: u32,
     pub reveals_b: u32,
+    /// Commits booked so far (paid out into their accounts).
     pub claims: u32,
     pub settled: bool,
     /// SIDE_A / SIDE_B (winning side) or OUTCOME_VOID. SIDE_NONE until settled.
     pub outcome: u8,
-    /// NEAR this round sent to the treasury (fees + imbalance + unrevealed).
+    /// NEAR this round sent to the treasury (fees net of reveal rewards + imbalance + unrevealed).
     pub to_treasury: u128,
     /// BEFEWER added to the pot when this round settled.
     pub emission: u128,
@@ -172,6 +194,11 @@ pub struct Round {
     pub reward: u128,
     /// Shares on the winning side (the denominator of the split).
     pub reward_shares: u128,
+    /// `refine_index` when the reward was mined: winners collect refined BEFEWER from here on,
+    /// even if they book their share much later.
+    pub reward_index: u128,
+    /// Part of the reward already booked into winners' accounts.
+    pub reward_booked: u128,
 }
 
 #[near(serializers = [borsh])]
@@ -180,39 +207,53 @@ pub struct Commit {
     pub hash: [u8; 32],
     pub amount: u128,
     pub fee: u128,
+    /// Reveal reward paid out of the fee to whoever revealed (0 until revealed).
+    pub bounty: u128,
+    /// NEAR held from the player for this bet's storage; returned when the bet is booked.
+    pub storage: u128,
     pub side: u8,
-    /// Mining shares this commit earns if it wins (fixed at reveal from the streak so far).
+    /// Mining shares this commit earns if it wins (fixed at reveal from the slot's streak).
     pub shares: u128,
     /// Streak this commit completes if it wins (0 until revealed).
     pub streak_if_win: u32,
     /// Optional drand timelock ciphertext of "<A|B>:<salt>", sealed to the drand round at
     /// this round's reveal start. Lets anyone reveal for the player once drand publishes
-    /// that round. Dropped on reveal to free storage.
+    /// that round. Dropped on reveal.
     pub sealed: Option<String>,
 }
 
 /// Longest accepted `sealed` ciphertext (tlock armored output is ~580 bytes).
 pub const MAX_SEALED_LEN: usize = 1024;
 
+/// Per account: what all of its slots share (mined BEFEWER and refining).
+/// The NEAR game balance lives in `balances`.
 #[near(serializers = [borsh])]
 #[derive(Default, Clone)]
 pub struct Player {
-    pub streak: u32,
-    pub best_streak: u32,
-    pub wins: u32,
-    pub losses: u32,
-    pub voids: u32,
-    pub forfeits: u32,
-    /// BEFEWER this account has mined.
+    /// Slot ids handed out so far (0..slots); closed ones are gone from `slots`.
+    pub slots: u32,
+    /// BEFEWER this account has booked from mining.
     pub mined: u128,
-    /// Rounds with a commit that has not been claimed yet, ascending.
-    pub open_rounds: Vec<u64>,
     /// Mined BEFEWER still in the game (claiming it costs the refining fee).
     pub unrefined: u128,
     /// Share of other players' refining fees, booked at the last checkpoint (claimed without a fee).
     pub refined: u128,
     /// `refine_index` at the last checkpoint.
     pub refine_index: u128,
+}
+
+/// One independent bettor inside an account: at most one bet per round and its own streak.
+#[near(serializers = [borsh])]
+#[derive(Default, Clone)]
+pub struct Slot {
+    pub streak: u32,
+    pub best_streak: u32,
+    pub wins: u32,
+    pub losses: u32,
+    pub voids: u32,
+    pub forfeits: u32,
+    /// Rounds with a bet that has not been booked yet, ascending.
+    pub open_rounds: Vec<u64>,
 }
 
 #[near(serializers = [borsh])]
@@ -245,29 +286,37 @@ pub struct Contract {
     token: FungibleToken,
     metadata: FungibleTokenMetadata,
     params: Params,
-    /// Game balances in NEAR (yocto), credited by `deposit` and payouts.
+    /// Game balances in NEAR (yocto), credited by `deposit`, payouts and reveal rewards.
     balances: LookupMap<AccountId, u128>,
     /// Sum of `balances`.
     balances_total: u128,
-    /// NEAR (stakes + fees) held for unclaimed commits and payouts.
+    /// NEAR (stakes + fees, minus paid reveal rewards) held for bets not yet booked.
     escrow: u128,
+    /// Players' NEAR held for the storage of their open bets (returned when booked).
+    storage_held: u128,
     /// NEAR owned by the game, not yet spent on the pool or buybacks.
     treasury: u128,
     /// All NEAR that ever reached the treasury (rounds + donations).
     treasury_in: u128,
+    /// One-time storage fees (first deposits) and slot fees (refunded when a slot closes).
     storage_fees: u128,
     rounds: LookupMap<u64, Round>,
-    commits: LookupMap<(u64, AccountId), Commit>,
-    /// Accounts that committed in a round, so keepers can enumerate commits to reveal.
-    /// Removed once every commit of the round is claimed.
-    round_players: LookupMap<u64, Vec<AccountId>>,
+    commits: LookupMap<(u64, AccountId, u32), Commit>,
+    /// (account, slot) of every bet in a round, so keepers can enumerate bets to reveal.
+    /// Removed once every bet of the round is booked.
+    round_players: LookupMap<u64, Vec<(AccountId, u32)>>,
     players: LookupMap<AccountId, Player>,
+    slots: LookupMap<(AccountId, u32), Slot>,
+    /// Rounds with bets that are not settled yet, ascending. Settled strictly in this order.
+    unsettled: Vec<u64>,
+    /// Reveal rewards paid so far.
+    bounties_paid: u128,
     // ---- mining ----
     /// BEFEWER waiting for the next round with qualifying winners.
     pot: u128,
     /// BEFEWER issued so far: pot + round rewards + the pool seed. Never above max_supply.
     issued: u128,
-    /// BEFEWER minted to miners.
+    /// BEFEWER mined by streaks (credited when their round settles).
     mined: u128,
     total_burned: u128,
     rounds_settled: u64,
@@ -277,7 +326,7 @@ pub struct Contract {
     biggest_reward_round: Option<u64>,
     dex: Dex,
     // ---- refining ----
-    /// Sum of every player's unrefined BEFEWER.
+    /// Unrefined BEFEWER: every account's booked unrefined + round rewards not booked yet.
     unrefined_total: u128,
     /// Refined BEFEWER per unit of unrefined, times REFINE_SCALE, accumulated since launch.
     refine_index: u128,
@@ -285,6 +334,8 @@ pub struct Contract {
     refine_fees: u128,
     /// Of those, fees that went back to the pot because nobody else held unrefined BEFEWER.
     refine_to_pot: u128,
+    /// Rounding remainders of reward splits, returned to the pot.
+    dust_to_pot: u128,
     /// BEFEWER minted to wallets by claims (unrefined after the fee + refined).
     claimed: u128,
 }
@@ -299,6 +350,7 @@ pub struct RoundView {
     pub reveal_ends_at: U64,
     pub committed: U128,
     pub fees: U128,
+    pub bounties: U128,
     pub revealed_a: U128,
     pub revealed_b: U128,
     pub shares_a: U128,
@@ -314,6 +366,7 @@ pub struct RoundView {
     pub emission: U128,
     pub reward: U128,
     pub reward_shares: U128,
+    pub reward_booked: U128,
 }
 
 #[near(serializers = [json])]
@@ -352,8 +405,15 @@ pub struct StatusView {
     pub graduate_at: U128,
     pub balances_total: U128,
     pub escrow: U128,
-    /// One-time 0.01 NEAR fees paid by first deposits (kept for storage, never spent).
+    /// Players' NEAR held for the storage of their open bets.
+    pub storage_held: U128,
+    /// One-time 0.01 NEAR fees paid by first deposits, plus slot fees (kept for storage).
     pub storage_fees: U128,
+    /// Reveal rewards paid so far, and the share of the fee they take.
+    pub bounties_paid: U128,
+    pub reveal_bounty_bps: u16,
+    /// Rounds with bets waiting to be settled (settled in order, by any bet or by `settle_due`).
+    pub unsettled: u32,
     pub total_supply: U128,
     pub max_supply: U128,
     pub issued: U128,
@@ -366,6 +426,7 @@ pub struct StatusView {
     /// Refining fees charged so far, and the part that went back to the pot.
     pub refine_fees: U128,
     pub refine_to_pot: U128,
+    pub dust_to_pot: U128,
     /// BEFEWER minted to wallets by claims.
     pub claimed: U128,
     pub rounds_settled: U64,
@@ -381,16 +442,49 @@ pub struct OpenCommitView {
     pub round: U64,
     pub amount: U128,
     pub fee: U128,
+    /// Reveal reward paid out of the fee (to whoever revealed).
+    pub bounty: U128,
+    /// NEAR held for this bet's storage, returned when it is booked.
+    pub storage: U128,
     /// "A", "B", or null if not revealed yet.
     pub side: Option<String>,
     /// Streak this bet completes if it wins (known once revealed; 0 before).
     pub streak_if_win: u32,
     pub shares: U128,
+    /// Once the round is settled but the bet is not booked yet: "win", "loss", "void" or
+    /// "forfeit", what booking it will pay into the game balance (storage included) and the
+    /// BEFEWER it mined. Booking happens on the slot's next bet, a withdraw/claim, or `claim`.
+    pub result: Option<String>,
+    pub payout: U128,
+    pub mined: U128,
+}
+
+#[near(serializers = [json])]
+pub struct SlotView {
+    pub slot: u32,
+    pub streak: u32,
+    pub best_streak: u32,
+    pub wins: u32,
+    pub losses: u32,
+    pub voids: u32,
+    pub forfeits: u32,
+    pub open: Vec<OpenCommitView>,
+}
+
+/// One reveal for `reveal_many`.
+#[near(serializers = [json])]
+pub struct RevealItem {
+    pub round: U64,
+    pub slot: u32,
+    pub account_id: AccountId,
+    pub side: String,
+    pub salt: String,
 }
 
 #[near(serializers = [json])]
 pub struct RoundCommitView {
     pub account_id: AccountId,
+    pub slot: u32,
     pub amount: U128,
     /// "A", "B", or null if not revealed yet.
     pub side: Option<String>,
@@ -408,18 +502,29 @@ pub struct PlayerView {
     pub tokens: U128,
     /// Has deposited at least once (game record exists).
     pub registered: bool,
+    /// Slot 0's record (the slot manual bets use), for convenience.
     pub streak: u32,
     pub best_streak: u32,
     pub wins: u32,
     pub losses: u32,
     pub voids: u32,
     pub forfeits: u32,
-    pub mined: U128,
-    /// Mined BEFEWER still in the game (claiming costs the refining fee on this part).
-    pub unrefined: U128,
-    /// Share of others' refining fees (claimed without a fee).
-    pub refined: U128,
     pub open: Vec<OpenCommitView>,
+    /// Slot ids handed out (0..slot_count; closed ones are missing from `slots`).
+    pub slot_count: u32,
+    /// The first 32 open slots.
+    pub slots: Vec<SlotView>,
+    /// Settled but not yet booked, over those slots: NEAR that booking will add (storage
+    /// included) and BEFEWER mined.
+    pub pending_near: U128,
+    pub pending_mined: U128,
+    /// BEFEWER booked from mining.
+    pub mined: U128,
+    /// Mined BEFEWER still in the game (claiming costs the refining fee on this part),
+    /// pending mined BEFEWER included.
+    pub unrefined: U128,
+    /// Share of others' refining fees (claimed without a fee), pending part included.
+    pub refined: U128,
 }
 
 fn side_str(side: u8) -> Option<String> {
@@ -428,14 +533,6 @@ fn side_str(side: u8) -> Option<String> {
         SIDE_B => Some("B".into()),
         OUTCOME_VOID => Some("void".into()),
         _ => None,
-    }
-}
-
-fn parse_side(side: &str) -> u8 {
-    match side {
-        "A" => SIDE_A,
-        "B" => SIDE_B,
-        _ => env::panic_str("side must be \"A\" or \"B\""),
     }
 }
 
@@ -454,9 +551,17 @@ fn parse_hash(hex: &str) -> [u8; 32] {
     out
 }
 
-/// The exact preimage clients must hash: `fewer:<account>:<round>:<A|B>:<salt>`.
-pub fn commit_preimage(account_id: &AccountId, round: u64, side: &str, salt: &str) -> String {
-    format!("fewer:{}:{}:{}:{}", account_id, round, side, salt)
+/// The exact preimage clients must hash: `fewer:<account>:<slot>:<round>:<A|B>:<salt>`.
+pub fn commit_preimage(account_id: &AccountId, slot: u32, round: u64, side: &str, salt: &str) -> String {
+    format!("fewer:{}:{}:{}:{}:{}", account_id, slot, round, side, salt)
+}
+
+/// NEAR held from the player for one bet's storage: the commit (keyed by the account id, with
+/// the ciphertext) and its entry in the round's list, plus per-record overhead. Slightly more
+/// than the bytes used; all of it comes back when the bet is booked.
+pub fn commit_storage(account_id: &AccountId, sealed_len: usize) -> u128 {
+    let bytes = 2 * account_id.as_str().len() + sealed_len + 260;
+    bytes as u128 * env::storage_byte_cost().as_yoctonear()
 }
 
 /// floor(a * b / c) for b <= c, without overflowing as long as (c - 1) * b fits in u128.
@@ -512,6 +617,7 @@ impl Contract {
         require!(params.buyback_max.0 >= MIN_BUYBACK, "buyback_max must be >= 0.01 NEAR");
         require!(params.pool_fee > 0 && params.pool_fee <= 1_000, "pool_fee must be in (0, 1000]");
         require!(params.refine_fee_bps <= 5_000, "refine_fee_bps must be at most 5000 (50%)");
+        require!(params.reveal_bounty_bps <= 10_000, "reveal_bounty_bps must be at most 10000 (the whole fee)");
         let me = env::current_account_id();
         let mut token = FungibleToken::new(StorageKey::Token);
         token.internal_register_account(&me);
@@ -522,6 +628,7 @@ impl Contract {
             balances: LookupMap::new(StorageKey::Balances),
             balances_total: 0,
             escrow: 0,
+            storage_held: 0,
             treasury: 0,
             treasury_in: 0,
             storage_fees: 0,
@@ -529,6 +636,9 @@ impl Contract {
             commits: LookupMap::new(StorageKey::Commits),
             round_players: LookupMap::new(StorageKey::RoundPlayers),
             players: LookupMap::new(StorageKey::Players),
+            slots: LookupMap::new(StorageKey::Slots),
+            unsettled: vec![],
+            bounties_paid: 0,
             pot: 0,
             issued: 0,
             mined: 0,
@@ -543,6 +653,7 @@ impl Contract {
             refine_index: 0,
             refine_fees: 0,
             refine_to_pot: 0,
+            dust_to_pot: 0,
             claimed: 0,
         }
     }
@@ -566,7 +677,8 @@ impl Contract {
     // ---------- NEAR in and out ----------
 
     /// Add the attached NEAR to the game balance of `account_id` (default: caller). The first
-    /// deposit of an account pays a one-time 0.01 NEAR storage fee and registers it for BEFEWER.
+    /// deposit of an account pays a one-time 0.01 NEAR storage fee, registers it for BEFEWER and
+    /// opens its slot 0.
     #[payable]
     pub fn deposit(&mut self, account_id: Option<AccountId>) -> U128 {
         let who = account_id.unwrap_or_else(env::predecessor_account_id);
@@ -579,6 +691,10 @@ impl Contract {
                 self.token.internal_register_account(&who);
             }
             self.balances.insert(who.clone(), 0);
+            if !self.players.contains_key(&who) {
+                self.players.insert(who.clone(), Player { slots: 1, refine_index: self.refine_index, ..Default::default() });
+                self.slots.insert((who.clone(), 0), Slot::default());
+            }
         }
         require!(amount > 0, "attach some NEAR to deposit");
         let b = self.balances.get_mut(&who).expect("registered above");
@@ -590,8 +706,14 @@ impl Contract {
     }
 
     /// Send `amount` (default: everything) of the caller's game balance back to the caller.
-    pub fn withdraw(&mut self, amount: Option<U128>) -> Promise {
+    /// `book` lists slots whose finished bets should be booked first (default: slot 0), so
+    /// winnings that were not booked yet are included.
+    pub fn withdraw(&mut self, amount: Option<U128>, book: Option<Vec<u32>>) -> Promise {
         let who = env::predecessor_account_id();
+        self.settle_due();
+        for s in book.unwrap_or_else(|| vec![0]) {
+            self.internal_book(&who, s);
+        }
         let bal = self.balances.get(&who).copied().unwrap_or(0);
         let amount = amount.map(|a| a.0).unwrap_or(bal);
         require!(amount > 0, "nothing to withdraw");
@@ -625,29 +747,68 @@ impl Contract {
         emit("donate", json!({"account_id": env::predecessor_account_id(), "amount": U128(amount)}));
     }
 
-    /// Treasury NEAR that can leave the contract without touching player funds, escrow,
-    /// storage, or the safety reserve.
+    /// Treasury NEAR that can leave the contract without touching player funds, escrow, the
+    /// NEAR held for bets' storage, storage itself, or the safety reserve.
     fn spendable(&self) -> u128 {
         let balance = env::account_balance().as_yoctonear();
         let storage = env::storage_usage() as u128 * env::storage_byte_cost().as_yoctonear();
-        let owed = self.balances_total + self.escrow + storage + SAFETY_RESERVE;
+        let owed = self.balances_total + self.escrow + self.storage_held + storage + SAFETY_RESERVE;
         self.treasury.min(balance.saturating_sub(owed))
+    }
+
+    // ---------- slots ----------
+
+    /// Open another slot: an independent bettor inside this account (its own bet each round
+    /// and its own streak; the NEAR balance and mined BEFEWER are shared). Costs SLOT_FEE of
+    /// the game balance for storage, refunded by `close_slot`. Returns the new slot id.
+    pub fn open_slot(&mut self) -> u32 {
+        let who = env::predecessor_account_id();
+        let mut p = self.players.get(&who).cloned().unwrap_or_else(|| env::panic_str("deposit NEAR first"));
+        let bal = self.balances.get(&who).copied().unwrap_or(0);
+        require!(bal >= SLOT_FEE, "a slot holds 0.002 NEAR for its storage (refunded when it is closed)");
+        self.balances.insert(who.clone(), bal - SLOT_FEE);
+        self.balances_total -= SLOT_FEE;
+        self.storage_fees += SLOT_FEE;
+        let id = p.slots;
+        p.slots += 1;
+        self.players.insert(who.clone(), p);
+        self.slots.insert((who.clone(), id), Slot::default());
+        emit("open_slot", json!({"account_id": who, "slot": id}));
+        id
+    }
+
+    /// Close a slot (not slot 0) whose bets are all finished: books them, then refunds SLOT_FEE.
+    pub fn close_slot(&mut self, slot: u32) {
+        let who = env::predecessor_account_id();
+        require!(slot != 0, "slot 0 cannot be closed");
+        require!(self.slots.contains_key(&(who.clone(), slot)), "no such slot");
+        self.settle_due();
+        self.internal_book(&who, slot);
+        let s = self.slots.get(&(who.clone(), slot)).cloned().expect("checked");
+        require!(s.open_rounds.is_empty(), "the slot has a bet in a round that has not finished");
+        self.slots.remove(&(who.clone(), slot));
+        self.storage_fees -= SLOT_FEE;
+        *self.balances.entry(who.clone()).or_insert(0) += SLOT_FEE;
+        self.balances_total += SLOT_FEE;
+        emit("close_slot", json!({"account_id": who, "slot": slot}));
     }
 
     // ---------- the game ----------
 
-    /// Lock `amount` of the caller's game NEAR (plus the fee) into the round currently taking
-    /// commits, hidden behind `hash = sha256("fewer:<account>:<round>:<A|B>:<salt>")` (hex).
-    /// `sealed` (optional) is the drand timelock ciphertext of "<A|B>:<salt>" so that a keeper
-    /// can reveal for the player; without it the player must reveal manually.
+    /// From slot `slot` of the caller, lock `amount` of game NEAR (plus the fee, plus storage
+    /// returned later) into the round currently taking commits, hidden behind
+    /// `hash = sha256("fewer:<account>:<slot>:<round>:<A|B>:<salt>")` (hex). `sealed` (optional)
+    /// is the drand timelock ciphertext of "<A|B>:<salt>", so anyone can reveal it in time.
     /// No attached deposit, so the app's function-call key can sign it without a popup.
-    /// `round` must be the round currently taking commits: a commit that lands after the
-    /// window closed is refused instead of silently moving to the next round.
-    pub fn commit(&mut self, round: U64, amount: U128, hash: String, sealed: Option<String>) -> U64 {
+    /// Committing also settles finished rounds and books this slot's finished bets first.
+    pub fn commit(&mut self, round: U64, slot: Option<u32>, amount: U128, hash: String, sealed: Option<String>) -> U64 {
         let who = env::predecessor_account_id();
+        let slot = slot.unwrap_or(0);
         let now = env::block_timestamp();
         let r = self.commit_round_at(now);
         require!(round.0 == r, format!("round {} is not taking commits (current: {})", round.0, r));
+        self.settle_due();
+        self.internal_book(&who, slot);
         let amount = amount.0;
         let hash = parse_hash(&hash);
         if let Some(s) = &sealed {
@@ -659,69 +820,132 @@ impl Contract {
             .get(&who)
             .copied()
             .unwrap_or_else(|| env::panic_str("no game balance: deposit NEAR first"));
+        let mut s = self
+            .slots
+            .get(&(who.clone(), slot))
+            .cloned()
+            .unwrap_or_else(|| env::panic_str("no such slot: open_slot first"));
         let cap = balance * (self.params.max_stake_bps as u128) / BPS;
         require!(
             amount <= cap,
             format!("stake above the per-round cap of {} bps of your balance", self.params.max_stake_bps)
         );
         let fee = amount * (self.params.fee_bps as u128) / BPS;
-        require!(amount + fee <= balance, "not enough NEAR for the stake plus the fee");
-        let key = (r, who.clone());
-        require!(!self.commits.contains_key(&key), "already committed in this round");
-        let mut player = self.players.get(&who).cloned().unwrap_or_default();
-        require!(player.open_rounds.len() < MAX_OPEN_ROUNDS, "too many unclaimed rounds: call claim first");
+        let storage = commit_storage(&who, sealed.as_ref().map(|x| x.len()).unwrap_or(0));
+        require!(amount + fee + storage <= balance, "not enough NEAR for the stake, the fee and the bet's storage (returned later)");
+        let key = (r, who.clone(), slot);
+        require!(!self.commits.contains_key(&key), "this slot already bet in this round");
+        require!(s.open_rounds.len() < MAX_OPEN_ROUNDS, "too many unfinished bets in this slot");
 
-        self.balances.insert(who.clone(), balance - amount - fee);
-        self.balances_total -= amount + fee;
+        self.balances.insert(who.clone(), balance - amount - fee - storage);
+        self.balances_total -= amount + fee + storage;
         self.escrow += amount + fee;
+        self.storage_held += storage;
         let has_sealed = sealed.is_some();
-        self.commits.insert(key, Commit { hash, amount, fee, side: SIDE_NONE, shares: 0, streak_if_win: 0, sealed });
-        self.round_players.entry(r).or_default().push(who.clone());
-        player.open_rounds.push(r);
-        self.players.insert(who.clone(), player);
+        self.commits.insert(key, Commit { hash, amount, fee, bounty: 0, storage, side: SIDE_NONE, shares: 0, streak_if_win: 0, sealed });
+        self.round_players.entry(r).or_default().push((who.clone(), slot));
+        s.open_rounds.push(r);
+        self.slots.insert((who.clone(), slot), s);
         let round = self.rounds.entry(r).or_default();
+        if round.commits == 0 {
+            self.unsettled.push(r);
+        }
         round.committed += amount;
         round.fees += fee;
         round.commits += 1;
         emit(
             "commit",
-            json!({"account_id": who, "round": U64(r), "amount": U128(amount), "fee": U128(fee), "sealed": has_sealed}),
+            json!({"account_id": who, "slot": slot, "round": U64(r), "amount": U128(amount), "fee": U128(fee),
+                   "storage": U128(storage), "sealed": has_sealed}),
         );
         U64(r)
     }
 
-    /// Reveal a commit during its round's reveal window. Anyone can reveal for anyone
-    /// (`account_id`, default: caller): the hash binds account, round, side and salt, so
-    /// only the side that was committed can ever be revealed.
-    /// Revealing first pays out the account's earlier rounds, so its streak is up to date: the
-    /// mining shares this bet earns if it wins are fixed here.
-    pub fn reveal(&mut self, round: U64, side: String, salt: String, account_id: Option<AccountId>) {
+    /// Reveal one bet during its round's reveal window. Anyone can reveal for anyone: the hash
+    /// binds account, slot, round, side and salt, so only the committed side can be revealed.
+    /// The revealer gets the reveal reward (`reveal_bounty_bps` of the bet's fee) in its game
+    /// balance, if it has one. Revealing first books the slot's earlier bets, so its streak is
+    /// current: the mining shares this bet earns if it wins are fixed here.
+    pub fn reveal(&mut self, round: U64, slot: Option<u32>, side: String, salt: String, account_id: Option<AccountId>) {
         let who = account_id.unwrap_or_else(env::predecessor_account_id);
-        let now = env::block_timestamp();
-        let r = round.0;
-        require!(now >= self.round_reveal_start(r), "reveal window has not opened yet");
-        require!(now < self.round_reveal_end(r), "reveal window is closed");
-        require!(salt.len() >= 16 && salt.len() <= 128, "salt must be 16..128 characters");
-        let s = parse_side(&side);
-        let key = (r, who.clone());
-        {
-            let c = self.commits.get(&key).unwrap_or_else(|| env::panic_str("no commit for this round"));
-            require!(c.side == SIDE_NONE, "already revealed");
-            let digest = env::sha256(commit_preimage(&who, r, &side, &salt).as_bytes());
-            require!(digest.as_slice() == c.hash.as_slice(), "hash does not match side+salt");
+        self.settle_due();
+        self.internal_reveal(round.0, slot.unwrap_or(0), &who, &side, &salt, true);
+    }
+
+    /// Reveal many bets in one call, as many as the attached gas allows. Bets that cannot be
+    /// revealed (already revealed, wrong secret, window closed) are skipped, not fatal.
+    /// Returns how many items were processed, so the caller can continue from there.
+    pub fn reveal_many(&mut self, items: Vec<RevealItem>) -> u32 {
+        self.settle_due();
+        let mut done = 0u32;
+        for it in items.iter() {
+            let left = env::prepaid_gas().as_gas().saturating_sub(env::used_gas().as_gas());
+            if left < REVEAL_GAS_MARGIN {
+                break;
+            }
+            self.internal_reveal(it.round.0, it.slot, &it.account_id, &it.side, &it.salt, false);
+            done += 1;
         }
-        // Every earlier round of this account has finished revealing (reveal_ns <= commit_ns),
-        // so this settles all of them and leaves the streak exactly as it stands before round r.
-        self.internal_claim(&who);
-        let streak_before = self.players.get(&who).map(|p| p.streak).unwrap_or(0);
+        done
+    }
+
+    fn internal_reveal(&mut self, r: u64, slot: u32, who: &AccountId, side: &str, salt: &str, strict: bool) -> bool {
+        macro_rules! fail {
+            ($msg:expr) => {{
+                if strict {
+                    env::panic_str($msg)
+                }
+                return false;
+            }};
+        }
+        let now = env::block_timestamp();
+        if now < self.round_reveal_start(r) {
+            fail!("reveal window has not opened yet");
+        }
+        if now >= self.round_reveal_end(r) {
+            fail!("reveal window is closed");
+        }
+        if salt.len() < 16 || salt.len() > 128 {
+            fail!("salt must be 16..128 characters");
+        }
+        let s = match side {
+            "A" => SIDE_A,
+            "B" => SIDE_B,
+            _ => fail!("side must be \"A\" or \"B\""),
+        };
+        let key = (r, who.clone(), slot);
+        match self.commits.get(&key) {
+            None => fail!("no commit for this round"),
+            Some(c) if c.side != SIDE_NONE => fail!("already revealed"),
+            Some(c) => {
+                let digest = env::sha256(commit_preimage(who, slot, r, side, salt).as_bytes());
+                if digest.as_slice() != c.hash.as_slice() {
+                    fail!("hash does not match side+salt");
+                }
+            }
+        }
+        // every earlier bet of this slot has finished revealing (reveal_ns <= commit_ns), so
+        // this books all of them and leaves the streak exactly as it stands before round r
+        self.internal_book(who, slot);
+        let streak_before = self.slots.get(&(who.clone(), slot)).map(|x| x.streak).unwrap_or(0);
         let streak_if_win = streak_before + 1;
+        let revealer = env::predecessor_account_id();
+        let paid = self.balances.contains_key(&revealer);
         let c = self.commits.get_mut(&key).expect("checked above");
         let shares = shares_for(c.amount, streak_if_win, self.params.streak_min);
+        let bounty = if paid { c.fee * (self.params.reveal_bounty_bps as u128) / BPS } else { 0 };
         c.side = s;
         c.sealed = None;
         c.shares = shares;
         c.streak_if_win = streak_if_win;
+        c.bounty = bounty;
         let (amount, fee) = (c.amount, c.fee);
+        if bounty > 0 {
+            self.escrow -= bounty;
+            *self.balances.get_mut(&revealer).expect("checked") += bounty;
+            self.balances_total += bounty;
+            self.bounties_paid += bounty;
+        }
         let round = self.rounds.get_mut(&r).expect("round exists when a commit exists");
         if s == SIDE_A {
             round.revealed_a += amount;
@@ -733,35 +957,71 @@ impl Contract {
             round.shares_b += shares;
         }
         round.revealed_fees += fee;
+        round.bounties += bounty;
         emit(
             "reveal",
-            json!({"account_id": who, "round": U64(r), "side": side, "amount": U128(amount),
-                   "streak_if_win": streak_if_win, "shares": U128(shares), "by": env::predecessor_account_id()}),
+            json!({"account_id": who, "slot": slot, "round": U64(r), "side": side, "amount": U128(amount),
+                   "streak_if_win": streak_if_win, "shares": U128(shares), "by": revealer, "bounty": U128(bounty)}),
         );
+        true
     }
 
-    /// Settle a round after its reveal window. Anyone can call; idempotent.
+    /// Settle every finished round that is waiting, oldest first (at most SETTLE_PER_CALL).
+    /// Anyone can call it; every commit and reveal calls it too.
+    pub fn settle_due(&mut self) -> u32 {
+        let now = env::block_timestamp();
+        let mut n = 0u32;
+        while let Some(&r) = self.unsettled.first() {
+            if now < self.round_reveal_end(r) || n >= SETTLE_PER_CALL {
+                break;
+            }
+            self.settle_one(r);
+            self.unsettled.remove(0);
+            n += 1;
+        }
+        n
+    }
+
+    /// Settle a finished round (and the waiting rounds before it, in order). Idempotent.
     pub fn settle(&mut self, round: U64) {
         self.internal_settle(round.0);
     }
 
     fn internal_settle(&mut self, r: u64) {
         require!(env::block_timestamp() >= self.round_reveal_end(r), "round is still open");
+        if self.rounds.get(&r).map(|x| x.settled).unwrap_or(true) {
+            return;
+        }
+        // rounds settle strictly in order: the pot carries over from one to the next
+        let mut n = 0u32;
+        while let Some(&q) = self.unsettled.first() {
+            if q > r {
+                break;
+            }
+            require!(n < SETTLE_CATCH_UP, "too many rounds waiting to settle: call settle_due first");
+            self.settle_one(q);
+            self.unsettled.remove(0);
+            n += 1;
+        }
+        self.settle_one(r);
+    }
+
+    fn settle_one(&mut self, r: u64) {
         let Some(round) = self.rounds.get_mut(&r) else { return };
         if round.settled {
             return;
         }
         let (a, b) = (round.revealed_a, round.revealed_b);
         let (outcome, obligations, win_shares) = if a == 0 || b == 0 || a == b {
-            (OUTCOME_VOID, a + b + round.revealed_fees, 0)
+            // void: revealed bets get their stake and fee back, minus the reveal rewards paid
+            (OUTCOME_VOID, a + b + round.revealed_fees - round.bounties, 0)
         } else if a < b {
             (SIDE_A, 2 * a, round.shares_a)
         } else {
             (SIDE_B, 2 * b, round.shares_b)
         };
-        // stakes + fees >= revealed stakes + revealed fees >= obligations
-        // (the winning side's stake is at most the losing side's).
-        let to_treasury = round.committed + round.fees - obligations;
+        // escrow for the round = stakes + fees - reveal rewards >= obligations
+        let to_treasury = round.committed + round.fees - round.bounties - obligations;
         let emission = self.params.reward_per_round.0.min(self.params.max_supply.0 - self.issued);
         self.issued += emission;
         self.pot += emission;
@@ -770,8 +1030,13 @@ impl Contract {
         round.to_treasury = to_treasury;
         round.emission = emission;
         if win_shares > 0 && self.pot > 0 {
+            // mined now: it joins the unrefined total right away (and collects refining fees
+            // from here on), whenever each winner books its share
             round.reward = self.pot;
             round.reward_shares = win_shares;
+            round.reward_index = self.refine_index;
+            self.mined += self.pot;
+            self.unrefined_total += self.pot;
             self.pot = 0;
         }
         let (reward, committed) = (round.reward, round.committed);
@@ -791,88 +1056,100 @@ impl Contract {
         );
     }
 
-    /// Pay out every settle-able open round of `account_id` (default: caller), oldest first:
-    /// NEAR to the game balance, mined BEFEWER to the wallet. Anyone can call it for anyone:
-    /// payouts only ever go to the committing account. Returns the number of rounds claimed.
-    pub fn claim(&mut self, account_id: Option<AccountId>) -> u32 {
+    /// Book the finished bets of `account_id`'s slot `slot` (default: caller, slot 0): NEAR
+    /// payouts and the bets' storage go to the game balance, mined BEFEWER to its unrefined
+    /// balance (with the refined BEFEWER it collected since it was mined). Anyone can call it
+    /// for anyone: everything only ever goes to that account. Returns the number of bets booked.
+    pub fn claim(&mut self, account_id: Option<AccountId>, slot: Option<u32>) -> u32 {
         let who = account_id.unwrap_or_else(env::predecessor_account_id);
-        self.internal_claim(&who)
+        self.settle_due();
+        self.internal_book(&who, slot.unwrap_or(0))
     }
 
-    fn internal_claim(&mut self, who: &AccountId) -> u32 {
-        let Some(mut player) = self.players.get(who).cloned() else { return 0 };
+    fn internal_book(&mut self, who: &AccountId, slot: u32) -> u32 {
+        let Some(mut s) = self.slots.get(&(who.clone(), slot)).cloned() else { return 0 };
+        let mut p = self.players.get(who).cloned().unwrap_or_default();
         let now = env::block_timestamp();
         let mut done = 0u32;
-        while let Some(&r) = player.open_rounds.first() {
+        while let Some(&r) = s.open_rounds.first() {
             if now < self.round_reveal_end(r) {
-                break; // rounds are ascending: nothing later is claimable either
+                break; // rounds are ascending: nothing later is finished either
             }
             self.internal_settle(r);
-            let c = self.commits.remove(&(r, who.clone())).expect("open round has a commit");
+            let c = self.commits.remove(&(r, who.clone(), slot)).expect("open round has a commit");
             let round = self.rounds.get(&r).cloned().expect("open round exists");
             let mut mined = 0u128;
             let (result, payout) = if c.side == SIDE_NONE {
-                player.forfeits += 1;
-                player.streak = 0;
+                s.forfeits += 1;
+                s.streak = 0;
                 ("forfeit", 0)
             } else if round.outcome == OUTCOME_VOID {
-                player.voids += 1;
-                ("void", c.amount + c.fee)
+                s.voids += 1;
+                ("void", c.amount + c.fee - c.bounty)
             } else if c.side == round.outcome {
-                player.wins += 1;
-                player.streak += 1;
-                player.best_streak = player.best_streak.max(player.streak);
+                s.wins += 1;
+                s.streak += 1;
+                s.best_streak = s.best_streak.max(s.streak);
                 if c.shares > 0 && round.reward > 0 {
                     mined = mul_div(round.reward, c.shares, round.reward_shares);
                 }
                 ("win", 2 * c.amount)
             } else {
-                player.losses += 1;
-                player.streak = 0;
+                s.losses += 1;
+                s.streak = 0;
                 ("loss", 0)
             };
-            if payout > 0 {
-                self.escrow -= payout;
-                *self.balances.entry(who.clone()).or_insert(0) += payout;
-                self.balances_total += payout;
-            }
+            self.escrow -= payout;
+            self.storage_held -= c.storage;
+            *self.balances.entry(who.clone()).or_insert(0) += payout + c.storage;
+            self.balances_total += payout + c.storage;
             if mined > 0 {
-                // mined BEFEWER stays in the game as unrefined until the player claims it
-                self.checkpoint(&mut player);
-                player.unrefined += mined;
-                self.unrefined_total += mined;
-                self.mined += mined;
-                player.mined += mined;
+                // already in unrefined_total since the round settled: book it to the account,
+                // with the refined BEFEWER its share collected since then
+                self.checkpoint(&mut p);
+                p.unrefined += mined;
+                let since = self.refine_index - round.reward_index;
+                if since > 0 {
+                    p.refined += (U256::from(mined) * U256::from(since) / U256::from(REFINE_SCALE)).as_u128();
+                }
+                p.mined += mined;
             }
-            if player.streak > self.best_streak {
-                self.best_streak = player.streak;
+            if s.streak > self.best_streak {
+                self.best_streak = s.streak;
                 self.best_streak_holder = Some(who.clone());
             }
-            let fully_claimed = match self.rounds.get_mut(&r) {
-                Some(round) => {
-                    round.claims += 1;
-                    round.claims == round.commits
+            let rr = self.rounds.get_mut(&r).expect("exists");
+            rr.claims += 1;
+            rr.reward_booked += mined;
+            if rr.claims == rr.commits {
+                // everyone booked: the rounding remainder of the split goes back to the pot
+                let dust = rr.reward - rr.reward_booked;
+                if dust > 0 {
+                    rr.reward_booked = rr.reward;
+                    self.unrefined_total -= dust;
+                    self.pot += dust;
+                    self.dust_to_pot += dust;
                 }
-                None => false,
-            };
-            if fully_claimed {
                 self.round_players.remove(&r);
             }
             emit(
                 "claim",
-                json!({"account_id": who, "round": U64(r), "result": result, "payout": U128(payout),
-                       "mined": U128(mined), "streak": player.streak}),
+                json!({"account_id": who, "slot": slot, "round": U64(r), "result": result, "payout": U128(payout),
+                       "storage": U128(c.storage), "mined": U128(mined), "streak": s.streak}),
             );
-            player.open_rounds.remove(0);
+            s.open_rounds.remove(0);
             done += 1;
         }
-        self.players.insert(who.clone(), player);
+        self.slots.insert((who.clone(), slot), s);
+        if self.players.contains_key(who) || done > 0 {
+            self.players.insert(who.clone(), p);
+        }
         done
     }
 
     // ---------- refining ----------
 
-    /// Book the player's share of refining fees charged since its last checkpoint.
+    /// Book the account's share of refining fees charged since its last checkpoint.
     fn checkpoint(&self, p: &mut Player) {
         if p.unrefined > 0 && self.refine_index > p.refine_index {
             let gain = U256::from(p.unrefined) * U256::from(self.refine_index - p.refine_index) / U256::from(REFINE_SCALE);
@@ -881,7 +1158,7 @@ impl Contract {
         p.refine_index = self.refine_index;
     }
 
-    /// Refined BEFEWER a player could claim right now (booked + not yet booked).
+    /// Refined BEFEWER an account could claim right now from its booked unrefined balance.
     fn refined_now(&self, p: &Player) -> u128 {
         let mut q = p.clone();
         self.checkpoint(&mut q);
@@ -891,10 +1168,14 @@ impl Contract {
     /// Claim the caller's mined BEFEWER to its wallet: `bps` (default 10000 = all) of the
     /// unrefined balance minus the refining fee, plus all refined BEFEWER (no fee). The fee is
     /// shared pro rata among everyone still holding unrefined BEFEWER (the caller too, for what
-    /// it keeps); if nobody holds any, it goes back to the mining pot. Returns the amount minted.
-    pub fn claim_befewer(&mut self, bps: Option<u16>) -> U128 {
+    /// it keeps); if nobody holds any, it goes back to the mining pot. `book` lists slots to
+    /// book first (default: slot 0). Returns the amount minted.
+    pub fn claim_befewer(&mut self, bps: Option<u16>, book: Option<Vec<u32>>) -> U128 {
         let who = env::predecessor_account_id();
-        self.internal_claim(&who); // credit wins from rounds that already finished
+        self.settle_due();
+        for s in book.unwrap_or_else(|| vec![0]) {
+            self.internal_book(&who, s);
+        }
         let mut p = self.players.get(&who).cloned().unwrap_or_default();
         let bps = bps.unwrap_or(10_000) as u128;
         require!(bps >= 1 && bps <= 10_000, "bps must be 1..10000");
@@ -1177,7 +1458,11 @@ impl Contract {
             graduate_at: self.params.graduate_at,
             balances_total: U128(self.balances_total),
             escrow: U128(self.escrow),
+            storage_held: U128(self.storage_held),
             storage_fees: U128(self.storage_fees),
+            bounties_paid: U128(self.bounties_paid),
+            reveal_bounty_bps: self.params.reveal_bounty_bps,
+            unsettled: self.unsettled.len() as u32,
             total_supply: U128(self.token.total_supply),
             max_supply: self.params.max_supply,
             issued: U128(self.issued),
@@ -1186,6 +1471,7 @@ impl Contract {
             refine_fee_bps: self.params.refine_fee_bps,
             refine_fees: U128(self.refine_fees),
             refine_to_pot: U128(self.refine_to_pot),
+            dust_to_pot: U128(self.dust_to_pot),
             claimed: U128(self.claimed),
             pot: U128(self.pot),
             total_burned: U128(self.total_burned),
@@ -1224,6 +1510,7 @@ impl Contract {
             reveal_ends_at: U64(self.round_reveal_end(r)),
             committed: U128(x.committed),
             fees: U128(x.fees),
+            bounties: U128(x.bounties),
             revealed_a: U128(x.revealed_a),
             revealed_b: U128(x.revealed_b),
             shares_a: U128(x.shares_a),
@@ -1238,6 +1525,7 @@ impl Contract {
             emission: U128(x.emission),
             reward: U128(x.reward),
             reward_shares: U128(x.reward_shares),
+            reward_booked: U128(x.reward_booked),
         }
     }
 
@@ -1263,9 +1551,10 @@ impl Contract {
         list.iter()
             .skip(from_index as usize)
             .take(limit.min(100) as usize)
-            .filter_map(|a| {
-                self.commits.get(&(round.0, a.clone())).map(|c| RoundCommitView {
+            .filter_map(|(a, s)| {
+                self.commits.get(&(round.0, a.clone(), *s)).map(|c| RoundCommitView {
                     account_id: a.clone(),
+                    slot: *s,
                     amount: U128(c.amount),
                     side: side_str(c.side),
                     hash: c.hash.iter().map(|b| format!("{:02x}", b)).collect(),
@@ -1275,37 +1564,113 @@ impl Contract {
             .collect()
     }
 
-    pub fn get_player(&self, account_id: AccountId) -> PlayerView {
-        let p = self.players.get(&account_id).cloned().unwrap_or_default();
-        let open = p
+    /// A bet as the views show it, with its result once the round is settled.
+    fn commit_view(&self, who: &AccountId, slot: u32, r: u64) -> Option<(OpenCommitView, u128)> {
+        let c = self.commits.get(&(r, who.clone(), slot))?;
+        let round = self.rounds.get(&r);
+        let (mut result, mut payout, mut mined, mut since) = (None, 0u128, 0u128, 0u128);
+        if let Some(x) = round.filter(|x| x.settled) {
+            let (res, pay) = if c.side == SIDE_NONE {
+                ("forfeit", 0)
+            } else if x.outcome == OUTCOME_VOID {
+                ("void", c.amount + c.fee - c.bounty)
+            } else if c.side == x.outcome {
+                ("win", 2 * c.amount)
+            } else {
+                ("loss", 0)
+            };
+            if res == "win" && c.shares > 0 && x.reward > 0 {
+                mined = mul_div(x.reward, c.shares, x.reward_shares);
+                since = self.refine_index - x.reward_index;
+            }
+            result = Some(res.to_string());
+            payout = pay + c.storage;
+        }
+        let refined = if mined > 0 && since > 0 { (U256::from(mined) * U256::from(since) / U256::from(REFINE_SCALE)).as_u128() } else { 0 };
+        Some((
+            OpenCommitView {
+                round: U64(r),
+                amount: U128(c.amount),
+                fee: U128(c.fee),
+                bounty: U128(c.bounty),
+                storage: U128(c.storage),
+                side: side_str(c.side),
+                streak_if_win: c.streak_if_win,
+                shares: U128(c.shares),
+                result,
+                payout: U128(payout),
+                mined: U128(mined),
+            },
+            refined,
+        ))
+    }
+
+    fn slot_view(&self, who: &AccountId, slot: u32) -> Option<(SlotView, u128, u128, u128)> {
+        let s = self.slots.get(&(who.clone(), slot))?;
+        let (mut near, mut mined, mut refined) = (0u128, 0u128, 0u128);
+        let open = s
             .open_rounds
             .iter()
-            .filter_map(|r| {
-                self.commits.get(&(*r, account_id.clone())).map(|c| OpenCommitView {
-                    round: U64(*r),
-                    amount: U128(c.amount),
-                    fee: U128(c.fee),
-                    side: side_str(c.side),
-                    streak_if_win: c.streak_if_win,
-                    shares: U128(c.shares),
-                })
+            .filter_map(|r| self.commit_view(who, slot, *r))
+            .map(|(o, rf)| {
+                near += o.payout.0;
+                mined += o.mined.0;
+                refined += rf;
+                o
             })
             .collect();
+        Some((
+            SlotView { slot, streak: s.streak, best_streak: s.best_streak, wins: s.wins, losses: s.losses, voids: s.voids, forfeits: s.forfeits, open },
+            near,
+            mined,
+            refined,
+        ))
+    }
+
+    /// Slots `from`.. of an account (up to `limit`, at most 50), skipping closed ones.
+    pub fn get_slots(&self, account_id: AccountId, from: u32, limit: u32) -> Vec<SlotView> {
+        let n = self.players.get(&account_id).map(|p| p.slots).unwrap_or(0);
+        (from..n).filter_map(|i| self.slot_view(&account_id, i).map(|x| x.0)).take(limit.min(50) as usize).collect()
+    }
+
+    pub fn get_player(&self, account_id: AccountId) -> PlayerView {
+        let p = self.players.get(&account_id).cloned().unwrap_or_default();
+        let (mut near, mut mined, mut refined) = (0u128, 0u128, 0u128);
+        let mut slots = vec![];
+        for i in 0..p.slots {
+            if slots.len() >= 32 {
+                break;
+            }
+            if let Some((v, n, m, rf)) = self.slot_view(&account_id, i) {
+                near += n;
+                mined += m;
+                refined += rf;
+                slots.push(v);
+            }
+        }
+        let main = slots.iter().find(|s| s.slot == 0);
+        let (streak, best_streak, wins, losses, voids, forfeits) =
+            main.map(|s| (s.streak, s.best_streak, s.wins, s.losses, s.voids, s.forfeits)).unwrap_or_default();
+        let open = self.slot_view(&account_id, 0).map(|x| x.0.open).unwrap_or_default();
         PlayerView {
             balance: U128(self.balances.get(&account_id).copied().unwrap_or(0)),
             tokens: U128(self.token.accounts.get(&account_id).unwrap_or(0)),
             registered: self.balances.contains_key(&account_id),
-            account_id,
-            streak: p.streak,
-            best_streak: p.best_streak,
-            wins: p.wins,
-            losses: p.losses,
-            voids: p.voids,
-            forfeits: p.forfeits,
-            mined: U128(p.mined),
-            unrefined: U128(p.unrefined),
-            refined: U128(self.refined_now(&p)),
+            streak,
+            best_streak,
+            wins,
+            losses,
+            voids,
+            forfeits,
             open,
+            slot_count: p.slots,
+            slots,
+            pending_near: U128(near),
+            pending_mined: U128(mined),
+            mined: U128(p.mined),
+            unrefined: U128(p.unrefined + mined),
+            refined: U128(self.refined_now(&p) + refined),
+            account_id,
         }
     }
 }

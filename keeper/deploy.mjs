@@ -1,4 +1,4 @@
-// Deploy BEFEWER (v5) to <prefix>.befewer.testnet (fresh sub-account) and initialise it in one transaction.
+// Deploy BEFEWER (v6) to <prefix>.befewer.testnet (fresh sub-account) and initialise it in one transaction.
 // usage: node deploy.mjs <prefix> [--graduate-at 5] [--buyback-every-min 10] [--commit-sec 180] [--reveal-sec 90] [--near 7]
 import fs from 'node:fs'
 import crypto from 'node:crypto'
@@ -40,6 +40,7 @@ const params = {
   buyback_max: near(0.5).toString(),
   buyback_every_ns: (BigInt(opt('buyback-every-min', 10)) * MIN).toString(),
   refine_fee_bps: 1000,
+  reveal_bounty_bps: 8000,
 }
 const args = {
   params,

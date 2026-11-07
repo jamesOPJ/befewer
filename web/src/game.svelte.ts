@@ -1,15 +1,15 @@
 // App-wide reactive state: chain data (polled), the player's session, bets, results, autopilot.
 import {
   ONE, CHIP, NEAR, view, fmt, fmtN, toNear, toYocto, nsToMs, randomSalt, commitHash, seal, loadSession, saveSession, loadGuestBackup, saveGuestBackup, newKeyPair,
-  loadPicks, savePick, callContract, type Status, type Params, type RoundV, type PlayerV, type Session,
+  loadPicks, savePick, pickKey, storageFor, callContract, type Status, type Params, type RoundV, type PlayerV, type Session,
 } from './chain'
 import * as H from './history'
 import { label } from './questions'
-import { decide, guard, normalizeRule, stakeFor, meFrom, PRESETS, type Rule, type Lookup } from './rules'
+import { decide, guard, normalizeRule, stakeFor, meFrom, PRESETS, SLOT_SETS, type Rule, type Lookup } from './rules'
 import * as W from './wallet'
 
 export type Side = 'A' | 'B'
-export type Result = { round: number; side: Side; amount: bigint; fee: bigint; outcome: 'A' | 'B' | 'void' }
+export type Result = { round: number; slot: number; side: Side; amount: bigint; fee: bigint; outcome: 'A' | 'B' | 'void' }
 export type Toast = { id: number; kind: 'ok' | 'err' | 'info'; text: string }
 export type ApLog = { at: number; round: number; text: string; kind: 'bet' | 'skip' | 'err' }
 
@@ -31,7 +31,26 @@ function loadRules(): { live: Rule[]; draft: Rule[] } {
   const draft = readRules(DRAFT_KEY) ?? structuredClone(live)
   return { live, draft }
 }
-const initialRules = loadRules()
+
+/** A lane runs one rule set on one slot of the account (lane 0 = slot 0, the manual one).
+ *  `slot` is null until the slot is opened on chain; `owner` is the account it belongs to. */
+export type Lane = { name: string; slot: number | null; owner: string | null; live: Rule[]; draft: Rule[] }
+const LANES_KEY = 'befewer.ap.lanes'
+function loadLanes(): Lane[] {
+  try {
+    const saved = JSON.parse(localStorage.getItem(LANES_KEY) || 'null')
+    if (Array.isArray(saved) && saved.length)
+      return saved.map((l: any, i: number) => ({ name: String(l.name ?? `Slot ${i}`), slot: i === 0 ? 0 : l.slot ?? null, owner: l.owner ?? null,
+        live: (l.live ?? []).map(normalizeRule), draft: (l.draft ?? l.live ?? []).map(normalizeRule) }))
+  } catch {}
+  const r = loadRules() // the single rule set from before slots existed becomes lane 0
+  return [{ name: 'Main', slot: 0, owner: null, live: r.live, draft: r.draft }]
+}
+const BUDGET_KEY = 'befewer.ap.budget'
+function loadBudget(): { on: boolean; near: number } {
+  try { const b = JSON.parse(localStorage.getItem(BUDGET_KEY) || 'null'); if (b && typeof b.near === 'number') return { on: !!b.on, near: b.near } } catch {}
+  return { on: true, near: 0.8 }
+}
 
 export const NPCS = [
   { id: 'npc-coin.befewer.testnet', name: 'Coin', about: 'Flips a coin every round, and claims mined BEFEWER right away (paying the 10%).' },
@@ -51,11 +70,12 @@ export const game = $state({
   me: null as PlayerV | null,
   rounds: [] as RoundV[], // newest first
   history: 0, // bumps whenever the round history changes, so derived views recompute
-  results: [] as Result[],
+  results: [] as Result[], // slot 0's settled bets, newest first
+  resultsBySlot: {} as Record<number, Result[]>,
   npcs: {} as Record<string, PlayerV>,
   busy: '', // what an in-flight bet is doing right now
   toasts: [] as Toast[],
-  ap: { live: initialRules.live, draft: initialRules.draft, on: localStorage.getItem('befewer.ap.on') === '1', log: [] as ApLog[] },
+  ap: { lanes: loadLanes(), sel: 0, on: localStorage.getItem('befewer.ap.on') === '1', log: [] as ApLog[], budget: loadBudget() },
   /** wallet login dialog: pick a wallet -> approve key + deposit -> done */
   wallet: { open: false, step: 'pick' as 'pick' | 'connecting' | 'setup' | 'approving', accountId: null as string | null, error: '' },
 })
@@ -113,9 +133,11 @@ export async function refresh(full = false) {
     if (game.session) {
       const before = game.me
       game.me = await view<PlayerV>('get_player', { account_id: game.session.accountId })
-      if (before && BigInt(game.me.mined) > BigInt(before.mined))
-        toast('ok', `You mined ${fmt(BigInt(game.me.mined) - BigInt(before.mined))} BEFEWER with a ${game.me.streak}-win streak. It stays unrefined in the game until you claim it on the Me page.`, 9000)
+      const minedNow = (p: PlayerV) => BigInt(p.mined) + BigInt(p.pending_mined)
+      if (before && minedNow(game.me) > minedNow(before))
+        toast('ok', `You mined ${fmt(minedNow(game.me) - minedNow(before))} BEFEWER with a 3+ win streak. It stays unrefined in the game until you claim it on the Me page.`, 9000)
       await loadResults()
+      selfReveal()
     }
     game.ready = true
     game.error = ''
@@ -127,27 +149,58 @@ export async function refresh(full = false) {
   }
 }
 
+/** Settled bets of every slot, from this browser's picks and the rounds' outcomes (booked or not). */
 async function loadResults() {
   if (!game.session || !game.me) return
   const pk = loadPicks(game.session.accountId)
-  const open = new Set(game.me.open.map(o => o.round))
-  const ids = Object.keys(pk).filter(r => !open.has(r)).sort((a, b) => Number(b) - Number(a)).slice(0, 40)
-  const out: Result[] = []
-  for (const id of ids) {
-    let rv = H.round(Number(id))
+  const entries = Object.keys(pk).map(k => {
+    const [a, b] = k.includes(':') ? k.split(':') : ['0', k]
+    return { key: k, slot: Number(a), round: Number(b) }
+  }).sort((x, y) => y.round - x.round)
+  const now = commitRound()
+  const by: Record<number, Result[]> = {}
+  for (const e of entries) {
+    if ((by[e.slot]?.length ?? 0) >= 40 || e.round >= now) continue
+    let rv = H.round(e.round)
     if (!rv?.settled) {
-      rv = await view<RoundV>('get_round', { round: id })
+      rv = await view<RoundV>('get_round', { round: String(e.round) })
       H.remember([rv])
     }
     if (!rv.settled || !rv.outcome) continue
-    const amount = BigInt(pk[id].amount)
-    const fee = pk[id].fee != null ? BigInt(pk[id].fee!) : (amount * BigInt(game.params?.fee_bps ?? 0)) / 10000n
-    out.push({ round: Number(id), side: pk[id].side, amount, fee, outcome: rv.outcome })
+    const pick = pk[e.key]
+    const amount = BigInt(pick.amount)
+    const fee = pick.fee != null ? BigInt(pick.fee!) : (amount * BigInt(game.params?.fee_bps ?? 0)) / 10000n
+    ;(by[e.slot] ??= []).push({ round: e.round, slot: e.slot, side: pick.side, amount, fee, outcome: rv.outcome })
   }
+  const out = by[0] ?? []
   const newest = out[0]
   const prevNewest = game.results[0]
   if (newest && prevNewest && newest.round !== prevNewest.round) announce(newest)
   game.results = out
+  game.resultsBySlot = by
+}
+
+/** Reveal my own sealed bets as soon as the reveal opens: the reveal reward (most of the fee)
+ *  comes back to me instead of going to a keeper. The keeper reveals whatever I miss. */
+const selfRevealed = new Set<string>()
+async function selfReveal() {
+  const r = revealRound()
+  if (r == null || !game.session || !game.me || game.busy) return
+  const pk = loadPicks(game.session.accountId)
+  const items = []
+  for (const s of game.me.slots) {
+    const o = s.open.find(x => Number(x.round) === r && !x.side)
+    const p = o && pk[pickKey(s.slot, r)]
+    if (!p || selfRevealed.has(`${s.slot}:${r}`)) continue
+    selfRevealed.add(`${s.slot}:${r}`)
+    items.push({ round: String(r), slot: s.slot, account_id: game.session.accountId, side: p.side, salt: p.salt })
+  }
+  if (!items.length) return
+  try {
+    await callContract(game.session, 'reveal_many', { items }, 300)
+  } catch (e) {
+    console.warn('self reveal failed (the keeper will reveal):', e)
+  }
 }
 
 function announce(x: Result) {
@@ -269,13 +322,15 @@ export function claimPreview(p: PlayerV) {
   const fee = (u * BigInt(game.params?.refine_fee_bps ?? 0)) / 10000n
   return { out: u - fee + BigInt(p.refined), fee }
 }
+/** Slots with settled bets that still need booking (booked first by withdraw/claim). */
+const toBook = (p: PlayerV) => [0, ...p.slots.filter(s => s.slot !== 0 && s.open.some(o => o.result)).map(s => s.slot)].slice(0, 20)
 /** Claim all mined BEFEWER (unrefined minus the fee, plus refined) to this browser's wallet. */
 export async function claimBefewer() {
   if (!game.session || !game.me) return
   try {
     game.busy = 'Claiming your BEFEWER'
     const { out, fee } = claimPreview(game.me)
-    await callContract(game.session, 'claim_befewer', {}, 50)
+    await callContract(game.session, 'claim_befewer', { book: toBook(game.me) }, 300)
     toast('ok', `${fmt(out)} BEFEWER are in your wallet. ${fmt(fee)} went to everyone still holding unrefined BEFEWER.`)
   } finally {
     game.busy = ''
@@ -286,11 +341,11 @@ export async function claimBefewer() {
 /** Move NEAR from the game balance back to this browser's testnet wallet. */
 export async function withdrawAll() {
   if (!game.session || !game.me) return
-  const amount = BigInt(game.me.balance)
+  const amount = BigInt(game.me.balance) + BigInt(game.me.pending_near)
   if (amount === 0n) throw new Error('Nothing to withdraw.')
   try {
     game.busy = 'Sending NEAR to your wallet'
-    await callContract(game.session, 'withdraw', {}, 30)
+    await callContract(game.session, 'withdraw', { book: toBook(game.me) }, 300)
     toast('ok', `${fmtN(amount)} NEAR moved to your wallet ${short(game.session.accountId)}.`)
   } finally {
     game.busy = ''
@@ -302,18 +357,22 @@ export function capFor(balance: bigint) {
   return (balance * BigInt(game.params!.max_stake_bps)) / 10000n
 }
 
-/** Seal a side with drand and commit it to the round taking bets right now. `want` is NEAR in yocto. */
-export async function placeBet(side: Side, want: bigint, by: 'you' | 'autopilot' = 'you') {
+/** Seal a side with drand and commit it from `slot` to the round taking bets right now.
+ *  `want` is NEAR in yocto. The bet also holds a little NEAR for its storage (returned later). */
+export async function placeBet(side: Side, want: bigint, by: 'you' | 'autopilot' = 'you', slot = 0) {
   try {
     await ensurePlayer()
-    const bal = BigInt(game.me!.balance)
+    // winnings of this slot that are settled but not booked yet are booked by this very bet
+    const pend = game.me!.slots.find(s => s.slot === slot)?.open.reduce((t, o) => t + BigInt(o.payout), 0n) ?? 0n
+    const bal = BigInt(game.me!.balance) + pend
     const cap = capFor(bal)
     let amount = want > cap ? cap : want
     const min = BigInt(game.params!.min_stake)
     if (amount < min) amount = min
     if (amount > cap) throw new Error(`Your game balance is too small: the most you can bet is 25% of it, and the smallest bet is ${fmtN(min)} NEAR.`)
     const fee = feeFor(amount)
-    if (amount + fee > bal) throw new Error('Not enough NEAR for the stake plus the fee.')
+    const storage = storageFor(game.session!.accountId, 700)
+    if (amount + fee + storage > bal) throw new Error(`Not enough NEAR for the stake, the fee and about ${fmtN(storage)} NEAR held for the bet's storage (returned later).`)
     const st = await view<Status>('get_status')
     game.status = st
     const r = Number(st.commit_round)
@@ -321,11 +380,11 @@ export async function placeBet(side: Side, want: bigint, by: 'you' | 'autopilot'
     if (revealStart - (Date.now() + game.skew) < 8000) throw new Error('This round is closing. Wait a few seconds for the next one.')
     game.busy = 'Sealing your answer with drand'
     const salt = randomSalt()
-    const hash = await commitHash(game.session!.accountId, r, side, salt)
+    const hash = await commitHash(game.session!.accountId, slot, r, side, salt)
     const { sealed, drandRound } = await seal(side, salt, revealStart)
-    savePick(game.session!.accountId, r, { side, salt, amount: amount.toString(), fee: fee.toString(), drandRound })
+    savePick(game.session!.accountId, r, { side, salt, amount: amount.toString(), fee: fee.toString(), drandRound }, slot)
     game.busy = 'Sending the sealed bet'
-    await callContract(game.session!, 'commit', { round: String(r), amount: amount.toString(), hash, sealed })
+    await callContract(game.session!, 'commit', { round: String(r), slot, amount: amount.toString(), hash, sealed }, 100)
     if (by === 'you') toast('ok', `Sealed: ${fmtN(amount)} NEAR on ${label(r, side)} (+${fmtN(fee)} fee). It opens itself at the reveal.`)
     return { round: r, amount }
   } finally {
@@ -334,7 +393,23 @@ export async function placeBet(side: Side, want: bigint, by: 'you' | 'autopilot'
   }
 }
 
+/** Close an extra slot whose bets are all finished: its 0.002 NEAR storage comes back. */
+export async function closeSlot(slot: number) {
+  if (!game.session) return
+  try {
+    game.busy = `Closing slot ${slot}`
+    await callContract(game.session, 'close_slot', { slot }, 100)
+    for (const l of game.ap.lanes) if (l.slot === slot && l.owner === game.session.accountId) { l.slot = null; l.owner = null }
+    saveRules()
+    toast('ok', `Slot ${slot} closed; its 0.002 NEAR is back in your balance.`)
+  } finally {
+    game.busy = ''
+    await refresh(true)
+  }
+}
+
 export function forgetDevice() {
+  game.resultsBySlot = {}
   saveSession(null)
   game.session = null
   game.me = null
@@ -342,20 +417,47 @@ export function forgetDevice() {
 }
 
 // ---------- autopilot ----------
-const apDone = new Set<number>()
+// Lanes: each runs its own rule set on its own slot. Each has `live` (what runs) and `draft`
+// (what you edit and replay); editing never touches the running rules until "Put live".
+const apDone = new Set<string>()
+export const lane = () => game.ap.lanes[game.ap.sel] ?? game.ap.lanes[0]
 export function saveRules() {
-  localStorage.setItem(LIVE_KEY, JSON.stringify(game.ap.live))
-  localStorage.setItem(DRAFT_KEY, JSON.stringify(game.ap.draft))
+  localStorage.setItem(LANES_KEY, JSON.stringify($state.snapshot(game.ap.lanes)))
+  localStorage.setItem(BUDGET_KEY, JSON.stringify($state.snapshot(game.ap.budget)))
 }
-export const draftDirty = () => JSON.stringify(game.ap.draft) !== JSON.stringify(game.ap.live)
-/** Replace the running rules with the draft. Takes effect from the next decision. */
+export const draftDirty = () => JSON.stringify(lane().draft) !== JSON.stringify(lane().live)
+/** Replace the selected lane's running rules with its draft. Takes effect from the next decision. */
 export function putDraftLive() {
-  game.ap.live = structuredClone($state.snapshot(game.ap.draft) as Rule[])
+  lane().live = structuredClone($state.snapshot(lane().draft) as Rule[])
   saveRules()
 }
 /** Throw away the draft: back to a copy of the running rules. */
 export function discardDraft() {
-  game.ap.draft = structuredClone($state.snapshot(game.ap.live) as Rule[])
+  lane().draft = structuredClone($state.snapshot(lane().live) as Rule[])
+  saveRules()
+}
+/** Add a lane (its slot is opened on chain when it first bets: 0.002 NEAR, refunded on close). */
+export function addLane(name = `Slot ${game.ap.lanes.length}`, rules: Rule[] = []) {
+  game.ap.lanes.push({ name, slot: null, owner: null, live: structuredClone(rules), draft: structuredClone(rules) })
+  game.ap.sel = game.ap.lanes.length - 1
+  saveRules()
+}
+/** Stop using a lane (not lane 0). Its slot stays in the account; close it on the Me page. */
+export function removeLane(i: number) {
+  if (i === 0) return
+  game.ap.lanes.splice(i, 1)
+  game.ap.sel = Math.min(game.ap.sel, game.ap.lanes.length - 1)
+  saveRules()
+}
+/** Load a multi-slot strategy: lane 0 takes the first slot's rules, more lanes for the rest. */
+export function useSlotSet(i: number) {
+  const set = SLOT_SETS[i]
+  const keep = game.ap.lanes.slice(1).filter(l => l.slot != null && l.owner === game.session?.accountId)
+  game.ap.lanes = set.slots.map((x, k) => {
+    const old = k === 0 ? game.ap.lanes[0] : keep[k - 1]
+    return { name: x.name, slot: k === 0 ? 0 : old?.slot ?? null, owner: k === 0 ? null : old?.owner ?? null, live: structuredClone(x.rules), draft: structuredClone(x.rules) }
+  })
+  game.ap.sel = 0
   saveRules()
 }
 export function setAutopilot(on: boolean) {
@@ -364,39 +466,75 @@ export function setAutopilot(on: boolean) {
   if (on) autopilotTick()
 }
 function apLog(round: number, kind: ApLog['kind'], text: string) {
-  game.ap.log = [{ at: Date.now(), round, kind, text }, ...game.ap.log].slice(0, 30)
+  game.ap.log = [{ at: Date.now(), round, kind, text }, ...game.ap.log].slice(0, 40)
+}
+const localDay = (ms: number) => new Date(ms).toLocaleDateString('en-CA')
+/** Today's result of every slot's settled bets (stake and fee; the reveal reward I may get back is ignored). */
+export function todayNet(): bigint {
+  if (!game.params) return 0n
+  const today = localDay(Date.now())
+  const g = nsToMs(game.params.genesis_ns), c = nsToMs(game.params.commit_ns), rv = nsToMs(game.params.reveal_ns)
+  let net = 0n
+  for (const list of Object.values(game.resultsBySlot))
+    for (const x of list) if (localDay(g + (x.round + 1) * c + rv) === today) net += netOf(x)
+  return net
+}
+export const budgetLeft = () => toYocto(game.ap.budget.near) + todayNet()
+
+/** The slot a lane bets from; opens it on chain the first time. */
+async function laneSlot(l: Lane): Promise<number> {
+  if (l === game.ap.lanes[0]) return 0
+  if (l.slot != null && l.owner === game.session!.accountId && game.me?.slots.some(s => s.slot === l.slot)) return l.slot
+  game.busy = 'Opening a slot for this lane'
+  const res: any = await callContract(game.session!, 'open_slot', {}, 30)
+  const id = JSON.parse(atob(res.status.SuccessValue))
+  l.slot = Number(id)
+  l.owner = game.session!.accountId
+  saveRules()
+  game.busy = ''
+  return l.slot
 }
 
-/** Each poll: if the autopilot is on and this round is still open, decide once and bet. */
+/** Each poll: if the autopilot is on and this round is still open, every lane decides once. */
 export async function autopilotTick() {
   if (!game.ap.on || game.busy || !started()) return
   const r = commitRound()
-  if (apDone.has(r)) return
-  if (myOpen(r)) { apDone.add(r); return }
   if (msLeft(game.status!.commit_ends_at) < 25_000) return
   // "the round before" must mean the same thing as in the backtest: wait until it has finished
   const prev = H.round(r - 1)
   if (prev && !prev.settled) return
-  // "my last bet" must include my bet in the round before, so wait until it has been paid out
-  if (myOpen(r - 1)) return
-  apDone.add(r)
-  const me = meFrom(game.results.map(x => ({ side: x.side, outcome: x.outcome })))
-  const d = decide($state.snapshot(game.ap.live) as Rule[], r, guard(lookup, r), me)
-  if ('skip' in d) {
-    apLog(r, 'skip', d.rule == null ? 'No rule fit, so it skipped.' : `Rule ${d.rule + 1} says skip.`)
+  if (game.ap.budget.on && budgetLeft() <= 0n) {
+    if (!apDone.has(`budget:${r}`)) { apDone.add(`budget:${r}`); apLog(r, 'skip', `Daily budget of ${game.ap.budget.near} NEAR used up: paused until tomorrow.`) }
     return
   }
-  try {
-    if (!game.me) await ensurePlayer()
-    // the autopilot counts in chips of 0.01 NEAR (the smallest bet)
-    const bal = Number(BigInt(game.me!.balance) / CHIP)
-    const chips = stakeFor(d.unit, d.amount, bal, me)
-    if (chips < 1) { apLog(r, 'skip', 'Balance too small to bet (the cap is 25% of it).'); return }
-    const want = BigInt(chips) * CHIP
-    const placed = await placeBet(d.side, want, 'autopilot')
-    apLog(placed.round, 'bet', `Rule ${d.rule + 1}: ${fmtN(placed.amount)} NEAR on ${label(placed.round, d.side)} (${d.side}).`)
-  } catch (e: any) {
-    apLog(r, 'err', String(e.message || e))
+  for (let i = 0; i < game.ap.lanes.length; i++) {
+    const l = game.ap.lanes[i]
+    const key = `${i}:${r}`
+    if (apDone.has(key) || !l.live.length) continue
+    apDone.add(key)
+    const tag = game.ap.lanes.length > 1 ? `${l.name}: ` : ''
+    try {
+      if (!game.me) await ensurePlayer()
+      const slot = await laneSlot(l)
+      if (game.me!.slots.find(s => s.slot === slot)?.open.some(o => Number(o.round) === r)) continue
+      const mine = (game.resultsBySlot[slot] ?? []).map(x => ({ side: x.side, outcome: x.outcome, round: x.round }))
+      const me = meFrom(mine)
+      const d = decide($state.snapshot(l.live) as Rule[], r, guard(lookup, r), me)
+      if ('skip' in d) {
+        apLog(r, 'skip', tag + (d.rule == null ? 'No rule fit, so it skipped.' : `Rule ${d.rule + 1} says skip.`))
+        continue
+      }
+      // the autopilot counts in chips of 0.01 NEAR (the smallest bet)
+      const bal = Number(BigInt(game.me!.balance) / CHIP)
+      const chips = stakeFor(d.unit, d.amount, bal, me)
+      if (chips < 1) { apLog(r, 'skip', tag + 'Balance too small to bet (the cap is 25% of it).'); continue }
+      const placed = await placeBet(d.side, BigInt(chips) * CHIP, 'autopilot', slot)
+      apLog(placed.round, 'bet', `${tag}Rule ${d.rule + 1}: ${fmtN(placed.amount)} NEAR on ${label(placed.round, d.side)} (${d.side}).`)
+    } catch (e: any) {
+      apLog(r, 'err', tag + String(e.message || e))
+    } finally {
+      game.busy = ''
+    }
   }
 }
 
