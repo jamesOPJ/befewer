@@ -63,7 +63,7 @@
         </div>
       {/if}
       <div class="wallet small">
-        <span><b class="num">{game.walletNear == null ? '…' : fmtN(BigInt(game.walletNear))}</b> NEAR in your wallet <span class="faint">(outside the game{game.session.kind === 'guest' ? '; 0.05 of it pays for gas' : ''})</span></span>
+        <span><b class="num">{game.walletNear == null ? '…' : fmtN(BigInt(game.walletNear))}</b> NEAR in your wallet <span class="faint">(outside the game{game.session.kind === 'guest' ? '; up to 0.1 of it pays for gas' : ''})</span></span>
         {#if movable() > 0n}<button class="btn small primary" onclick={moveBack} disabled={!!game.busy}>Move {fmtN(movable())} NEAR into the game</button>{/if}
       </div>
       {#if confirmWd}

@@ -20,6 +20,30 @@ export const provider = new FailoverRpcProvider([
   new JsonRpcProvider({ url: 'https://near-testnet.drpc.org' }), // rpc.testnet.near.org is deprecated
   new JsonRpcProvider({ url: 'https://testnet-rpc.intea.rs' }),
 ])
+// The stock failover tries every server and then only says "Exceeded 3 providers", which hid
+// "your wallet cannot pay the gas up front" from players. Same loop, but it keeps the reason.
+;(provider as any).withBackoff = async function (this: any, getResult: (p: any) => Promise<any>) {
+  let last: any
+  for (let i = 0; i < this.providers.length; i++) {
+    try {
+      const r = await getResult(this.currentProvider)
+      if (typeof r === 'undefined') continue
+      return r
+    } catch (e) {
+      last = e
+      this.switchToNextProvider()
+    }
+  }
+  throw new Error(plainRpcError(last))
+}
+/** An RPC error in words a player can act on. */
+export function plainRpcError(e: any): string {
+  const m = String(e?.message ?? e ?? '')
+  if (/does not have enough balance|NotEnoughBalance|LackBalanceForState/i.test(m))
+    return 'Your wallet does not hold enough NEAR to pay this transaction\'s network fee (gas) up front.'
+  if (/NotEnoughAllowance/i.test(m)) return 'This browser\'s key has used up its gas allowance: connect your wallet again.'
+  return `NEAR testnet did not answer (all 3 RPC servers failed${m ? `: ${m.slice(0, 120)}` : ''}).`
+}
 
 export async function view<T = any>(method: string, args: Record<string, unknown> = {}): Promise<T> {
   return (await provider.callFunction({ contractId: CONTRACT, method, args, finality: 'optimistic' } as any)) as T
@@ -54,7 +78,12 @@ export interface RoundV {
   commits: number; reveals_a: number; reveals_b: number
   claims: number; settled: boolean; outcome: 'A' | 'B' | 'void' | null
   to_treasury: string; emission: string; reward: string; reward_shares: string
+  /** bets that mined this round and the accounts they came from; 0 when nothing was mined, or
+   *  (with reward > 0) when the round was played before the contract recorded it (Nov 7) */
+  miners?: number; mining_players?: number
 }
+/** One bet that mined in a round (get_round_miners). */
+export interface MinerV { account_id: string; slot: number; streak: number; shares: string; mined: string }
 export interface PlayerV {
   account_id: string; balance: string; tokens: string; registered: boolean; streak: number; best_streak: number
   wins: number; losses: number; voids: number; forfeits: number; mined: string
@@ -159,9 +188,66 @@ export const storageFor = (accountId: string, sealedLen: number) => BigInt(2 * a
  *  all its prepaid gas at 1e9 yocto per gas (100 Tgas needs 0.1 NEAR up front; unused gas is
  *  refunded). So guests never attach more than this. */
 export const GUEST_MAX_TGAS = 40
+/** What NEAR asks the wallet to cover up front per Tgas of prepaid gas (1e12 gas x 1e9 yocto). */
+const UPFRONT_PER_TGAS = 10n ** 21n
+/** Moved from the game balance to a guest wallet when its gas money runs low. */
+export const GAS_TOPUP = 5n * 10n ** 22n // 0.05 NEAR
+const WITHDRAW_TGAS = 20
+let onTopUp: ((amount: bigint) => void) | null = null
+export const setOnTopUp = (f: (amount: bigint) => void) => { onTopUp = f }
+const near4 = (y: bigint) => (Number(y / 10n ** 20n) / 1e4).toFixed(4)
+
+/** NEAR in a wallet that can pay for things (its storage has to stay). */
+async function walletFree(accountId: string): Promise<bigint> {
+  const a: any = await (provider as any).query({ request_type: 'view_account', finality: 'optimistic', account_id: accountId })
+  return BigInt(a.amount) - BigInt(a.storage_usage) * 10n ** 19n
+}
+
+/** Guest wallets pay their own gas. Before a call the wallet could not cover up front, 0.05 NEAR
+ *  of the game balance moves into it (a small withdraw, which needs 0.02 NEAR up front itself). */
+let gasLock: Promise<unknown> = Promise.resolve()
+function topUpGas(s: Session, gasT: number, deposit: bigint): Promise<void> {
+  // one check at a time: a reveal and a bet sent together must not both move NEAR
+  const run = gasLock.then(() => topUpOnce(s, gasT, deposit))
+  gasLock = run.catch(() => {})
+  return run
+}
+async function topUpOnce(s: Session, gasT: number, deposit: bigint) {
+  const free = await walletFree(s.accountId)
+  const need = BigInt(gasT) * UPFRONT_PER_TGAS + deposit + 5n * 10n ** 21n // + 0.005 margin
+  if (free >= need) return
+  if (free < BigInt(WITHDRAW_TGAS) * UPFRONT_PER_TGAS)
+    throw new Error(`Your wallet holds ${near4(free)} NEAR, too little for the network fee (gas) of this transaction or of moving NEAR out of the game.`)
+  const p: any = await view('get_player', { account_id: s.accountId })
+  const amount = BigInt(p.balance) < GAS_TOPUP ? BigInt(p.balance) : GAS_TOPUP
+  if (amount <= 0n) throw new Error(`Your wallet holds ${near4(free)} NEAR, too little for this transaction's network fee (gas), and the game balance is empty.`)
+  const res: any = await send(s, 'withdraw', { amount: amount.toString(), book: [] }, WITHDRAW_TGAS, 0n)
+  if (res?.status?.Failure) throw new Error(`Your wallet is low on NEAR for network fees, and moving ${near4(amount)} NEAR from the game to it failed.`)
+  onTopUp?.(amount)
+  // the next transaction needs the NEAR in the wallet as seen by the RPC server it goes to
+  for (let i = 0; i < 12 && (await walletFree(s.accountId).catch(() => 0n)) < need; i++) await sleep(1000)
+}
+const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
+
+/** Send one call; a nonce clash (the RPC server had not seen this key's previous transaction yet)
+ *  means the transaction was refused, so it is signed again with a fresh nonce. */
+async function send(s: Session, methodName: string, args: Record<string, unknown>, gasT: number, deposit: bigint): Promise<any> {
+  for (let i = 0; ; i++) {
+    try {
+      return await accountFor(s).callFunctionRaw({ contractId: CONTRACT, methodName, args, gas: BigInt(gasT) * 10n ** 12n, deposit })
+    } catch (e: any) {
+      if (i >= 2 || !/invalid nonce|InvalidNonce/i.test(String(e?.message ?? e))) throw e
+      await sleep(1500)
+    }
+  }
+}
+
 export async function callContract(s: Session, methodName: string, args: Record<string, unknown>, gasT = 30, deposit = 0n) {
-  if (s.kind === 'guest') gasT = Math.min(gasT, GUEST_MAX_TGAS)
-  const res: any = await accountFor(s).callFunctionRaw({ contractId: CONTRACT, methodName, args, gas: BigInt(gasT) * 10n ** 12n, deposit })
+  if (s.kind === 'guest') {
+    gasT = Math.min(gasT, GUEST_MAX_TGAS)
+    if (methodName !== 'withdraw' && methodName !== 'deposit') await topUpGas(s, gasT, deposit)
+  }
+  const res: any = await send(s, methodName, args, gasT, deposit)
   const fail = res?.status?.Failure || res?.receipts_outcome?.find((r: any) => r.outcome.status?.Failure)?.outcome.status.Failure
   if (fail) {
     const msg = JSON.stringify(fail)

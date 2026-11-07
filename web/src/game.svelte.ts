@@ -1,7 +1,7 @@
 // App-wide reactive state: chain data (polled), the player's session, bets, results, autopilot.
 import {
   ONE, CHIP, NEAR, view, fmt, fmtN, toNear, toYocto, nsToMs, randomSalt, commitHash, seal, loadSession, saveSession, loadGuestBackup, saveGuestBackup, newKeyPair,
-  loadPicks, savePick, pickKey, storageFor, callContract, provider, type Status, type Params, type RoundV, type PlayerV, type Session,
+  loadPicks, savePick, pickKey, storageFor, callContract, setOnTopUp, provider, type Status, type Params, type RoundV, type PlayerV, type Session,
 } from './chain'
 import * as H from './history'
 import { label } from './questions'
@@ -401,7 +401,9 @@ export async function claimBefewer() {
 
 /** NEAR left in the wallet for gas when moving NEAR into the game (a guest's calls need up to
  *  0.04 NEAR of prepaid gas up front). */
-export const WALLET_RESERVE = toYocto(0.05)
+/** NEAR that stays in a guest wallet when moving NEAR back into the game: it pays the gas.
+ *  (Below about 0.045 the page moves 0.05 from the game balance to the wallet by itself.) */
+export const WALLET_RESERVE = toYocto(0.1)
 /** NEAR in the wallet that can go back into the game (0 if less than 0.01). */
 export function movable(): bigint {
   const w = BigInt(game.walletNear ?? '0') - WALLET_RESERVE
@@ -411,7 +413,7 @@ export function movable(): bigint {
 export async function moveToGame() {
   if (!game.session) return
   const amount = movable()
-  if (amount === 0n) throw new Error('Not enough NEAR in the wallet (it keeps 0.05 for gas).')
+  if (amount === 0n) throw new Error('Not enough NEAR in the wallet (it keeps 0.1 for gas).')
   try {
     game.busy = game.session.kind === 'wallet' ? 'Waiting for the wallet' : 'Moving NEAR into the game'
     if (game.session.kind === 'wallet') await W.depositFromWallet(amount)
@@ -437,6 +439,16 @@ export async function withdrawAll() {
     game.busy = ''
     await refresh(true)
   }
+}
+
+/** The smallest game balance that can still bet: a bet is at most max_stake_bps of the balance
+ *  (25%: so 0.04 NEAR for the 0.01 minimum), and it must cover the stake, fee and storage. */
+export function minToBet(): bigint {
+  if (!game.params) return 0n
+  const min = BigInt(game.params.min_stake), bps = BigInt(game.params.max_stake_bps)
+  const byCap = (min * 10000n + bps - 1n) / bps
+  const direct = min + feeFor(min) + storageFor(game.session?.accountId ?? '', 700)
+  return byCap > direct ? byCap : direct
 }
 
 export function capFor(balance: bigint) {
@@ -692,6 +704,7 @@ let startedLoops = false
 export function start() {
   if (startedLoops) return
   startedLoops = true
+  setOnTopUp(a => toast('info', `Moved ${fmtN(a)} NEAR from your game balance to your wallet: every transaction pays a small network fee (gas) from the wallet.`, 7000))
   refresh(true).then(() => loadNpcs())
   // coming back from a redirect wallet: finish the key it just added, or reopen the next step
   if (W.hasPending()) waitForPending(90_000)

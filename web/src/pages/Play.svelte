@@ -212,7 +212,7 @@
         <Orbs round={lastSettled} />
         <p class="fine center">
           {#if lastSettled.outcome === 'void'}Everyone was on one side, so everyone got their bet back.
-          {:else}<span class="gold"><Icon name="flame" size={14} /> {fmtN(lastSettled.to_treasury)} NEAR to the treasury</span> · bets on the smaller side won +100%{#if BigInt(lastSettled.reward) > 0n} · <b class="good">{fmt(lastSettled.reward)} BEFEWER mined</b> by streak winners{/if}.{/if}
+          {:else}<span class="gold"><Icon name="flame" size={14} /> {fmtN(lastSettled.to_treasury)} NEAR to the treasury</span> · bets on the smaller side won +100%{#if BigInt(lastSettled.reward) > 0n} · <a class="good" href="#/rounds"><b>{fmt(lastSettled.reward)} BEFEWER mined</b></a> by {lastSettled.miners ? `${lastSettled.mining_players} streak winner${lastSettled.mining_players === 1 ? '' : 's'}` : 'streak winners'}{/if}.{/if}
         </p>
       </section>
     {/if}

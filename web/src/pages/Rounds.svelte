@@ -4,10 +4,10 @@
   import { questionFor, label } from '../questions'
   import Icon from '../lib/Icon.svelte'
   import Orbs from '../lib/Orbs.svelte'
-  import { game, fmt, fmtN, commitRound, picks, slotName } from '../game.svelte'
-  import type { RoundV } from '../chain'
+  import { game, fmt, fmtN, commitRound, picks, slotName, short } from '../game.svelte'
+  import { view, type RoundV, type MinerV } from '../chain'
 
-  let filter = $state<'all' | 'mine'>('all')
+  let filter = $state<'all' | 'mine' | 'mined'>('all')
   let open = $state<number | null>(null)
   let show = $state(30)
 
@@ -32,17 +32,25 @@
     for (const l of Object.values(by)) l.sort((a, b) => a.slot - b.slot)
     return by
   })
-  const list = $derived(filter === 'mine' ? all.filter(x => mine[x.round]) : all)
+  const mined = (x: RoundV) => BigInt(x.reward) > 0n
+  const list = $derived(filter === 'mine' ? all.filter(x => mine[x.round]) : filter === 'mined' ? all.filter(mined) : all)
   const settled = $derived(all.filter(x => x.settled))
   const sum = $derived.by(() => {
-    const s = { A: 0, B: 0, void: 0, treasury: 0n, mined: 0n }
+    const s = { A: 0, B: 0, void: 0, treasury: 0n, mined: 0n, minedRounds: 0, last: null as number | null }
     for (const x of settled) {
       if (x.outcome === 'A' || x.outcome === 'B' || x.outcome === 'void') s[x.outcome]++
       s.treasury += BigInt(x.to_treasury)
-      s.mined += BigInt(x.reward)
+      if (mined(x)) { s.mined += BigInt(x.reward); s.minedRounds++; s.last ??= Number(x.round) }
     }
     return s
   })
+  // who mined a round: loaded when its row opens
+  const minersCache = new Map<number, Promise<MinerV[]>>()
+  const minersOf = (n: number) => {
+    if (!minersCache.has(n)) minersCache.set(n, view<MinerV[]>('get_round_miners', { round: String(n) }).catch(e => { minersCache.delete(n); throw e }))
+    return minersCache.get(n)!
+  }
+  const people = (n: number) => `${n} ${n === 1 ? 'player' : 'players'}`
   const pct = (x: RoundV) => {
     const a = Number(BigInt(x.revealed_a) / 10n ** 18n), b = Number(BigInt(x.revealed_b) / 10n ** 18n)
     return a + b > 0 ? Math.round((a / (a + b)) * 100) : null
@@ -61,18 +69,23 @@
   <div class="card tile"><div class="eyebrow">Settled</div><div class="big num">{settled.length}</div><div class="faint">rounds with bets</div></div>
   <div class="card tile"><div class="eyebrow">A smaller</div><div class="big num"><span class="dot A"></span>{sum.A}</div><div class="faint">{settled.length ? Math.round((sum.A / settled.length) * 100) : 0}% of rounds</div></div>
   <div class="card tile"><div class="eyebrow">B smaller</div><div class="big num"><span class="dot B"></span>{sum.B}</div><div class="faint">{settled.length ? Math.round((sum.B / settled.length) * 100) : 0}% of rounds</div></div>
-  <div class="card tile"><div class="eyebrow">To the treasury</div><div class="big num gold">{fmtN(sum.treasury, 2)}</div><div class="faint">NEAR · {fmt(sum.mined)} BEFEWER mined · {sum.void} void</div></div>
+  <div class="card tile"><div class="eyebrow">To the treasury</div><div class="big num gold">{fmtN(sum.treasury, 2)}</div><div class="faint">NEAR · {sum.void} void</div></div>
+  <button class="card tile mtile" onclick={() => (filter = 'mined')} aria-label="Show the rounds that mined BEFEWER">
+    <div class="eyebrow">BEFEWER mined</div><div class="big num"><Icon name="spark" size={20} />{fmt(sum.mined)}</div>
+    <div class="faint">{sum.minedRounds ? `in ${sum.minedRounds} round${sum.minedRounds === 1 ? '' : 's'} · last #${sum.last}` : 'nobody has won 3 in a row yet'}</div>
+  </button>
 </section>
 
 <div class="seg" role="tablist" aria-label="Filter rounds">
   <button role="tab" aria-selected={filter === 'all'} class:on={filter === 'all'} onclick={() => (filter = 'all')}>All rounds</button>
   <button role="tab" aria-selected={filter === 'mine'} class:on={filter === 'mine'} onclick={() => (filter = 'mine')}>With my bets</button>
+  <button role="tab" aria-selected={filter === 'mined'} class:on={filter === 'mined'} onclick={() => (filter = 'mined')}>Mined</button>
 </div>
 
 {#if !list.length}
   <div class="card empty">
     <Icon name="rounds" size={28} />
-    <p>{filter === 'mine' ? 'You have not bet in any round yet.' : 'No rounds with bets yet.'}</p>
+    <p>{filter === 'mine' ? 'You have not bet in any round yet.' : filter === 'mined' ? 'No round has mined BEFEWER yet: a bet mines when it wins 3 rounds in a row.' : 'No rounds with bets yet.'}</p>
     {#if filter === 'mine'}<a class="btn primary" href="#/">Play this round</a>{/if}
   </div>
 {:else}
@@ -100,6 +113,7 @@
             {#if st !== 'settled'}<span class="pill">{st === 'betting' ? 'Live' : 'Opening'}</span>
             {:else if x.outcome === 'void'}<span class="pill">Void</span>
             {:else}<span class="win side-{x.outcome}">{label(n, x.outcome!)} won</span><span class="gold small num"><Icon name="flame" size={13} /> {fmtN(x.to_treasury, 3)}</span>{/if}
+            {#if mined(x)}<span class="mchip num"><Icon name="spark" size={12} /> {fmt(x.reward)} BEFEWER{x.miners ? ` · ${people(x.mining_players ?? 0)}` : ''}</span>{/if}
             {#if my}<span class="mine-tag">you: {my.length > 1 ? my.map(b => b.side).join(' + ') : label(n, my[0].side)}</span>{/if}
           </span>
         </button>
@@ -110,9 +124,28 @@
               <div><dt>Bets</dt><dd class="num">{x.commits} ({x.reveals_a} on A, {x.reveals_b} on B{x.commits - x.reveals_a - x.reveals_b > 0 && x.settled ? `, ${x.commits - x.reveals_a - x.reveals_b} never opened` : ''})</dd></div>
               <div><dt>Staked</dt><dd class="num">{fmtN(x.committed)} NEAR <span class="faint">+ {fmtN(x.fees)} fees</span></dd></div>
               {#if x.settled}<div><dt>To the treasury</dt><dd class="num gold">{fmtN(x.to_treasury)} NEAR</dd></div>
-                <div><dt>Mined</dt><dd class="num">{BigInt(x.reward) > 0n ? `${fmt(x.reward)} BEFEWER to streak winners` : `none (pot rolls over: +${fmt(x.emission)})`}</dd></div>{/if}
+                <div><dt>Mined</dt><dd class="num">{#if !mined(x)}none (pot rolls over: +{fmt(x.emission)})
+                  {:else if x.miners}{fmt(x.reward)} BEFEWER, split by {x.miners} winning streak bet{x.miners === 1 ? '' : 's'} from {people(x.mining_players ?? 0)}
+                  {:else}{fmt(x.reward)} BEFEWER to streak winners <span class="faint">(who shared it is not known: the contract started keeping that list on Nov 7, after this round)</span>{/if}</dd></div>{/if}
               {#if my}<div><dt>Your bet{my.length > 1 ? 's' : ''}</dt><dd class="num">{#each my as b, k}{k ? ' · ' : ''}{my.length > 1 ? `${slotName(b.slot)}: ` : ''}{fmtN(b.amount)} NEAR on {label(n, b.side)}{/each}</dd></div>{/if}
             </dl>
+            {#if x.settled && mined(x) && x.miners}
+              <div class="miners">
+                <div class="eyebrow">Who mined</div>
+                {#await minersOf(n)}<div class="faint">Loading…</div>
+                {:then ms}
+                  {#each ms as m}
+                    <div class="mrow" class:me={m.account_id === game.session?.accountId}>
+                      <span class="who">{m.account_id === game.session?.accountId ? 'You' : short(m.account_id)}{m.slot ? ` · slot ${m.slot}` : ''}</span>
+                      <span class="faint">{m.streak} wins in a row</span>
+                      <span class="num">{fmt(m.mined)} BEFEWER</span>
+                    </div>
+                  {/each}
+                  {#if (x.miners ?? 0) > ms.length}<div class="faint">and {(x.miners ?? 0) - ms.length} more</div>{/if}
+                {:catch}<div class="faint">Could not load the list. Open the round again to retry.</div>
+                {/await}
+              </div>
+            {/if}
             {#if H.sameQuestion(n, 4).length}
               <div class="same">
                 <div class="eyebrow">Same question, earlier</div>
@@ -135,7 +168,15 @@
   .ph h1 { font-size: 30px; font-weight: 800 }
   .ph p { margin: 4px 0 0 }
   .summary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-bottom: 18px }
-  @media (min-width: 860px) { .summary { grid-template-columns: repeat(4, minmax(0, 1fr)) } }
+  .mtile { grid-column: 1 / -1; text-align: left; color: var(--fg); font: inherit; cursor: pointer }
+  .mtile .big { color: var(--brand) }
+  @media (min-width: 860px) { .summary { grid-template-columns: repeat(5, minmax(0, 1fr)) } .mtile { grid-column: auto } }
+  .mchip { font-size: 11.5px; font-weight: 700; color: var(--brand); display: inline-flex; align-items: center; gap: 3px; overflow-wrap: anywhere }
+  .miners { margin-top: 14px; display: grid; gap: 6px; font-size: 14px }
+  .mrow { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 12px; align-items: baseline }
+  .mrow .who { overflow-wrap: anywhere }
+  .mrow.me .who { color: var(--brand); font-weight: 700 }
+  @media (max-width: 520px) { .mrow { grid-template-columns: minmax(0, 1fr) auto } .mrow .faint { display: none } }
   .tile { padding: 14px 16px }
   .big { font-size: 26px; font-weight: 800; margin: 4px 0 2px; display: flex; align-items: center; gap: 8px }
   .tile .faint { font-size: 13px }
