@@ -15,7 +15,7 @@
 import fs from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import tlock from 'tlock-js'
-import { createOpener, orderForOpening } from './opener.mjs'
+import { createOpener, orderForOpening, stillSealed } from './opener.mjs'
 import { actions } from 'near-api-js'
 import { loadAccount, hasKey, newKeyFor, view, call, provider, newSalt, commitHash, NEAR, fmt, fmtN, sleep, log } from './lib.mjs'
 
@@ -28,6 +28,7 @@ const drand = mainnetClient() // drand quicknet (3 s rounds), the chain tlock us
 const drandInfo = await drand.chain().info()
 const opener = createOpener(4) // opens timelocks on worker threads (see opener.mjs)
 const junk = new Set() // "round:account:slot" of timelocks that opened to something not matching their commitment
+const jitters = {} // round -> extra random wait before this keeper reveals (see revealTick)
 
 const coin = () => (Math.random() < 0.5 ? 'A' : 'B')
 const other = s => (s === 'A' ? 'B' : 'A')
@@ -198,7 +199,13 @@ async function revealTick(st) {
   const revealEnds = Number(BigInt(st.reveal_ends_at) / 1_000_000n)
   const windowMs = Number(BigInt((await params()).reveal_ns) / 1_000_000n)
   const revealStarts = revealEnds - windowMs
-  if (Number(BigInt(st.now) / 1_000_000n) < revealStarts + Math.min(SELF_REVEAL_GRACE_MS, windowMs / 3)) return
+  // players' pages reveal their own bets first; then keepers, each a few random seconds apart so
+  // the later one sees (for free) what the earlier one revealed instead of paying to lose a race
+  // (a transaction takes 2-3 s to land: spread over a third of the window, two keepers rarely overlap)
+  const jitter = (jitters[r] ??= Math.random() * (windowMs / 3))
+  const wait = revealStarts + Math.min(SELF_REVEAL_GRACE_MS, windowMs / 3) + jitter - Number(BigInt(st.now) / 1_000_000n)
+  if (wait > 3000) return // the loop comes back every 3 s in a reveal window
+  if (wait > 0) await sleep(wait)
   // timelocks already found not to open to their commitment are not opened again every tick
   for (const k of junk) if (Number(k.split(':')[0]) < r - 2) junk.delete(k)
   const pending = (await allCommits(r)).filter(c => !c.side && !junk.has(`${r}:${c.account_id}:${c.slot}`))
@@ -236,6 +243,11 @@ async function revealTick(st) {
 /** reveal_many in chunks; each call reveals as many as its gas allows and says how far it got. */
 async function sendReveals(r, items) {
   while (items.length) {
+    // free check right before paying gas: skip bets someone else revealed in the meantime
+    const { keep, dropped } = stillSealed(items, await allCommits(r))
+    items.splice(0, items.length, ...keep)
+    if (dropped) log('keeper', `round ${r}: ${dropped} already revealed by someone else, not sent`)
+    if (!items.length) break
     const chunk = items.splice(0, 60)
     const res = await loadAccount(KEEPER).callFunctionRaw({ contractId: CONTRACT, methodName: 'reveal_many', args: { items: chunk }, gas: 300_000_000_000_000n })
     noteGas('reveal', res, chunk.length)
@@ -243,10 +255,11 @@ async function sendReveals(r, items) {
     let done = chunk.length
     try { done = JSON.parse(Buffer.from(res.status.SuccessValue, 'base64').toString()) } catch {}
     if (done < chunk.length) items.unshift(...chunk.slice(done))
-    // processed is not revealed: count what is actually open on chain now
-    const after = await allCommits(r)
-    const opened = chunk.slice(0, done).filter(x => after.find(c => c.account_id === x.account_id && c.slot === x.slot)?.side).length
-    log('keeper', f ? `reveal_many FAILED ${f}` : `revealed ${opened} of ${chunk.length} in one call` + (opened < done ? ` (${done - opened} could not be revealed)` : ''))
+    // count the bets THIS keeper revealed (and so earned the reward for): the reveal events say who
+    const mine = (res.receipts_outcome || []).flatMap(o => o.outcome.logs)
+      .filter(l => l.includes('"event":"reveal"')).map(l => { try { return JSON.parse(l.replace(/^EVENT_JSON:/, '')).data[0] } catch { return null } })
+      .filter(d => d && d.by === KEEPER).length
+    log('keeper', f ? `reveal_many FAILED ${f}` : `revealed ${mine} of ${chunk.length} in one call` + (mine < done ? ` (${done - mine} already revealed by someone else or not revealable)` : ''))
     if (f || done === 0) break
   }
 }

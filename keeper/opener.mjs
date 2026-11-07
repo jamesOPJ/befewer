@@ -58,3 +58,12 @@ export function createOpener(workers = 4) {
     close: () => Promise.all(pool.map(w => w.terminate())),
   }
 }
+
+/** Of the reveal items, the ones whose bet is still sealed on chain (`commits`: a fresh
+ *  get_round_commits read, which costs no gas). The rest were revealed by someone else since:
+ *  sending them would only pay a transaction for nothing. */
+export function stillSealed(items, commits) {
+  const open = new Set(commits.filter(c => !c.side).map(c => `${c.account_id}:${c.slot}`))
+  const keep = items.filter(x => open.has(`${x.account_id}:${x.slot}`))
+  return { keep, dropped: items.length - keep.length }
+}
