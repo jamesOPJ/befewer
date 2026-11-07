@@ -51,6 +51,9 @@
     return minersCache.get(n)!
   }
   const people = (n: number) => `${n} ${n === 1 ? 'player' : 'players'}`
+  const need = () => game.params?.streak_min ?? 3
+  const SHARE_UNIT = 10n ** 21n // 0.001 NEAR: one share per streak step
+  const pctOf = (a: bigint, t: bigint) => (t > 0n ? `${((Number(a) / Number(t)) * 100).toFixed(1)}%` : '—')
   const pct = (x: RoundV) => {
     const a = Number(BigInt(x.revealed_a) / 10n ** 18n), b = Number(BigInt(x.revealed_b) / 10n ** 18n)
     return a + b > 0 ? Math.round((a / (a + b)) * 100) : null
@@ -125,23 +128,38 @@
               <div><dt>Staked</dt><dd class="num">{fmtN(x.committed)} NEAR <span class="faint">+ {fmtN(x.fees)} fees</span></dd></div>
               {#if x.settled}<div><dt>To the treasury</dt><dd class="num gold">{fmtN(x.to_treasury)} NEAR</dd></div>
                 <div><dt>Mined</dt><dd class="num">{#if !mined(x)}none (pot rolls over: +{fmt(x.emission)})
-                  {:else if x.miners}{fmt(x.reward)} BEFEWER, split by {x.miners} winning streak bet{x.miners === 1 ? '' : 's'} from {people(x.mining_players ?? 0)}
+                  {:else if x.miners}{fmt(x.reward)} BEFEWER, split by shares among {x.miners} streak bet{x.miners === 1 ? '' : 's'} ({people(x.mining_players ?? 0)})
                   {:else}{fmt(x.reward)} BEFEWER to streak winners <span class="faint">(who shared it is not known: the contract started keeping that list on Nov 7, after this round)</span>{/if}</dd></div>{/if}
               {#if my}<div><dt>Your bet{my.length > 1 ? 's' : ''}</dt><dd class="num">{#each my as b, k}{k ? ' · ' : ''}{my.length > 1 ? `${slotName(b.slot)}: ` : ''}{fmtN(b.amount)} NEAR on {label(n, b.side)}{/each}</dd></div>{/if}
             </dl>
             {#if x.settled && mined(x) && x.miners}
               <div class="miners">
-                <div class="eyebrow">Who mined</div>
+                <div class="eyebrow">Who mined · split by shares</div>
+                <p class="faint how">A bet's shares = its stake in 0.001 NEAR × (wins in a row − {need() - 1}). Each bet gets the round's BEFEWER × its shares ÷ all shares, so a bigger stake or a longer streak gets more.</p>
                 {#await minersOf(n)}<div class="faint">Loading…</div>
                 {:then ms}
-                  {#each ms as m}
-                    <div class="mrow" class:me={m.account_id === game.session?.accountId}>
-                      <span class="who">{m.account_id === game.session?.accountId ? 'You' : short(m.account_id)}{m.slot ? ` · slot ${m.slot}` : ''}</span>
-                      <span class="faint">{m.streak} wins in a row</span>
-                      <span class="num">{fmt(m.mined)} BEFEWER</span>
-                    </div>
-                  {/each}
-                  {#if (x.miners ?? 0) > ms.length}<div class="faint">and {(x.miners ?? 0) - ms.length} more</div>{/if}
+                  {@const total = BigInt(x.reward_shares)}
+                  {@const paid = ms.reduce((t, m) => t + BigInt(m.mined), 0n)}
+                  <table class="mtab">
+                    <thead><tr><th>Bet</th><th class="r">Shares</th><th class="r">Share</th><th class="r">BEFEWER</th></tr></thead>
+                    <tbody>
+                      {#each ms as m}
+                        {@const mult = m.streak - need() + 1}
+                        <tr class:me={m.account_id === game.session?.accountId}>
+                          <td><span class="who">{m.account_id === game.session?.accountId ? 'You' : short(m.account_id)}{m.slot ? ` · slot ${m.slot}` : ''}</span>
+                            <span class="faint sub">{fmtN((BigInt(m.shares) / BigInt(mult)) * SHARE_UNIT)} NEAR · {m.streak} in a row (×{mult})</span></td>
+                          <td class="r num">{m.shares}</td>
+                          <td class="r num">{pctOf(BigInt(m.shares), total)}</td>
+                          <td class="r num">{fmt(m.mined)}</td>
+                        </tr>
+                      {/each}
+                    </tbody>
+                    {#if ms.length === x.miners && ms.length > 1}
+                      <tfoot><tr><td>All</td><td class="r num">{total}</td><td class="r num">100%</td><td class="r num">{fmt(paid)}</td></tr></tfoot>
+                    {/if}
+                  </table>
+                  {#if (x.miners ?? 0) > ms.length}<div class="faint">and {(x.miners ?? 0) - ms.length} more bets</div>
+                  {:else if paid < BigInt(x.reward) && fmt(BigInt(x.reward) - paid) !== '0'}<div class="faint small-note">The {fmt(BigInt(x.reward) - paid)} left over from rounding down goes back to the pot.</div>{/if}
                 {:catch}<div class="faint">Could not load the list. Open the round again to retry.</div>
                 {/await}
               </div>
@@ -173,10 +191,16 @@
   @media (min-width: 860px) { .summary { grid-template-columns: repeat(5, minmax(0, 1fr)) } .mtile { grid-column: auto } }
   .mchip { font-size: 11.5px; font-weight: 700; color: var(--brand); display: inline-flex; align-items: center; gap: 3px; overflow-wrap: anywhere }
   .miners { margin-top: 14px; display: grid; gap: 6px; font-size: 14px }
-  .mrow { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 12px; align-items: baseline }
-  .mrow .who { overflow-wrap: anywhere }
-  .mrow.me .who { color: var(--brand); font-weight: 700 }
-  @media (max-width: 520px) { .mrow { grid-template-columns: minmax(0, 1fr) auto } .mrow .faint { display: none } }
+  .how { margin: 0; font-size: 13px; line-height: 1.45 }
+  .mtab { width: 100%; border-collapse: collapse; font-size: 14px }
+  .mtab th { font-size: 11.5px; color: var(--fg-3); font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; text-align: left; padding: 4px 6px 4px 0 }
+  .mtab td { padding: 6px 6px 6px 0; vertical-align: top; border-top: 1px solid var(--line-soft) }
+  .mtab tfoot td { font-weight: 700 }
+  .mtab .r { text-align: right; white-space: nowrap }
+  .mtab .who { display: block; overflow-wrap: anywhere }
+  .mtab .sub { display: block; font-size: 12px }
+  .mtab tr.me .who { color: var(--brand); font-weight: 700 }
+  .small-note { font-size: 12.5px }
   .tile { padding: 14px 16px }
   .big { font-size: 26px; font-weight: 800; margin: 4px 0 2px; display: flex; align-items: center; gap: 8px }
   .tile .faint { font-size: 13px }

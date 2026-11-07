@@ -20,12 +20,26 @@ const sleep = ms => new Promise(r => setTimeout(r, ms))
   const rows = await p.$$eval('.list .row', rs => rs.map(r => r.querySelector('.no').innerText + ' ' + (r.querySelector('.mchip')?.innerText ?? '(no chip)')))
   console.log(`mined filter: ${rows.length} rounds:`, rows.slice(0, 6).join(' | '))
   if (!rows.length || rows.some(r => /no chip/.test(r))) { console.error('E2E FAILED: every listed round must carry its mined chip'); process.exitCode = 1 }
-  // open the newest mined round with a recorded list, else the newest one
-  const pick = await p.$$eval('.list .row', rs => { const i = rs.findIndex(r => /player/.test(r.querySelector('.mchip')?.innerText ?? '')); return i >= 0 ? i : 0 })
+  // open the newest round split between several players, else one with a recorded list
+  const pick = await p.$$eval('.list .row', rs => {
+    const c = rs.map(r => r.querySelector('.mchip')?.innerText ?? '')
+    const i = c.findIndex(t => /[2-9]\d* players/.test(t)); return i >= 0 ? i : Math.max(0, c.findIndex(t => /player/.test(t)))
+  })
   await p.evaluate(i => document.querySelectorAll('.list .row .sum')[i].click(), pick)
   await sleep(4000)
-  const det = await p.$eval('.list .row.open .detail', e => e.innerText.replace(/\s+/g, ' '))
-  console.log('detail:', det.slice(0, 400))
+  console.log('mined:', await p.$eval('.list .row.open .detail dl', e => [...e.children].find(d => /Mined/i.test(d.innerText))?.innerText.replace(/\s+/g, ' ')))
+  const tab = await p.$$eval('.list .row.open .mtab tr', trs => trs.map(tr => [...tr.children].map(td => td.innerText.replace(/\s+/g, ' ').trim())))
+  for (const r of tab) console.log('   ', r.join(' | '))
+  console.log('   ', await p.$eval('.list .row.open .miners', e => [...e.querySelectorAll('.small-note')].map(x => x.innerText).join(' ')).catch(() => ''))
+  // the table must add up: shares sum to the total, each share = shares / total, cuts in that ratio
+  const body = tab.filter(r => r.length === 4 && /\d/.test(r[1]) && !/^All$/.test(r[0]) && !/^Bet$/i.test(r[0]))
+  const tot = body.reduce((t, r) => t + Number(r[1]), 0)
+  const foot = tab.find(r => r[0] === 'All')
+  const bad = body.filter(r => Math.abs(Number(r[2].replace('%', '')) - (Number(r[1]) / tot) * 100) > 0.11)
+  const note = await p.$eval('.list .row.open .miners', e => [...e.querySelectorAll('.small-note')].map(x => x.innerText).join(' ')).catch(() => '')
+  if (/The 0 left/.test(note)) { console.error('E2E FAILED: a leftover that rounds to 0 is printed'); process.exitCode = 1 }
+  if (foot && Math.abs(body.reduce((t, r) => t + Number(r[2].replace('%', '')), 0) - 100) > 0.05) { console.error('E2E FAILED: shares do not add up to 100%'); process.exitCode = 1 }
+  if (!body.length || bad.length || (foot && Number(foot[1]) !== tot)) { console.error('E2E FAILED: the split table does not add up'); process.exitCode = 1 }
   const width = await p.evaluate(() => document.documentElement.scrollWidth)
   console.log(`page width ${width}/${W}`, width > W ? 'TOO WIDE' : 'ok')
   if (width > W) process.exitCode = 1
