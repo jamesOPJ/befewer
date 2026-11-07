@@ -22,7 +22,8 @@
 //! slot's streak of `streak_min` or more wins in a row earns shares in the pot: a streak of
 //! `streak_min` is 1 share per milli-NEAR staked, `streak_min + 1` is 2 shares, and so on. The
 //! pot is split among that round's winners by shares; if nobody qualifies it rolls over.
-//! Nothing else ever mints BEFEWER and issuance stops at `max_supply`.
+//! Nothing else ever mints BEFEWER, and at most `max_supply` exists at once: like ORE, BEFEWER
+//! that is burned (bought back) can be mined again, so mining never ends.
 //!
 //! Refining (like ORE's unrefined ORE): mined BEFEWER stays in the game as "unrefined". Claiming
 //! it to the wallet (`claim_befewer`) costs `refine_fee_bps` (10%) of the unrefined part, and that
@@ -405,7 +406,8 @@ pub struct Contract {
     // ---- mining ----
     /// BEFEWER waiting for the next round with qualifying winners.
     pot: u128,
-    /// BEFEWER issued so far: pot + round rewards + the pool seed. Never above max_supply.
+    /// BEFEWER issued so far: pot + round rewards + the pool seed. Issued minus burned is never
+    /// above max_supply (burned BEFEWER can be mined again).
     issued: u128,
     /// BEFEWER mined by streaks (credited when their round settles).
     mined: u128,
@@ -902,6 +904,12 @@ impl Contract {
         ceiling_from(self.dex.near_amount, self.dex.seed)
     }
 
+    /// BEFEWER that may still be minted: max_supply minus what exists (issued, less burned).
+    /// Like ORE: burning by buybacks makes room, so the pot keeps filling after the cap is hit.
+    fn mint_room(&self) -> u128 {
+        self.params.max_supply.0.saturating_sub(self.issued - self.total_burned)
+    }
+
     fn spendable(&self) -> u128 {
         let balance = env::account_balance().as_yoctonear();
         let storage = env::storage_usage() as u128 * env::storage_byte_cost().as_yoctonear();
@@ -1190,7 +1198,8 @@ impl Contract {
         };
         // escrow for the round = stakes + fees - reveal rewards >= obligations
         let to_treasury = round.committed + round.fees - round.bounties - obligations;
-        let emission = self.params.reward_per_round.0.min(self.params.max_supply.0 - self.issued);
+        // (mint_room() inline: `round` borrows self.rounds here)
+        let emission = self.params.reward_per_round.0.min(self.params.max_supply.0.saturating_sub(self.issued - self.total_burned));
         self.issued += emission;
         self.pot += emission;
         round.settled = true;
@@ -1456,7 +1465,7 @@ impl Contract {
             ),
             STEP_SEND_TOKEN => {
                 if !self.dex.seed_minted {
-                    let seed = self.mined.max(TOKEN).min(self.params.max_supply.0 - self.issued);
+                    let seed = self.mined.max(TOKEN).min(self.mint_room());
                     require!(seed > 0, "no BEFEWER left to seed the pool");
                     self.issued += seed;
                     self.dex.seed = seed;

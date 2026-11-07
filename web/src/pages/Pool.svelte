@@ -205,7 +205,7 @@
     <h2>Every BEFEWER</h2>
     <table class="tab books">
       <tbody>
-        <tr class="sum"><td>Issued so far<span class="faint sub">of {fmt(st.max_supply)} max; issuance stops there</span></td><td class="r num">{fmt(st.issued, 2)}</td></tr>
+        <tr class="sum"><td>Issued so far<span class="faint sub">at most {fmt(st.max_supply)} exist at once (issued minus burned: {fmt(B(st.issued) - B(st.total_burned), 2)}); burned BEFEWER can be mined again</span></td><td class="r num">{fmt(st.issued, 2)}</td></tr>
         <tr><td>Pool seed<span class="faint sub">minted once when the pool opened</span></td><td class="r num">{fmt(dex.seed, 2)}</td></tr>
         <tr><td>Mined by streaks<span class="faint sub">{fmt(st.unrefined_total, 2)} still unrefined in the game, {fmt(st.claimed, 2)} claimed to wallets; claiming paid {fmt(st.refine_fees, 2)} in refining fees to the other holders</span></td><td class="r num">{fmt(st.mined, 2)}</td></tr>
         <tr><td>Waiting in the pot<span class="faint sub">for the next streak winner</span></td><td class="r num">{fmt(st.pot, 2)}</td></tr>

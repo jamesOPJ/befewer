@@ -158,6 +158,11 @@
         "at": "2026-11-07T16:56:35.622Z",
         "tx": "6dhp9vjosqaxaTz6pdmpsGhhGQ5TdqqxFaXRRXqzorK1",
         "code_sha256": "65cef0c53dca74356e0bb91bc8bf27be7906bb39e477a238a8b48bada85a6fa1"
+      },
+      {
+        "at": "2026-11-07T19:02:46.081Z",
+        "tx": "F7rfvhKaYZzacZ8duxPiqesC3oEbxkZtdVa1dJDZmziX",
+        "code_sha256": "b6060e9920bef5e58a7b25447744aa2ea6b3524d998271851e6a077eb21d1d8b"
       }
     ]
   },
@@ -209,6 +214,11 @@
         "at": "2026-11-07T16:56:39.764Z",
         "tx": "FgvCPsFExX2b8jLaK77VS4ZPVUgNYfFA9eRn2FCKsd1N",
         "code_sha256": "65cef0c53dca74356e0bb91bc8bf27be7906bb39e477a238a8b48bada85a6fa1"
+      },
+      {
+        "at": "2026-11-07T19:02:56.359Z",
+        "tx": "GYmWHasR9VfqB9uSG27FbzDKY5E7wmEKKroagPj5ekDb",
+        "code_sha256": "b6060e9920bef5e58a7b25447744aa2ea6b3524d998271851e6a077eb21d1d8b"
       }
     ]
   },
@@ -234,6 +244,13 @@
       "buyback_every_ns": "600000000000",
       "refine_fee_bps": 1000,
       "reveal_bounty_bps": 8000
-    }
+    },
+    "upgrades": [
+      {
+        "at": "2026-11-07T19:02:50.946Z",
+        "tx": "Ax6c3kYd27WVFtLEeX7d2SU3QR7thpVgEGA34fki6FJd",
+        "code_sha256": "b6060e9920bef5e58a7b25447744aa2ea6b3524d998271851e6a077eb21d1d8b"
+      }
+    ]
   }
 }

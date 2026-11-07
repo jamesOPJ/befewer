@@ -181,7 +181,7 @@ fn check_invariants(c: &Contract, players: &[AccountId], donated: u128) {
     let accounted = s.unrefined_total.0 + s.claimed.0 + owed + s.refine_to_pot.0 + s.dust_to_pot.0;
     assert!(accounted <= s.mined.0 && s.mined.0 - accounted <= 1_000, "mining credits conserved (up to rounding dust): mined {} accounted {}", s.mined.0, accounted);
     assert!(s.issued.0 + s.refine_to_pot.0 + s.dust_to_pot.0 >= s.mined.0 + s.pot.0 + s.dex.seed.0, "issued covers mined + pot + seed");
-    assert!(s.issued.0 <= s.max_supply.0, "issuance never above the cap");
+    assert!(s.issued.0 - s.total_burned.0 <= s.max_supply.0, "never more than the cap exists at once");
 }
 
 // ---------------- deposits and withdrawals ----------------
@@ -797,6 +797,40 @@ fn issuance_stops_at_max_supply() {
     assert_eq!(c.get_round(U64(3)).emission.0, 0);
     assert_eq!(c.get_player(a.clone()).unrefined.0, T * 5 / 2);
     check_invariants(&c, &[a, b1, b2], 0);
+}
+
+#[test]
+fn burned_befewer_can_be_mined_again() {
+    // like ORE: the cap limits what exists at once, so a burn makes room for new mining
+    let mut p = params();
+    p.max_supply = U128(T * 5 / 2);
+    let mut c = setup_with(p);
+    let (a, b1, b2) = (acc("alice.testnet"), acc("b1.testnet"), acc("b2.testnet"));
+    for p in [&a, &b1, &b2] {
+        join(&mut c, p);
+    }
+    play_alice_minority(&mut c, 0..5, &a, None);
+    ctx(&a, t_after(4));
+    c.claim(Some(a.clone()), None);
+    assert_eq!(c.get_round(U64(4)).emission.0, 0, "at the cap nothing new is added");
+    // alice claims her 2.5 to the wallet (10% refining fee to the pot: nobody else holds) and burns 2
+    assert_eq!(claim_tokens(&mut c, &a, None), T * 9 / 4);
+    ctx_full(&a, t_after(4), 1, BIG, vec![]);
+    c.ft_transfer(me(), U128(2 * T), None);
+    assert_eq!(c.get_status().total_burned.0, 2 * T);
+    // the next rounds add BEFEWER to the pot again, one per round, until the cap is full again
+    for p in [&b1, &b2] {
+        ctx_full(p, t_after(4), 10 * N, BIG, vec![]);
+        c.deposit(None); // they lost every round so far
+    }
+    play_alice_minority(&mut c, 6..9, &a, None);
+    ctx(&a, t_after(8));
+    c.claim(Some(a.clone()), None);
+    let emitted: u128 = (6..9u64).map(|r| c.get_round(U64(r)).emission.0).sum();
+    assert_eq!(emitted, 2 * T, "the 2 burned come back through mining, then it stops at the cap again");
+    let s = c.get_status();
+    assert_eq!(s.issued.0 - s.total_burned.0, T * 5 / 2, "exactly the cap exists");
+    check_invariants(&c, &[a, b1, b2], 20 * N); // (the extra deposits, passed where donations go)
 }
 
 #[test]
