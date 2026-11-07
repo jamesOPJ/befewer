@@ -110,7 +110,7 @@
   function use(i: number) { game.ap.sel = target; lane().draft = structuredClone(PRESETS[i].rules); commit(); toast('info', `${PRESETS[i].name} opened in the editor for ${lane().name}. Press Save & run to use it.`) }
   const fmtN = (v: number) => (v / 100).toLocaleString('en-US', { maximumFractionDigits: 2 })
   const FIXED = [1, 2, 5, 10, 20, 50, 100]
-  const PCTS = [1, 2, 5, 10, 25]
+  const PCTS = [1, 2, 5, 10, 25, 50]
   const BASES = [1, 2, 5, 10]
   const CODE: Record<Unit, string> = { fixed: 'f', pct: 'p', martingale: 'm', paroli: 'r' }
   const UNIT: Record<string, Unit> = { f: 'fixed', p: 'pct', m: 'martingale', r: 'paroli' }

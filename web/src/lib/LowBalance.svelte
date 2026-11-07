@@ -5,7 +5,7 @@
 
   const me = $derived(game.me)
   const playable = $derived(me ? BigInt(me.balance) + BigInt(me.pending_near) : 0n)
-  // a bet is at most 25% of the balance, so the 0.01 minimum needs 0.04 in the game
+  // the smallest bet with its fee and storage (about 0.02 NEAR)
   const need = $derived(minToBet())
   const low = $derived(!!me && me.registered && playable < need)
   const back = $derived(movable())
@@ -17,7 +17,7 @@
 {#if low}
   <div class="low" role="status">
     <div>
-      <b>Your game balance is {fmtN(playable)} NEAR</b>, too little to bet: a bet can be at most 25% of it, so the smallest bet needs {fmtN(need)} NEAR.
+      <b>Your game balance is {fmtN(playable)} NEAR</b>, too little to bet: the smallest bet needs about {fmtN(need)} NEAR with its fee and storage.
       {#if back > 0n}Your wallet holds {fmtN(BigInt(game.walletNear ?? '0'))} NEAR: move it back into the game to keep playing (0.1 stays in the wallet for gas).
       {:else if game.session?.kind === 'wallet'}Deposit more NEAR from your wallet on the Me page.
       {:else}Your wallet is empty too.{/if}

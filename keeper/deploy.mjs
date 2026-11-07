@@ -27,7 +27,7 @@ const params = {
   genesis_ns: genesis.toString(),
   commit_ns: (BigInt(opt('commit-sec', 180)) * SEC).toString(),
   reveal_ns: (BigInt(opt('reveal-sec', 90)) * SEC).toString(),
-  max_stake_bps: 2500,
+  max_stake_bps: 10000, // no per-round cap: a bet only has to fit in the balance with its fee and storage
   min_stake: near(0.01).toString(),
   fee_bps: 500,
   reward_per_round: TOKEN.toString(),

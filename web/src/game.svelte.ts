@@ -441,18 +441,23 @@ export async function withdrawAll() {
   }
 }
 
-/** The smallest game balance that can still bet: a bet is at most max_stake_bps of the balance
- *  (25%: so 0.04 NEAR for the 0.01 minimum), and it must cover the stake, fee and storage. */
+/** The smallest game balance that can still bet: the minimum stake, its fee and the storage
+ *  the bet holds until its result (about 0.02 NEAR). */
 export function minToBet(): bigint {
   if (!game.params) return 0n
   const min = BigInt(game.params.min_stake), bps = BigInt(game.params.max_stake_bps)
-  const byCap = (min * 10000n + bps - 1n) / bps
+  const byCap = (min * 10000n + bps - 1n) / bps // max_stake_bps is 10000 (no cap) since Nov 7
   const direct = min + feeFor(min) + storageFor(game.session?.accountId ?? '', 700)
   return byCap > direct ? byCap : direct
 }
 
+/** The most a balance can stake this round: stake + fee + storage have to fit in it. */
 export function capFor(balance: bigint) {
-  return (balance * BigInt(game.params!.max_stake_bps)) / 10000n
+  const p = game.params!
+  const byBps = (balance * BigInt(p.max_stake_bps)) / 10000n
+  const storage = storageFor(game.session?.accountId ?? '', 700)
+  const afford = balance > storage ? ((balance - storage) * 10000n) / (10000n + BigInt(p.fee_bps)) : 0n
+  return byBps < afford ? byBps : afford
 }
 
 /** Seal a side with drand and commit it from `slot` to the round taking bets right now.
@@ -467,7 +472,7 @@ export async function placeBet(side: Side, want: bigint, by: 'you' | 'autopilot'
     let amount = want > cap ? cap : want
     const min = BigInt(game.params!.min_stake)
     if (amount < min) amount = min
-    if (amount > cap) throw new Error(`Your game balance is too small: the most you can bet is 25% of it, and the smallest bet is ${fmtN(min)} NEAR.`)
+    if (amount > cap) throw new Error(`Your game balance (${fmtN(bal)} NEAR) is too small: the smallest bet needs about ${fmtN(minToBet())} NEAR with its fee and storage.`)
     const fee = feeFor(amount)
     const storage = storageFor(game.session!.accountId, 700)
     if (amount + fee + storage > bal) throw new Error(`Not enough NEAR for the stake, the fee and about ${fmtN(storage)} NEAR held for the bet's storage (returned later).`)
@@ -685,10 +690,12 @@ export async function autopilotTick() {
         apLog(r, 'skip', tag + (d.rule == null ? 'No rule fit, so it skipped.' : `Rule ${d.rule + 1} says skip.`), i)
         continue
       }
-      // the autopilot counts in chips of 0.01 NEAR (the smallest bet)
-      const bal = Number(BigInt(game.me!.balance) / CHIP)
-      const chips = stakeFor(d.unit, d.amount, bal, me)
-      if (chips < 1) { apLog(r, 'skip', tag + 'Balance too small to bet (the cap is 25% of it).', i); continue }
+      // the autopilot counts in chips of 0.01 NEAR (the smallest bet); this slot's settled
+      // winnings are booked by the bet itself, so they count
+      const pend = game.me!.slots.find(s => s.slot === slot)?.open.reduce((t, o) => t + BigInt(o.payout), 0n) ?? 0n
+      const balY = BigInt(game.me!.balance) + pend
+      const chips = stakeFor(d.unit, d.amount, Number(balY / CHIP), me, Number(capFor(balY) / CHIP))
+      if (chips < 1) { apLog(r, 'skip', `${tag}Balance too small to bet: ${fmtN(balY)} NEAR, and the smallest bet needs about ${fmtN(minToBet())} with its fee and storage.`, i); continue }
       const placed = await placeBet(d.side, BigInt(chips) * CHIP, 'autopilot', slot)
       apLog(placed.round, 'bet', `${tag}Rule ${d.rule + 1}: ${fmtN(placed.amount)} NEAR on ${label(placed.round, d.side)} (${d.side}).`, i)
     } catch (e: any) {

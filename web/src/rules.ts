@@ -23,7 +23,11 @@ export type Unit = 'fixed' | 'pct' | 'martingale' | 'paroli'
 /** `pattern` and `rest` only matter for pick 'loop'. rest = after a loss, sit out until the pattern starts over. */
 export type Rule = { cond: Cond; pick: Pick; unit: Unit; amount: number; pattern?: string; rest?: boolean }
 export type Decision = { side: Side; unit: Unit; amount: number; rule: number } | { skip: true; rule: number | null }
-export const MAX_PCT = 25 // the contract caps a bet at 25% of the balance
+/** "% of balance" goes up to all of it: the contract has no per-round cap, a bet only has to
+ *  fit in the balance with its fee and storage. */
+export const MAX_PCT = 100
+/** NEAR a bet holds for its storage until its result (about 0.0092-0.0102), in chips of 0.01. */
+export const STORAGE_CHIPS = 1
 export const LOPSIDED = 0.3
 export const CLOSE = 0.4
 const MAX_DOUBLINGS = 6
@@ -65,9 +69,12 @@ export function normalizeRule(r: any): Rule {
   return { cond: r.cond, pick: r.pick, unit: 'pct', amount: typeof r.pct === 'number' ? r.pct : 5 }
 }
 
-/** Chips a rule would stake with balance `bal` (in chips), after the contract's 25% cap. 0 = can't bet. */
-export function stakeFor(unit: Unit, amount: number, bal: number, me: Me = NOBODY): number {
-  const cap = Math.floor((bal * MAX_PCT) / 100)
+/** The most a balance of `bal` chips can stake: stake + fee + storage must fit in it. */
+export const maxStake = (bal: number, feeBps = 500) => Math.max(0, Math.floor(((bal - STORAGE_CHIPS) * 10000) / (10000 + feeBps)))
+
+/** Chips a rule would stake with balance `bal` (in chips), at most `cap` (what the balance can
+ *  pay; the live autopilot passes the exact figure). 0 = can't bet. */
+export function stakeFor(unit: Unit, amount: number, bal: number, me: Me = NOBODY, cap = maxStake(bal)): number {
   if (cap < 1) return 0
   let want: number
   if (unit === 'pct') want = Math.floor((bal * Math.max(1, Math.min(MAX_PCT, amount))) / 100)
@@ -196,7 +203,7 @@ export function backtest(rules: Rule[], from: number, to: number, L: Lookup, sta
     if (!o) continue // nobody played that round
     bt.rounds++
     const d = decide(rules, t, guard(L, t), me)
-    const stake = 'skip' in d ? 0 : stakeFor(d.unit, d.amount, bal, me)
+    const stake = 'skip' in d ? 0 : stakeFor(d.unit, d.amount, bal, me, maxStake(bal, feeBps))
     if ('skip' in d || stake < 1) { bt.skips++; bt.curve.push({ round: t, side: null, outcome: o, stake: 0, bal, streak, mined: false }); continue }
     bt.bets++
     bt.staked += stake
@@ -303,7 +310,7 @@ export const PRESETS: Preset[] = [
     rules: [R({ kind: 'mine', result: 'won' }, 'same'), R({ kind: 'mine', result: 'lost' }, 'other'), R(ALWAYS, 'random')] },
   { name: 'Steady DCA', group: 'Money management', about: '0.05 NEAR on a random side every single round. The baseline to beat.',
     rules: [R(ALWAYS, 'random', 5)] },
-  { name: 'Martingale', group: 'Money management', about: 'Start at 0.02 NEAR, double after every loss, back to 0.02 after a win. Risky: losing streaks hit the 25% cap.',
+  { name: 'Martingale', group: 'Money management', about: 'Start at 0.02 NEAR, double after every loss, back to 0.02 after a win. Risky: six losses in a row make the next bet 64 times the start.',
     rules: [R(ALWAYS, 'random', 2, 'martingale')] },
   { name: 'Paroli', group: 'Money management', about: 'Start at 0.05 NEAR, double after every win, back to 0.05 after 3 wins or any loss.',
     rules: [R(ALWAYS, 'random', 5, 'paroli')] },
