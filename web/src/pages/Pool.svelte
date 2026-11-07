@@ -152,7 +152,7 @@
   <!-- treasury NEAR -->
   <section class="card block">
     <h2>Where the treasury's NEAR went</h2>
-    <p class="fine">It collects the fees left after reveal rewards, the bigger side's extra stake, and bets that were never opened. Players' balances are never part of it.</p>
+    <p class="fine">It collects {100 - (pr.reveal_bounty_bps ?? 0) / 100}% of every bet's fee (the other {(pr.reveal_bounty_bps ?? 0) / 100}% pays whoever reveals the bet: the player's own page or a keeper), the bigger side's extra stake, and bets that were never opened. Players' balances are never part of it.</p>
     <table class="tab books">
       <tbody>
         <tr class="sum"><td>Collected so far</td><td class="r num">{fmtN(st.treasury_in)}</td></tr>

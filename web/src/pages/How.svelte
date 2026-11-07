@@ -12,6 +12,7 @@
   const revealS = $derived(game.params ? Number(BigInt(game.params.reveal_ns) / 1_000_000_000n) : 0)
   // the worked example: a 0.1 NEAR bet, with this contract's fee and reveal reward
   const bountyPct = $derived((pr?.reveal_bounty_bps ?? 0) / 100)
+  const treasuryPct = $derived(100 - (pr?.reveal_bounty_bps ?? 0) / 100) // of each revealed bet's fee
   const ex = $derived.by(() => {
     const stake = 0.1, fee = (stake * (pr?.fee_bps ?? 0)) / 10_000
     const record = 0.00291 // a round's record: 291 bytes of storage
@@ -32,7 +33,7 @@
     <div class="fact"><Icon name="lock" /><div><b>Capped at {fmt(pr?.max_supply ?? '0')}.</b> {fmt(pr?.reward_per_round ?? '0')} BEFEWER is added to the pot each round, and issuance stops at the cap.</div></div>
     <div class="fact"><Icon name="users" /><div><b>No premine, no team share.</b> Supply started at zero, and every coin is mined by a winning streak. The only other mint was the one-time pool seed, paired with the treasury's NEAR as pool liquidity that can never be withdrawn.</div></div>
     <div class="fact"><Icon name="bolt" /><div><b>Mining costs something.</b> Coins come only from streaks, and every bet pays a fee. Like proof of work, except the work is reading the crowd.</div></div>
-    <div class="fact"><Icon name="shield" /><div><b>The game's revenue backs it.</b> Fees and the bigger side's extra stake fill the treasury. It opened a NEAR pool whose liquidity can never be taken out, and keeps buying BEFEWER there and burning it (<a href="#/pool">see the pool</a>).</div></div>
+    <div class="fact"><Icon name="shield" /><div><b>The game's revenue backs it.</b> Its {treasuryPct}% of every fee and the bigger side's extra stake fill the treasury. It opened a NEAR pool whose liquidity can never be taken out, and keeps buying BEFEWER there and burning it (<a href="#/pool">see the pool</a>).</div></div>
     <div class="fact"><Icon name="spark" /><div><b>Holding pays.</b> Claiming mined coins to a wallet costs {(pr?.refine_fee_bps ?? 0) / 100}%, shared by everyone still holding theirs unclaimed.</div></div>
   </div>
   <p class="muted small note">On testnet, NEAR and BEFEWER are free and worth nothing. The rules are the ones a mainnet launch would use.</p>
@@ -43,10 +44,10 @@
 
 <section class="steps">
   <div class="card step"><span class="si"><Icon name="eye" size={22} /></span><h3>1 · Read the crowd</h3><p>Don't pick what you like. Pick the answer you think less NEAR will be on, knowing everyone else is trying to do the same.</p></div>
-  <div class="card step"><span class="si"><Icon name="lock" size={22} /></span><h3>2 · Seal your bet</h3><p>Bet any amount from 0.01 NEAR that your game balance covers, plus a {feePct}% fee. Your answer is sealed: the chain stores only a fingerprint, and a drand timelock keeps it shut until betting closes.</p></div>
+  <div class="card step"><span class="si"><Icon name="lock" size={22} /></span><h3>2 · Seal your bet</h3><p>Bet any amount from 0.01 NEAR that your game balance covers, plus a {feePct}% fee: {bountyPct}% of it goes to whoever reveals your bet (your own page if it is open, otherwise a keeper), {treasuryPct}% to the treasury. Your answer is sealed: the chain stores only a fingerprint, and a drand timelock keeps it shut until betting closes.</p></div>
   <div class="card step"><span class="si"><Icon name="flame" size={22} /></span><h3>3 · The smaller side wins +100%</h3><p>When the reveal ends, everyone on the side with less NEAR gets their stake back plus the same amount again. The other side loses its stake. A tie or a one-sided round refunds everyone (minus the reveal reward, if someone else revealed your bet).</p></div>
   <div class="card step"><span class="si"><Icon name="spark" size={22} /></span><h3>4 · Streaks mine BEFEWER</h3><p>Each round adds {fmt(pr?.reward_per_round ?? '0')} BEFEWER to a pot. A win that completes {need} wins in a row takes a share of it: 1 share per 0.001 NEAR staked at {need} in a row, 2 at {need + 1}, and so on. If nobody qualifies, the pot rolls over. Mined BEFEWER stays unrefined in the game: claiming it to your wallet costs {(pr?.refine_fee_bps ?? 0) / 100}%, shared among everyone still holding unrefined BEFEWER (like ORE's refining fee).</p></div>
-  <div class="card step"><span class="si"><Icon name="shield" size={22} /></span><h3>5 · The treasury backs the token</h3><p>Fees, the gap between the sides and unopened bets go to the treasury. At {fmtN(st?.graduate_at ?? '0')} NEAR it opens a BEFEWER/NEAR pool on Ref Finance and locks the pool shares forever. After that, every {pr ? Math.round(Number(BigInt(pr.buyback_every_ns) / 1_000_000_000n) / 60) : 0} minutes it buys BEFEWER from the pool with 1/365 of its NEAR (when that is at least 0.1 NEAR), never more than 25% above the last buyback's price, and burns it.</p></div>
+  <div class="card step"><span class="si"><Icon name="shield" size={22} /></span><h3>5 · The treasury backs the token</h3><p>Its {treasuryPct}% of every fee, the gap between the sides and unopened bets go to the treasury. At {fmtN(st?.graduate_at ?? '0')} NEAR it opens a BEFEWER/NEAR pool on Ref Finance and locks the pool shares forever. After that, every {pr ? Math.round(Number(BigInt(pr.buyback_every_ns) / 1_000_000_000n) / 60) : 0} minutes it buys BEFEWER from the pool with 1/365 of its NEAR (when that is at least 0.1 NEAR), never more than 25% above the last buyback's price, and burns it.</p></div>
 </section>
 
 <section class="card block ex">
@@ -91,7 +92,7 @@
       </dl>
     </div>
   </div>
-  <p class="muted small">Where the NEAR goes: the Dogs bets (2 NEAR) are paid 4 NEAR, their own 2 plus 2 of the 3 on Cats. The extra 1 NEAR on Cats and the fees (less reveal rewards) go to the treasury. Every bet also holds a little NEAR for its storage, returned with the result in all four cases.</p>
+  <p class="muted small">Where the NEAR goes: the Dogs bets (2 NEAR) are paid 4 NEAR, their own 2 plus 2 of the 3 on Cats. The extra 1 NEAR on Cats goes to the treasury. Of each fee, {bountyPct}% went to whoever revealed the bet (the player's page or a keeper) and {treasuryPct}% to the treasury. Every bet also holds a little NEAR for its storage, returned with the result in all four cases.</p>
 </section>
 
 <section class="card block">

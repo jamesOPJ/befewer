@@ -176,7 +176,7 @@
       <p class="fine">
         {#if newcomer && game.session?.kind !== 'wallet'}Your first bet creates a free testnet account in this browser with {fmtN(GUEST_GAME_NEAR)} testnet NEAR to play. No wallet, no seed phrase, no popups. Have a testnet wallet? <button class="link" onclick={openWallet}>Play with your wallet</button>.
         {:else if newcomer}Deposit NEAR from your wallet on the Me page to start betting.
-        {:else}Win: +{fmtN(stakeY)} NEAR (you get {fmtN(stakeY * 2n)} back). Lose: −{fmtN(stakeY)}. Every bet pays a {(game.params?.fee_bps ?? 0) / 100}% fee ({fmtN(feeY)} NEAR); if this page is open when betting closes it reveals your bet itself and {(game.params?.reveal_bounty_bps ?? 0) / 100}% of the fee comes back to you. A little NEAR is held for the bet's storage and returned with the result. Max {capW} this round: what your balance covers after the fee and storage.{/if}
+        {:else}Win: +{fmtN(stakeY)} NEAR (you get {fmtN(stakeY * 2n)} back). Lose: −{fmtN(stakeY)}. Every bet pays a {(game.params?.fee_bps ?? 0) / 100}% fee ({fmtN(feeY)} NEAR); {(game.params?.reveal_bounty_bps ?? 0) / 100}% of it goes to whoever reveals your bet: this page if it is open when betting closes (so it comes back to you), otherwise a keeper. The other {100 - (game.params?.reveal_bounty_bps ?? 0) / 100}% goes to the treasury. A little NEAR is held for the bet's storage and returned with the result. Max {capW} this round: what your balance covers after the fee and storage.{/if}
       </p>
     {/if}
   </section>
@@ -259,7 +259,7 @@
             <p class="fine">
               {#if dex.step > 0}Opening the pool now: step {dex.step} of 5 ({dex.stage}).
               {:else}At {fmtN(st.graduate_at)} NEAR the contract opens a BEFEWER/NEAR pool on Ref Finance with all of it, plus as many new BEFEWER as have been mined. The pool shares stay locked in the contract.{/if}
-              Fees, the gap between the sides and unopened bets fill it.
+              {100 - (game.params?.reveal_bounty_bps ?? 0) / 100}% of every fee, the gap between the sides and unopened bets fill it.
             </p>
           {:else}
             <div class="pot"><b class="num">{fmtN(st.treasury)}</b> NEAR</div>
