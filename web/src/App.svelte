@@ -32,6 +32,7 @@
     <a class="brand" href="#/" aria-label="BEFEWER home">
       <svg width="30" height="30" viewBox="0 0 64 64" aria-hidden="true"><rect width="64" height="64" rx="16" fill="#26231f" /><circle cx="41" cy="31" r="14" fill="#5f5a53" /><circle cx="20" cy="37" r="7.5" fill="var(--brand)" /></svg>
       <span class="word">BE<b>FEWER</b></span>
+      <span class="tn" title="Testnet NEAR and BEFEWER are free and have no monetary value">testnet</span>
     </a>
     <nav class="tabs-top" aria-label="Main">
       {#each TABS as t}
@@ -40,9 +41,9 @@
     </nav>
     <div class="right">
       <span class="pill testnet" title="Testnet NEAR and BEFEWER are free and have no monetary value">Testnet</span>
-      {#if game.session?.kind !== 'wallet'}<button class="pill connect" onclick={openWallet}>Connect wallet</button>{/if}
+      {#if game.session?.kind !== 'wallet'}<button class="pill connect" onclick={openWallet} aria-label="Connect wallet"><span class="long">Connect wallet</span><span class="short">Wallet</span></button>{/if}
       {#if game.me}
-        <a class="pill bal num" href="#/me" title={game.session?.accountId}>{fmtN(game.me.balance, 3)} <span class="faint">NEAR</span>{#if BigInt(game.me.tokens) + BigInt(game.me.unrefined) + BigInt(game.me.refined) > 0n} · {fmt(BigInt(game.me.tokens) + BigInt(game.me.unrefined) + BigInt(game.me.refined))} <span class="faint">BEFEWER</span>{/if}</a>
+        <a class="pill bal num" href="#/me" title={game.session?.accountId}>{fmtN(game.me.balance, 3)} <span class="faint">NEAR</span>{#if BigInt(game.me.tokens) + BigInt(game.me.unrefined) + BigInt(game.me.refined) > 0n}<span class="tokpart"> · {fmt(BigInt(game.me.tokens) + BigInt(game.me.unrefined) + BigInt(game.me.refined))} <span class="faint">BEFEWER</span></span>{/if}</a>
       {/if}
     </div>
   </div>
@@ -101,5 +102,19 @@
   .sk1 { height: 260px } .sk2 { height: 140px } .sk3 { height: 200px }
   @keyframes sh { to { background-position: -200% 0 } }
   .connect { cursor: pointer; border: 1px solid var(--line); background: var(--surface-2); color: var(--fg) }
-  @media (max-width: 520px) { .connect { font-size: 12px; padding: 4px 9px } }
+  .right .pill { white-space: nowrap }
+  .connect .short, .tn { display: none }
+  /* phones: everything on one line inside the bar. "Testnet" becomes a small tag by the logo,
+     the wallet button says "Wallet", the balance shows NEAR only (BEFEWER is on the Me page). */
+  @media (max-width: 520px) {
+    .bar { gap: 10px; padding: 0 12px }
+    .right { gap: 6px; min-width: 0 }
+    .right .testnet, .connect .long, .tokpart { display: none }
+    .connect .short { display: inline }
+    .connect, .bal { font-size: 12px; padding: 4px 9px }
+    .tn { display: inline; font-size: 10px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--brand); border: 1px solid rgba(232, 182, 94, 0.35); border-radius: 6px; padding: 1px 5px }
+  }
+  @media (max-width: 359px) { .word { display: none } }
+  /* home-screen / notch: keep the bar below the status bar */
+  .top { padding-top: env(safe-area-inset-top) }
 </style>
