@@ -85,6 +85,7 @@
 </script>
 
 <LowBalance />
+<p class="sov"><b>$BEFEWER is hard money on NEAR</b>: capped at {fmt(game.params?.max_supply ?? '0')}, no premine, backed by the game's revenue. This game is how it is mined. <a href="#/how">Why it holds value</a></p>
 <div class="grid">
   <section class="card round" aria-labelledby="q">
     <div class="head">
@@ -340,4 +341,6 @@
   .bar span { display: block; height: 100%; background: var(--brand); border-radius: 999px }
   .gold { color: var(--brand) }
   .link { border: 0; padding: 0; background: none; color: var(--brand); font: inherit; text-decoration: underline; cursor: pointer }
+  .sov { margin: 0 0 14px; font-size: 13.5px; line-height: 1.5; color: var(--fg-2) }
+  .sov b { color: var(--fg) }
 </style>

@@ -13,10 +13,25 @@
 </script>
 
 <section class="hero">
-  <div class="eyebrow">How it works</div>
-  <h1>Be fewer.</h1>
-  <p class="lede">A sealed-bid minority game played with NEAR that mines a capped token. Every round asks a question with two answers. The answer with <b>less NEAR</b> on it wins: every bet on it earns <b>+100%</b> (bet 0.1, get 0.2 back). Win {need} rounds in a row and you start mining <b>$BEFEWER</b>.</p>
+  <div class="eyebrow">What $BEFEWER is</div>
+  <h1>Hard money, mined by the minority.</h1>
+  <p class="lede"><b>$BEFEWER is a store of value on NEAR</b>: a token with a fixed cap that nobody can mint for themselves. The game is only how it gets mined. Be on the side with less NEAR {need} rounds in a row, and a share of the new coins is yours.</p>
 </section>
+
+<section class="card block">
+  <h2>Why it is built to hold value</h2>
+  <div class="facts">
+    <div class="fact"><Icon name="lock" /><div><b>Capped at {fmt(pr?.max_supply ?? '0')}.</b> {fmt(pr?.reward_per_round ?? '0')} BEFEWER is added to the pot each round, and issuance stops at the cap.</div></div>
+    <div class="fact"><Icon name="users" /><div><b>No premine, no team share.</b> Supply started at zero, and every coin is mined by a winning streak. The only other mint was the one-time pool seed, paired with the treasury's NEAR as pool liquidity that can never be withdrawn.</div></div>
+    <div class="fact"><Icon name="bolt" /><div><b>Mining costs something.</b> Coins come only from streaks, and every bet pays a fee. Like proof of work, except the work is reading the crowd.</div></div>
+    <div class="fact"><Icon name="shield" /><div><b>The game's revenue backs it.</b> Fees and the bigger side's extra stake fill the treasury. It opened a NEAR pool whose liquidity can never be taken out, and keeps buying BEFEWER there and burning it (<a href="#/pool">see the pool</a>).</div></div>
+    <div class="fact"><Icon name="spark" /><div><b>Holding pays.</b> Claiming mined coins to a wallet costs {(pr?.refine_fee_bps ?? 0) / 100}%, shared by everyone still holding theirs unclaimed.</div></div>
+  </div>
+  <p class="muted small note">On testnet, NEAR and BEFEWER are free and worth nothing. The rules are the ones a mainnet launch would use.</p>
+</section>
+
+<h2 class="sec">The game is how it is mined</h2>
+<p class="secp">Every round asks a question with two answers. The answer with <b>less NEAR</b> on it wins: every bet on it earns <b>+100%</b> (bet 0.1, get 0.2 back). Win {need} rounds in a row and you start mining <b>$BEFEWER</b>.</p>
 
 <section class="steps">
   <div class="card step"><span class="si"><Icon name="eye" size={22} /></span><h3>1 · Read the crowd</h3><p>Don't pick what you like. Pick the answer you think less NEAR will be on, knowing everyone else is trying to do the same.</p></div>
@@ -82,6 +97,10 @@
   .hero h1 { font-size: clamp(40px, 9vw, 64px); font-weight: 850; letter-spacing: -0.03em; margin: 4px 0 8px; color: var(--brand) }
   .lede { font-size: 18px; color: var(--fg-2); max-width: 680px; margin: 0; line-height: 1.55 }
   .lede b { color: var(--fg) }
+  .sec { font-size: 22px; font-weight: 800; margin: 26px 2px 6px }
+  .secp { color: var(--fg-2); max-width: 680px; margin: 0 2px 14px; line-height: 1.55 }
+  .secp b { color: var(--fg) }
+  .note { margin: 14px 0 0 }
   .steps { display: grid; gap: 12px; margin-bottom: 16px }
   @media (min-width: 860px) { .steps { grid-template-columns: repeat(3, minmax(0, 1fr)) } }
   .step { padding: 18px }
