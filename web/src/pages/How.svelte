@@ -32,10 +32,10 @@
 <section class="card block">
   <h2>Why it is built to hold value</h2>
   <div class="facts">
-    <div class="fact"><Icon name="lock" /><div><b>Never more than {fmt(pr?.max_supply ?? '0')}.</b> {fmt(pr?.reward_per_round ?? '0')} BEFEWER is added to the pot each round (one every {Math.round(mins / 60)} minutes), so the cap is reached after about {capYears.toFixed(1)} years if every round is played. Like ORE, the cap counts what exists: BEFEWER burned by buybacks can be mined again, so mining never ends.</div></div>
+    <div class="fact"><Icon name="lock" /><div><b>Never more than {fmt(pr?.max_supply ?? '0')}.</b> {fmt(pr?.reward_per_round ?? '0')} BEFEWER is added to the pot each round (one every {Math.round(mins / 60)} minutes), so the cap is reached after about {capYears.toFixed(1)} years at the earliest (every burn pushes it later). Like ORE, the cap counts what exists: BEFEWER burned by buybacks can be mined again, so mining never ends.</div></div>
     <div class="fact"><Icon name="users" /><div><b>No premine, no team share.</b> Supply started at zero, and every coin is mined by a winning streak. The only other mint was the one-time pool seed, paired with the treasury's NEAR as pool liquidity that can never be withdrawn.</div></div>
     <div class="fact"><Icon name="bolt" /><div><b>Mining costs something.</b> Coins come only from streaks, and every bet pays a fee. Like proof of work, except the work is reading the crowd.</div></div>
-    <div class="fact"><Icon name="shield" /><div><b>The game's revenue backs it.</b> Its {treasuryPct}% of every fee and the bigger side's extra stake fill the treasury. It opened a NEAR pool whose liquidity can never be taken out, and keeps buying BEFEWER there and burning it (<a href="#/pool">see the pool</a>).</div></div>
+    <div class="fact"><Icon name="shield" /><div><b>The game's revenue backs it.</b> Its {treasuryPct}% of every fee and the bigger side's extra stake fill the treasury. It opened a NEAR pool whose liquidity can never be taken out, and keeps buying BEFEWER there and burning it: a steady buyer paid for by the game. A burned coin is out of supply until mining earns it again (<a href="#/pool">see the pool</a>).</div></div>
     <div class="fact"><Icon name="spark" /><div><b>Holding pays.</b> Claiming mined coins to a wallet costs {(pr?.refine_fee_bps ?? 0) / 100}%, shared by everyone still holding theirs unclaimed.</div></div>
   </div>
   <p class="muted small note">On testnet, NEAR and BEFEWER are free and worth nothing. The rules are the ones a mainnet launch would use.</p>
