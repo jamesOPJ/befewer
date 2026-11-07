@@ -37,13 +37,20 @@
   const when = (ns: string | bigint) => {
     const d = new Date(Number(B(ns) / 1_000_000n))
     const today = d.toDateString() === new Date().toDateString()
-    return d.toLocaleString(undefined, today ? { hour: '2-digit', minute: '2-digit' } : { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+    return d.toLocaleString(undefined, today ? { hour: '2-digit', minute: '2-digit', hour12: false } : { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false })
   }
   const nextIn = $derived(dex ? Math.max(0, Number(B(dex.next_buyback_at) / 1_000_000n) - game.now) : 0)
   const mmss = (ms: number) => `${Math.floor(ms / 60000)}:${String(Math.floor((ms % 60000) / 1000)).padStart(2, '0')}`
   const everyMin = $derived(pr ? Math.round(Number(B(pr.buyback_every_ns) / 1_000_000_000n) / 60) : 0)
   const hm = (ms: number) => (ms >= 3_600_000 ? `${Math.floor(ms / 3_600_000)} h ${Math.floor((ms % 3_600_000) / 60_000)} min` : mmss(ms))
   const buyNow = $derived(B(dex?.buyback_now))
+  // Buybacks before the rule changed (contract upgrade) ran under the old rule: every 10 minutes,
+  // up to 0.5 NEAR each. They stay listed and counted (that NEAR was spent, those BEFEWER burned).
+  const OLD_RULE_UNTIL: Record<string, bigint> = { 'v6.befewer.testnet': BigInt(Date.UTC(2026, 10, 7, 16, 32, 46)) * 1_000_000n }
+  const cut = OLD_RULE_UNTIL[CONTRACT] ?? 0n
+  const isOld = (b: BuybackV) => B(b.at) < cut
+  const oldCount = $derived(Math.max(0, (dex?.buybacks ?? 0) - (buys ?? []).filter(b => !isOld(b) && B(b.spent) > 0n).length))
+  const firstOld = $derived((buys ?? []).findIndex(isOld))
   const listed = $derived((buys ?? []).filter(b => B(b.spent) > 0n).length)
   const earlier = $derived(Math.max(0, (dex?.buybacks ?? 0) - listed))
 
@@ -108,7 +115,7 @@
     <h2>Buybacks</h2>
     <div class="grid">
       <div><div class="eyebrow">Burned</div><div class="v num burn"><Icon name="flame" size={16} /> {fmt(dex.bought_burned)} <span class="faint">BEFEWER</span></div></div>
-      <div><div class="eyebrow">Spent</div><div class="v num">{fmtN(dex.bought_near)} <span class="faint">NEAR</span></div><div class="faint small">{dex.buybacks} buyback{dex.buybacks === 1 ? '' : 's'} · average {p4(priceOf(B(dex.bought_near), B(dex.bought_burned)))} NEAR per BEFEWER</div></div>
+      <div><div class="eyebrow">Spent</div><div class="v num">{fmtN(dex.bought_near)} <span class="faint">NEAR</span></div><div class="faint small">{dex.buybacks} buyback{dex.buybacks === 1 ? '' : 's'}{oldCount ? ` (${oldCount === dex.buybacks ? 'all' : oldCount} under the old rule)` : ''} · average {p4(priceOf(B(dex.bought_near), B(dex.bought_burned)))} NEAR per BEFEWER</div></div>
       <div><div class="eyebrow">Next</div>
         {#if !open}<div class="v">after the pool opens</div>
         {:else if dex.busy}<div class="v">in flight now</div>
@@ -123,8 +130,9 @@
       <table class="tab">
         <thead><tr><th>When</th><th class="r">NEAR used</th><th class="r">BEFEWER burned</th><th class="r">Price</th></tr></thead>
         <tbody>
-          {#each buys as b}
-            <tr>
+          {#each buys as b, i}
+            {#if i === firstOld}<tr class="divider"><td colspan="4">Old rule below: every 10 minutes, up to 0.5 NEAR each (until {when(cut)})</td></tr>{/if}
+            <tr class:old={isOld(b)}>
               <td>{when(b.at)}</td>
               {#if B(b.spent) === 0n}<td class="r faint" colspan="3">refused (price above the limit): its {fmtN(b.near_in)} NEAR waits as wNEAR for the next one</td>
               {:else}
@@ -137,7 +145,7 @@
         </tbody>
       </table>
     {/if}
-    {#if earlier > 0}<p class="faint small">{earlier} earlier buyback{earlier === 1 ? ' is' : 's are'} in the totals above but not listed: the contract started keeping the list on Nov 7.</p>{/if}
+    {#if earlier > 0}<p class="faint small">{earlier} earlier buyback{earlier === 1 ? ' is' : 's are'} in the totals above but not listed (old rule too): the contract started keeping the list on Nov 7.</p>{/if}
     {#if buys && !buys.length && !earlier}<p class="faint small">No buybacks yet.</p>{/if}
   </section>
 
@@ -208,6 +216,8 @@
   .tab td.r.faint { white-space: normal; text-align: left }
   .tab .sub { display: block; font-size: 12px; white-space: normal }
   .books tr.sum td { font-weight: 700 }
+  .tab tr.divider td { padding: 10px 0 6px; font-size: 12px; font-weight: 700; color: var(--fg-3); text-transform: uppercase; letter-spacing: 0.05em; border-top: 2px solid var(--line) }
+  .tab tr.old td { color: var(--fg-2) }
   .check { margin: 10px 0 0; color: var(--good, #8fbf7f) }
   .check.bad { color: var(--burn, #e07a5f) }
   .empty { padding: 30px; text-align: center; color: var(--fg-2) }
