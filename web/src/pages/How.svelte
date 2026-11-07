@@ -122,13 +122,7 @@
 
 <section class="card block">
   <h2>The token and the treasury</h2>
-  <p class="muted small">$BEFEWER started at zero supply. It is only ever mined by streaks (plus the one-time pool seed) and only ever burned by buybacks. "Supply now" counts BEFEWER claimed to wallets; mined BEFEWER still unrefined in the game is not in it yet.</p>
-  <div class="tok">
-    <div><div class="eyebrow">Supply now</div><div class="v num">{fmt(st?.total_supply ?? '0')}</div><div class="faint small">{fmt(st?.issued ?? '0')} of {fmt(st?.max_supply ?? '0')} issued</div></div>
-    <div><div class="eyebrow">Mined</div><div class="v num">{fmt(st?.mined ?? '0')}</div><div class="faint small">{fmt(st?.unrefined_total ?? '0')} still unrefined · {fmt(st?.refine_fees ?? '0')} paid in refining fees · {fmt(st?.pot ?? '0')} in the pot</div></div>
-    <div><div class="eyebrow">Treasury</div><div class="v num gold">{fmtN(st?.treasury ?? '0', 2)}</div><div class="faint small">NEAR · {fmtN(st?.treasury_in ?? '0', 2)} in so far</div></div>
-    <div><div class="eyebrow"><a href="#/pool">Pool</a></div><div class="v num">{st?.dex.stage === 'open' ? `#${st?.dex.pool_id}` : (st?.dex.stage ?? '—')}</div><div class="faint small">{st?.dex.buybacks ?? 0} buybacks · {fmt(st?.dex.bought_burned ?? '0')} BEFEWER burned</div></div>
-  </div>
+  <p class="muted small">$BEFEWER started at zero supply. It is only ever mined by streaks (plus the one-time pool seed) and only ever burned by buybacks. The live numbers (the treasury, the pool, buybacks, supply and where every NEAR and BEFEWER went) are all on the <a href="#/pool">Pool page</a>.</p>
 </section>
 
 <section class="card block">
@@ -179,16 +173,12 @@
   .fact { display: grid; grid-template-columns: 24px minmax(0, 1fr); gap: 12px; font-size: 15px; line-height: 1.55; color: var(--fg-2) }
   .fact b { color: var(--fg) }
   .fact :global(svg) { color: var(--brand); margin-top: 2px }
-  .tok { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin-top: 12px }
-  @media (min-width: 860px) { .tok { grid-template-columns: repeat(4, minmax(0, 1fr)) } }
-  .v { font-size: 22px; font-weight: 800; margin-top: 2px; overflow-wrap: anywhere }
   .npcs { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; margin-top: 12px }
   .npc { padding: 12px 14px; border-radius: 12px; background: var(--surface-2); border: 1px solid var(--line-soft); display: grid; gap: 3px }
   .nh { display: flex; justify-content: space-between; gap: 8px }
   .links { margin: 8px 0 0; padding-left: 18px; display: grid; gap: 8px; color: var(--fg-2); font-size: 14.5px; line-height: 1.55 }
   code { font-family: var(--mono); font-size: 12.5px; background: var(--surface-2); padding: 1px 5px; border-radius: 5px; overflow-wrap: anywhere }
   .note { margin: 14px 0 0; padding: 10px 12px; border-radius: 10px; background: rgba(232, 182, 94, 0.07); border: 1px solid rgba(232, 182, 94, 0.25); font-size: 13.5px; color: var(--fg-2) }
-  .gold { color: var(--brand) }
   .outs { display: grid; gap: 12px; margin: 14px 0 }
   @media (min-width: 860px) { .outs { grid-template-columns: repeat(2, minmax(0, 1fr)) } }
   .out { border: 1px solid var(--line-soft); border-radius: 14px; padding: 14px; background: var(--surface) }

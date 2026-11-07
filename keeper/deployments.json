@@ -211,5 +211,29 @@
         "code_sha256": "65cef0c53dca74356e0bb91bc8bf27be7906bb39e477a238a8b48bada85a6fa1"
       }
     ]
+  },
+  "v7t.befewer.testnet": {
+    "deployed_at": "2026-11-07T18:46:08.022Z",
+    "tx": "DugncCNNfUsc2yY5gnXH1fFmwDdA7TD26o41eNRPfJUd",
+    "code_sha256": "65cef0c53dca74356e0bb91bc8bf27be7906bb39e477a238a8b48bada85a6fa1",
+    "params": {
+      "genesis_ns": "1794077280000000000",
+      "commit_ns": "180000000000",
+      "reveal_ns": "90000000000",
+      "max_stake_bps": 10000,
+      "min_stake": "10000000000000000000000",
+      "fee_bps": 500,
+      "reward_per_round": "1000000000000000000",
+      "max_supply": "1000000000000000000000000",
+      "streak_min": 3,
+      "graduate_at": "5000000000000000000000000",
+      "dex": "ref-finance-101.testnet",
+      "wnear": "wrap.testnet",
+      "pool_fee": 30,
+      "buyback_max": "500000000000000000000000",
+      "buyback_every_ns": "600000000000",
+      "refine_fee_bps": 1000,
+      "reveal_bounty_bps": 8000
+    }
   }
 }

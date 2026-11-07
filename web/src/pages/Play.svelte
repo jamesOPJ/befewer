@@ -62,7 +62,6 @@
   const nextStreak = $derived(streak + 1)
   const sharesIfWin = $derived(nextStreak >= need ? nextStreak - need + 1 : 0)
   const dex = $derived(st?.dex)
-  const toGraduate = $derived(st ? Math.min(1, toNear(st.treasury) / Math.max(1e-9, toNear(st.graduate_at))) : 0)
 
   let ctaEl = $state<HTMLButtonElement | null>(null)
   function pickSide(S: Side) {
@@ -250,23 +249,6 @@
         </p>
       </section>
 
-      {#if dex}
-        <section class="card treasury" aria-labelledby="tr-h">
-          <div class="eyebrow" id="tr-h">Treasury · <a href="#/pool">pool and buybacks</a></div>
-          {#if dex.step < 5}
-            <div class="pot"><b class="num">{fmtN(st.treasury)}</b> of {fmtN(st.graduate_at)} NEAR</div>
-            <div class="bar" aria-label="{Math.round(toGraduate * 100)}% of the way to opening the pool"><span style="width:{toGraduate * 100}%"></span></div>
-            <p class="fine">
-              {#if dex.step > 0}Opening the pool now: step {dex.step} of 5 ({dex.stage}).
-              {:else}At {fmtN(st.graduate_at)} NEAR the contract opens a BEFEWER/NEAR pool on Ref Finance with all of it, plus as many new BEFEWER as have been mined. The pool shares stay locked in the contract.{/if}
-              {100 - (game.params?.reveal_bounty_bps ?? 0) / 100}% of every fee, the gap between the sides and unopened bets fill it.
-            </p>
-          {:else}
-            <div class="pot"><b class="num">{fmtN(st.treasury)}</b> NEAR</div>
-            <p class="fine">Pool <a href="https://testnet.ref.finance/pool/{dex.pool_id}" target="_blank" rel="noopener">#{dex.pool_id} on Ref Finance</a> is open, its shares locked in the contract. Every {(Number(BigInt(game.params.buyback_every_ns) / 1_000_000_000n) / 60).toFixed(0)} min the treasury spends 1/365 of its NEAR (when that is at least 0.1) buying BEFEWER there and burns it: {dex.buybacks} buyback{dex.buybacks === 1 ? '' : 's'} so far, {fmtN(dex.bought_near)} NEAR spent, <b>{fmt(dex.bought_burned)} BEFEWER burned</b>.</p>
-          {/if}
-        </section>
-      {/if}
     {/if}
   </aside>
 </div>
@@ -332,7 +314,7 @@
   .mine .eyebrow { grid-column: 1 }
   .mine .res { grid-column: 1; font-size: 15px }
   .mine :global(svg) { grid-column: 2; grid-row: 1 / span 2; color: var(--fg-3) }
-  .mining, .treasury { padding: 16px 18px }
+  .mining { padding: 16px 18px }
   .pot { font-size: 20px; margin-top: 4px; overflow-wrap: anywhere }
   .dots { display: flex; align-items: center; gap: 6px; margin-top: 10px }
   .dot { width: 14px; height: 14px; border-radius: 50%; border: 1.5px solid var(--brand); background: transparent }
