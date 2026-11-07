@@ -6,7 +6,7 @@
   import { label } from '../questions'
   import { backtest, runsAtLeast, describe, chipsText, cleanPattern, PRESETS, PRESET_GROUPS, SLOT_SETS, type Rule, type Cond, type Pick, type Unit, type Backtest } from '../rules'
   import { tick } from 'svelte'
-  import { game, commitRound, lookup, saveRules, setAutopilot, draftDirty, putDraftLive, discardDraft, toast, lane, addLane, removeLane, useSlotSet, todayNet, runPreset, runSlotSet, setLaneOn, laneNow, strategyOf, toYocto, fmtN as fmtNear } from '../game.svelte'
+  import { game, commitRound, lookup, saveRules, setAutopilot, draftDirty, putDraftLive, discardDraft, toast, lane, addLane, removeLane, useSlotSet, todayNet, runPreset, runSlotSet, setLaneOn, laneNow, strategyOf, slotStats, toYocto, fmtN as fmtNear } from '../game.svelte'
 
   const WINDOW = 60
   // replays count chips of 0.01 NEAR and pay the contract's fee on every bet
@@ -36,6 +36,7 @@
   let allStrats = $state(false)
   const shown = $derived(allStrats ? PRESETS : PRESETS.slice(0, 4))
   const activeLanes = $derived(game.ap.lanes.filter(l => l.on !== false && l.live.length).length)
+  const today = $derived.by(() => { game.history; game.resultsBySlot; return todayNet() })
   const budgetY = $derived(toYocto(game.ap.budget.near))
   const usedPct = $derived(today < 0n && budgetY > 0n ? Math.min(100, Number((-today * 10000n) / budgetY) / 100) : 0)
   const budgetHit = $derived(game.ap.budget.on && today < 0n && -today >= budgetY)
@@ -56,7 +57,6 @@
       return { net: list.reduce((t, b) => t + b.end - b.start, 0), staked: list.reduce((t, b) => t + b.staked, 0), mines: list.reduce((t, b) => t + b.mines, 0), rounds: list[0]?.rounds ?? 0 }
     })
   })
-  const today = $derived.by(() => { game.history; game.resultsBySlot; return todayNet() })
   function setBudget(on: boolean, near: number) { game.ap.budget.on = on; game.ap.budget.near = Math.max(0.01, Math.round(near * 100) / 100); saveRules() }
   function useSet(i: number) { useSlotSet(i); toast('info', `${SLOT_SETS[i].name}: ${SLOT_SETS[i].slots.length} slots set up and running their rules. Edit any of them below.`) }
   const presetBt = $derived.by(() => {
@@ -163,14 +163,15 @@
     {#each game.ap.lanes as l, i}
       {@const st = laneNow(i)}
       {@const sv = st.slot != null ? game.me?.slots.find(x => x.slot === st.slot) : undefined}
+      {@const sk = sv ? slotStats(sv).streak : 0}
       <li class:off={l.on === false}>
         <label class="mini" title={l.on === false ? 'Off: this slot sits out' : 'On'}><input type="checkbox" checked={l.on !== false} onchange={e => setLaneOn(i, (e.currentTarget as HTMLInputElement).checked)} aria-label="Slot {l.name} on" /><span></span></label>
         <div class="sl">
           <div class="sl-top"><b>{l.name}</b><span class="faint small">{strategyOf(l)}</span></div>
           <div class="small st-{st.kind}">{st.text}</div>
         </div>
-        <div class="dots" title="Streak {sv?.streak ?? 0}: {need()} in a row mines" aria-label="streak {sv?.streak ?? 0}">
-          {#each Array(need()) as _, k}<span class:on={k < (sv?.streak ?? 0)}></span>{/each}
+        <div class="dots" title="Streak {sk}: {need()} in a row mines" aria-label="streak {sk}">
+          {#each Array(need()) as _, k}<span class:on={k < sk}></span>{/each}
         </div>
         <button class="btn small ghost" onclick={() => { game.ap.sel = i; toEditor() }}>Edit</button>
       </li>

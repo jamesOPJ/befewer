@@ -96,6 +96,46 @@ export const roundById = (r: number | null) => (r == null ? undefined : game.rou
 export const lookup: Lookup = { recent: H.recent, sameQuestion: H.sameQuestion, outcome: H.outcome, split: H.split }
 export const picks = () => (game.session ? loadPicks(game.session.accountId) : {})
 export const myOpen = (r: number) => game.me?.open.find(o => Number(o.round) === r)
+/** More than one slot in this account: views add up across slots and say which slot. */
+export const multi = () => (game.me?.slots.length ?? 0) > 1
+export const slotName = (slot: number) => {
+  const l = game.ap.lanes.find((x, i) => (i === 0 ? 0 : x.owner === game.session?.accountId ? x.slot : null) === slot)
+  return l && game.ap.lanes.length > 1 ? `${l.name} (slot ${slot})` : `slot ${slot}`
+}
+/** Every slot's bet in round r, with the side from this browser's picks. */
+export function myBetsIn(r: number) {
+  const pk = game.session ? loadPicks(game.session.accountId) : {}
+  return (game.me?.slots ?? []).flatMap(s => s.open.filter(o => Number(o.round) === r).map(o => ({ slot: s.slot, bet: o, side: pk[pickKey(s.slot, r)]?.side ?? null })))
+}
+/** Settled bets of all slots, newest first. */
+export const allResults = (): Result[] => Object.values(game.resultsBySlot).flat().sort((a, b) => b.round - a.round || a.slot - b.slot)
+/** A slot's record as it stands once every settled bet counts: the contract books a bet only
+ *  when the slot bets again (lazy bookkeeping), so settled-but-unbooked results are added here. */
+export function slotStats(s: { wins: number; losses: number; voids: number; streak: number; best_streak: number; open: { round: string; result: string | null }[] }) {
+  let { wins, losses, voids, streak } = s
+  let best = s.best_streak
+  for (const o of [...s.open].sort((a, b) => Number(a.round) - Number(b.round))) {
+    if (o.result === 'win') { wins++; streak++; best = Math.max(best, streak) }
+    else if (o.result === 'loss') { losses++; streak = 0 }
+    else if (o.result === 'void') voids++
+    else if (o.result === 'forfeit') streak = 0
+  }
+  return { wins, losses, voids, streak, best }
+}
+/** Record across all slots, and the best streak running right now (and on which slot). */
+export function totals() {
+  const sl = game.me?.slots ?? []
+  const t = { wins: 0, losses: 0, voids: 0, best: 0, now: 0, nowSlot: 0 }
+  for (const s of sl) {
+    const x = slotStats(s)
+    t.wins += x.wins; t.losses += x.losses; t.voids += x.voids
+    t.best = Math.max(t.best, x.best)
+    if (x.streak > t.now) { t.now = x.streak; t.nowSlot = s.slot }
+  }
+  return t
+}
+/** Open bets of all slots, oldest round first. */
+export const allOpen = () => (game.me?.slots ?? []).flatMap(s => s.open.map(o => ({ slot: s.slot, bet: o }))).sort((a, b) => Number(a.bet.round) - Number(b.bet.round) || a.slot - b.slot)
 export const short = (a: string) => (a.length > 22 ? a.slice(0, 10) + '…' + a.slice(-10) : a)
 export { fmt, fmtN, toNear, toYocto, label, ONE, CHIP, NEAR }
 /** What a new guest account starts with in its game balance (the server deposits 0.3, the first
@@ -180,11 +220,12 @@ async function loadResults() {
     ;(by[e.slot] ??= []).push({ round: e.round, slot: e.slot, side: pick.side, amount, fee, outcome: rv.outcome })
   }
   const out = by[0] ?? []
-  const newest = out[0]
-  const prevNewest = game.results[0]
-  if (newest && prevNewest && newest.round !== prevNewest.round) announce(newest)
+  const prevNewest = Math.max(-1, ...Object.values(game.resultsBySlot).flat().map(x => x.round))
   game.results = out
   game.resultsBySlot = by
+  // announce a newly settled round once, adding up every slot that bet in it
+  const all = allResults()
+  if (all.length && prevNewest >= 0 && all[0].round > prevNewest) announce(all.filter(x => x.round === all[0].round))
 }
 
 /** Reveal my own sealed bets as soon as the reveal opens: the reveal reward (most of the fee)
@@ -212,7 +253,14 @@ async function selfReveal() {
   }
 }
 
-function announce(x: Result) {
+function announce(list: Result[]) {
+  const x = list[0]
+  if (list.length > 1) {
+    const net = list.reduce((t, y) => t + netOf(y), 0n)
+    const won = list.filter(y => y.outcome !== 'void' && y.outcome === y.side).length
+    toast(net >= 0n ? 'ok' : 'info', `Round ${x.round}: ${x.outcome === 'void' ? 'void, everything came back' : `${label(x.round, x.outcome)} was the smaller side`}. ${won} of your ${list.length} slots won · net ${net >= 0n ? '+' : '−'}${fmtN(net >= 0n ? net : -net)} NEAR.`)
+    return
+  }
   if (x.outcome === 'void') toast('info', `Round ${x.round} was void: your ${fmtN(x.amount + x.fee)} NEAR came back, fee included.`)
   else if (x.outcome === x.side) toast('ok', `Round ${x.round}: ${label(x.round, x.side)} was the smaller side. You won +${fmtN(x.amount)} NEAR.`)
   else toast('info', `Round ${x.round}: ${label(x.round, x.outcome)} was the smaller side. You lost ${fmtN(x.amount)} NEAR.`)

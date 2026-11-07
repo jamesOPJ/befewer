@@ -4,7 +4,7 @@
   import { questionFor, label } from '../questions'
   import Icon from '../lib/Icon.svelte'
   import Orbs from '../lib/Orbs.svelte'
-  import { game, fmt, fmtN, commitRound, picks } from '../game.svelte'
+  import { game, fmt, fmtN, commitRound, picks, slotName } from '../game.svelte'
   import type { RoundV } from '../chain'
 
   let filter = $state<'all' | 'mine'>('all')
@@ -21,7 +21,17 @@
     }
     return out
   })
-  const mine = $derived.by(() => { game.results; game.me; return picks() })
+  // my bets by round, from every slot (picks: "round" for slot 0, "slot:round" for others)
+  const mine = $derived.by(() => {
+    game.results; game.resultsBySlot; game.me
+    const by: Record<string, { slot: number; side: 'A' | 'B'; amount: string }[]> = {}
+    for (const [k, v] of Object.entries(picks())) {
+      const [slot, round] = k.includes(':') ? k.split(':') : ['0', k]
+      ;(by[round] ??= []).push({ slot: Number(slot), side: v.side, amount: v.amount })
+    }
+    for (const l of Object.values(by)) l.sort((a, b) => a.slot - b.slot)
+    return by
+  })
   const list = $derived(filter === 'mine' ? all.filter(x => mine[x.round]) : all)
   const settled = $derived(all.filter(x => x.settled))
   const sum = $derived.by(() => {
@@ -90,7 +100,7 @@
             {#if st !== 'settled'}<span class="pill">{st === 'betting' ? 'Live' : 'Opening'}</span>
             {:else if x.outcome === 'void'}<span class="pill">Void</span>
             {:else}<span class="win side-{x.outcome}">{label(n, x.outcome!)} won</span><span class="gold small num"><Icon name="flame" size={13} /> {fmtN(x.to_treasury, 3)}</span>{/if}
-            {#if my}<span class="mine-tag">you: {label(n, my.side)}</span>{/if}
+            {#if my}<span class="mine-tag">you: {my.length > 1 ? my.map(b => b.side).join(' + ') : label(n, my[0].side)}</span>{/if}
           </span>
         </button>
         {#if open === n}
@@ -101,7 +111,7 @@
               <div><dt>Staked</dt><dd class="num">{fmtN(x.committed)} NEAR <span class="faint">+ {fmtN(x.fees)} fees</span></dd></div>
               {#if x.settled}<div><dt>To the treasury</dt><dd class="num gold">{fmtN(x.to_treasury)} NEAR</dd></div>
                 <div><dt>Mined</dt><dd class="num">{BigInt(x.reward) > 0n ? `${fmt(x.reward)} BEFEWER to streak winners` : `none (pot rolls over: +${fmt(x.emission)})`}</dd></div>{/if}
-              {#if my}<div><dt>Your bet</dt><dd class="num">{fmtN(my.amount)} NEAR on {label(n, my.side)}</dd></div>{/if}
+              {#if my}<div><dt>Your bet{my.length > 1 ? 's' : ''}</dt><dd class="num">{#each my as b, k}{k ? ' · ' : ''}{my.length > 1 ? `${slotName(b.slot)}: ` : ''}{fmtN(b.amount)} NEAR on {label(n, b.side)}{/each}</dd></div>{/if}
             </dl>
             {#if H.sameQuestion(n, 4).length}
               <div class="same">

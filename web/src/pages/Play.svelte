@@ -7,7 +7,7 @@
   import Icon from '../lib/Icon.svelte'
   import LowBalance from '../lib/LowBalance.svelte'
   import {
-    game, fmt, fmtN, toNear, toYocto, feeFor, GUEST_GAME_NEAR, openWallet, commitRound, revealRound, started, msLeft, clock, roundById, myOpen, picks, placeBet, capFor, toast,
+    game, fmt, fmtN, toNear, toYocto, feeFor, GUEST_GAME_NEAR, openWallet, multi, slotName, myBetsIn, totals, allResults, netOf, commitRound, revealRound, started, msLeft, clock, roundById, myOpen, picks, placeBet, capFor, toast,
     type Side,
   } from '../game.svelte'
 
@@ -23,6 +23,17 @@
   const leftReveal = $derived(msLeft(game.status?.reveal_ends_at))
   const mine = $derived(myOpen(r))
   const myPick = $derived(mine ? picks()[r] : undefined)
+  // every slot's bet this round (manual bets go from slot 0)
+  const bets = $derived.by(() => { game.me; return myBetsIn(r) })
+  const others = $derived(bets.filter(x => x.slot !== 0))
+  // the newest settled round, added up over every slot that bet in it
+  const last = $derived.by(() => {
+    game.resultsBySlot
+    const all = allResults()
+    if (!all.length) return null
+    const list = all.filter(x => x.round === all[0].round)
+    return { round: all[0].round, list, net: list.reduce((t, x) => t + netOf(x), 0n) }
+  })
   const newcomer = $derived(!game.session || !game.me || !game.me.registered)
   const balance = $derived(newcomer ? GUEST_GAME_NEAR : BigInt(game.me?.balance ?? '0'))
   const cap = $derived(game.params ? capFor(balance) : 0n)
@@ -45,7 +56,9 @@
   // mining: the streak this bet would complete if it wins, counted over finished rounds
   const st = $derived(game.status)
   const need = $derived(game.params?.streak_min ?? 3)
-  const streak = $derived(game.me?.streak ?? 0)
+  // the best streak running on any slot (with several slots, that is the one closest to mining)
+  const tot = $derived.by(() => { game.me; return totals() })
+  const streak = $derived(tot.now)
   const nextStreak = $derived(streak + 1)
   const sharesIfWin = $derived(nextStreak >= need ? nextStreak - need + 1 : 0)
   const dex = $derived(st?.dex)
@@ -119,12 +132,19 @@
       <div class="panel sealed" in:scale={{ start: 0.97, duration: 220 }}>
         <div class="lockicon"><Icon name="lock" size={26} /></div>
         <div>
-          <div class="eyebrow">Sealed in round {r}</div>
-          <div class="sealed-amt"><b class="num">{fmtN(mine.amount)}</b> NEAR on <b class="side-{myPick?.side}">{myPick ? label(r, myPick.side) : '?'}</b> <span class="faint small">+{fmtN(mine.fee)} fee · {fmtN(mine.storage)} held for storage</span></div>
+          <div class="eyebrow">Sealed in round {r}{bets.length > 1 ? ` · ${bets.length} slots` : ''}</div>
+          {#if bets.length > 1}
+            {#each bets as b}<div class="sealed-line"><span class="faint">{slotName(b.slot)}</span> <b class="num">{fmtN(b.bet.amount)}</b> NEAR on <b class="side-{b.side}">{b.side ? label(r, b.side) : '?'}</b></div>{/each}
+          {:else}
+            <div class="sealed-amt"><b class="num">{fmtN(mine.amount)}</b> NEAR on <b class="side-{myPick?.side}">{myPick ? label(r, myPick.side) : '?'}</b> <span class="faint small">+{fmtN(mine.fee)} fee · {fmtN(mine.storage)} held for storage</span></div>
+          {/if}
           <p class="muted">Nobody, including us, can see your answer until the reveal opens in <b class="num">{clock(leftCommit)}</b>. It opens itself, so you can close this page. The result lands about {Math.round(revealTotal / 1000)} s after that.</p>
         </div>
       </div>
     {:else}
+      {#if others.length}
+        <p class="others small">Your other slots already bet this round: {others.map(b => `${slotName(b.slot)} ${fmtN(b.bet.amount)} on ${b.side ?? '?'}`).join(' · ')}. A bet here goes from slot 0.</p>
+      {/if}
       <div class="answers" role="group" aria-label="Pick an answer">
         {#each ['A', 'B'] as s}
           {@const S = s as Side}
@@ -197,15 +217,18 @@
       </section>
     {/if}
 
-    {#if game.results[0]}
-      {@const x = game.results[0]}
+    {#if last}
+      {@const x = last.list[0]}
       <a class="card mine" href="#/me">
-        <div class="eyebrow">Your last bet · round {x.round}</div>
+        <div class="eyebrow">Your last {last.list.length > 1 ? `round · ${last.list.length} slots` : 'bet'} · round {last.round}</div>
         <div class="res">
-          {#if x.outcome === 'void'}<b>Refunded {fmtN(x.amount + x.fee)} NEAR</b>
+          {#if last.list.length > 1}
+            <b class={last.net > 0n ? 'good' : last.net < 0n ? 'burn' : ''}>Net {last.net >= 0n ? '+' : '−'}{fmtN(last.net >= 0n ? last.net : -last.net)} NEAR</b>
+            <span class="muted">· {last.list.filter(y => y.outcome !== 'void' && y.outcome === y.side).length} of {last.list.length} slots won</span>
+          {:else if x.outcome === 'void'}<b>Refunded {fmtN(x.amount + x.fee)} NEAR</b>
           {:else if x.outcome === x.side}<b class="good">Won +{fmtN(x.amount)} NEAR</b>
           {:else}<b class="burn">Lost {fmtN(x.amount)} NEAR</b>{/if}
-          <span class="muted">· you picked {label(x.round, x.side)}</span>
+          {#if last.list.length === 1}<span class="muted">· you picked {label(x.round, x.side)}</span>{/if}
         </div>
         <Icon name="chevron" size={18} />
       </a>
@@ -217,7 +240,7 @@
         <div class="pot"><b class="num">{fmt(st.pot)}</b> BEFEWER in the pot</div>
         <div class="dots" aria-label="Your streak: {streak} of {need}">
           {#each Array(need) as _, i}<span class="dot" class:on={i < streak}></span>{/each}
-          <span class="small muted">streak {streak}</span>
+          <span class="small muted">streak {streak}{multi() && streak > 0 ? ` · ${slotName(tot.nowSlot)}` : ''}{multi() ? ' (best of your slots)' : ''}</span>
         </div>
         <p class="fine">
           {#if sharesIfWin > 0}Win this round and you mine: a {nextStreak}-win streak earns {sharesIfWin} share{sharesIfWin === 1 ? '' : 's'} per 0.001 NEAR staked. Winners split the pot by shares.
@@ -300,6 +323,8 @@
   .sealed { border-color: rgba(232, 182, 94, 0.35); background: linear-gradient(180deg, rgba(232, 182, 94, 0.08), transparent), var(--surface-2) }
   .lockicon { width: 48px; height: 48px; border-radius: 14px; display: grid; place-items: center; background: rgba(232, 182, 94, 0.14); color: var(--brand); flex: none }
   .sealed-amt { font-size: 20px; margin-top: 2px; overflow-wrap: anywhere }
+  .sealed-line { font-size: 16px; margin-top: 2px; overflow-wrap: anywhere }
+  .others { margin: 14px 0 0; padding: 8px 12px; border-radius: 10px; background: var(--surface-2); color: var(--fg-2) }
   .side { display: grid; gap: 16px }
   .reveal { padding: 18px }
   .q2 { font-size: 18px; font-weight: 750; margin-top: 6px; line-height: 1.25; overflow-wrap: anywhere }

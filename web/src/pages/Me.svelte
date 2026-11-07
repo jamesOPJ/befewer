@@ -1,11 +1,17 @@
 <script lang="ts">
   import Icon from '../lib/Icon.svelte'
   import { questionFor, label } from '../questions'
-  import { game, fmt, fmtN, netOf, GUEST_GAME_NEAR, short, picks, forgetDevice, toast, commitRound, withdrawAll, claimBefewer, claimPreview, openWallet, depositMore, disconnectWallet, closeSlot, movable, moveToGame } from '../game.svelte'
+  import { game, fmt, fmtN, netOf, GUEST_GAME_NEAR, short, picks, forgetDevice, toast, commitRound, withdrawAll, claimBefewer, claimPreview, openWallet, depositMore, disconnectWallet, closeSlot, movable, moveToGame, multi, slotName, totals, slotStats, allResults, allOpen } from '../game.svelte'
+  import { pickKey } from '../chain'
 
   const me = $derived(game.me)
-  const decided = $derived(me ? me.wins + me.losses : 0)
-  const rate = $derived(decided ? me!.wins / decided : 0)
+  // every slot counts: totals add up, the streak shown is the best one running now
+  const tot = $derived.by(() => { game.me; return totals() })
+  const decided = $derived(tot.wins + tot.losses)
+  const rate = $derived(decided ? tot.wins / decided : 0)
+  const open = $derived.by(() => { game.me; return allOpen().filter(x => !x.bet.result) })
+  const results = $derived.by(() => { game.resultsBySlot; return allResults() })
+  const sideOf = (slot: number, r: string | number) => pk[pickKey(slot, r)]?.side
   const pk = $derived.by(() => { game.me; return picks() })
   let confirming = $state(false)
 
@@ -50,7 +56,7 @@
       {#if BigInt(me.pending_near) > 0n}<div class="tok">+{fmtN(me.pending_near)} NEAR from finished bets <span class="faint">· added to the balance on your next bet or withdraw</span></div>{/if}
       <div class="tok"><b class="num">{fmt(me.tokens)}</b> BEFEWER in your wallet <span class="faint">· {fmt(me.mined)} mined by your streaks</span></div>
       <button class="acct" onclick={copy} title="Copy account name"><span class="num">{short(game.session.accountId)}</span><Icon name="copy" size={15} /></button>
-      <div class="faint small">{game.session.kind === 'wallet' ? 'Your wallet account · bets signed by a game-only key in this browser' : 'Testnet guest account kept in this browser'} · {me.open.length} bet{me.open.length === 1 ? '' : 's'} waiting to settle</div>
+      <div class="faint small">{game.session.kind === 'wallet' ? 'Your wallet account · bets signed by a game-only key in this browser' : 'Testnet guest account kept in this browser'} · {open.length} bet{open.length === 1 ? '' : 's'} waiting to settle{multi() ? ` across ${me.slots.length} slots` : ''}</div>
       {#if game.session.kind === 'wallet'}
         <div class="row wrap">
           {#each [0.5, 1, 2] as n}<button class="btn small" onclick={() => deposit(n)} disabled={!!game.busy}>Deposit {n} NEAR</button>{/each}
@@ -77,7 +83,7 @@
           <span class="fill" class:above={rate > 0.5} style="width:{rate * 100}%"></span>
           <span class="coin" style="left:50%"></span>
         </div>
-        <div class="small muted">{me.wins} of {decided} decided rounds. <span class="faint">The mark is a coin flip (50%).</span></div>
+        <div class="small muted">{tot.wins} of {decided} decided bets{multi() ? `, all ${me.slots.length} slots` : ''}. <span class="faint">The mark is a coin flip (50%).</span></div>
       {:else}
         <div class="money num faint">—</div>
         <div class="small muted">Shows up after your first round settles.</div>
@@ -99,10 +105,10 @@
   </section>
 
   <section class="stats">
-    <div class="card st"><div class="eyebrow">Wins</div><div class="v num good">{me.wins}</div></div>
-    <div class="card st"><div class="eyebrow">Losses</div><div class="v num burn">{me.losses}</div></div>
-    <div class="card st"><div class="eyebrow">Void</div><div class="v num">{me.voids}</div></div>
-    <div class="card st"><div class="eyebrow">Streak</div><div class="v num">{me.streak}<span class="faint small"> · best {me.best_streak}</span></div></div>
+    <div class="card st"><div class="eyebrow">Wins</div><div class="v num good">{tot.wins}</div></div>
+    <div class="card st"><div class="eyebrow">Losses</div><div class="v num burn">{tot.losses}</div></div>
+    <div class="card st"><div class="eyebrow">Void</div><div class="v num">{tot.voids}</div></div>
+    <div class="card st"><div class="eyebrow">Streak{multi() ? ' (best slot)' : ''}</div><div class="v num">{tot.now}<span class="faint small"> · best {tot.best}{multi() && tot.now > 0 ? ` · ${slotName(tot.nowSlot)}` : ''}</span></div></div>
   </section>
 
   {#if me.slots.length > 1}
@@ -110,10 +116,11 @@
       <h2 class="h2">Slots</h2>
       <ul class="list">
         {#each me.slots as s}
+          {@const x = slotStats(s)}
           <li class="card item">
             <span class="no num">#{s.slot}</span>
-            <span class="body"><span class="q">{s.slot === 0 ? 'Slot 0 (manual bets)' : `Slot ${s.slot}`}</span>
-              <span class="small muted">streak {s.streak} · best {s.best_streak} · won {s.wins} · lost {s.losses}{s.open.length ? ` · ${s.open.length} bet${s.open.length === 1 ? '' : 's'} in play` : ''}</span></span>
+            <span class="body"><span class="q">{slotName(s.slot)}{s.slot === 0 ? ' · manual bets' : ''}</span>
+              <span class="small muted">streak {x.streak} · best {x.best} · won {x.wins} · lost {x.losses}{s.open.some(o => !o.result) ? ` · ${s.open.filter(o => !o.result).length} bet${s.open.filter(o => !o.result).length === 1 ? '' : 's'} in play` : ''}</span></span>
             {#if s.slot !== 0}<button class="btn small" onclick={() => closeSlot(s.slot)} disabled={!!game.busy || s.open.some(o => !o.result)} title="Returns its 0.002 NEAR">Close</button>{/if}
           </li>
         {/each}
@@ -121,15 +128,16 @@
     </section>
   {/if}
 
-  {#if me.open.some(o => !o.result)}
+  {#if open.length}
     <section>
       <h2 class="h2">Waiting to settle</h2>
       <ul class="list">
-        {#each me.open.filter(o => !o.result) as o}
+        {#each open as { slot, bet: o }}
           {@const n = Number(o.round)}
+          {@const sd = sideOf(slot, o.round)}
           <li class="card item">
             <span class="no num">#{n}</span>
-            <span class="body"><span class="q">{questionFor(n).q}</span><span class="small muted">{fmtN(o.amount)} NEAR on {pk[o.round] ? label(n, pk[o.round].side) : '?'}{o.streak_if_win >= (game.params?.streak_min ?? 3) ? ` · mines if it wins (streak ${o.streak_if_win})` : ''}</span></span>
+            <span class="body"><span class="q">{questionFor(n).q}</span><span class="small muted">{multi() ? `${slotName(slot)}: ` : ''}{fmtN(o.amount)} NEAR on {sd ? label(n, sd) : '?'}{o.streak_if_win >= (game.params?.streak_min ?? 3) ? ` · mines if it wins (streak ${o.streak_if_win})` : ''}</span></span>
             <span class="pill">{n === commitRound() ? 'Sealed' : o.side ? 'Opened' : 'Opening'}</span>
           </li>
         {/each}
@@ -139,14 +147,14 @@
 
   <section>
     <h2 class="h2">Results</h2>
-    {#if game.results.length}
+    {#if results.length}
       <ul class="list">
-        {#each game.results as x}
+        {#each results.slice(0, 60) as x}
           {@const n = netOf(x)}
           <li class="card item">
             <span class="no num">#{x.round}</span>
             <span class="body"><span class="q">{questionFor(x.round).q}</span>
-              <span class="small muted">You picked {label(x.round, x.side)} · {x.outcome === 'void' ? 'void' : `${label(x.round, x.outcome)} was smaller`}</span></span>
+              <span class="small muted">{multi() ? `${slotName(x.slot)} picked` : 'You picked'} {label(x.round, x.side)} · {x.outcome === 'void' ? 'void' : `${label(x.round, x.outcome)} was smaller`}</span></span>
             {#if x.outcome === 'void'}<span class="amt num">±0</span>
             {:else if n > 0n}<span class="amt num good">+{fmtN(n)}</span>
             {:else}<span class="amt num burn">−{fmtN(-n)}</span>{/if}
