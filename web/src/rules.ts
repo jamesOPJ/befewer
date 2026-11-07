@@ -240,11 +240,12 @@ export function guard(L: Lookup, r: number): Lookup {
 }
 
 /** Plain-English sentence for a rule (read-only views of the running rules). */
-export function describe(r: Rule): string {
+/** `i` = the rule's position: an 'always' rule reads "Every round" first, "Otherwise" after others. */
+export function describe(r: Rule, i = 1): string {
   const c = r.cond
   const won = (w: Who) => (w === 'any' ? 'one side' : w)
   const cond =
-    c.kind === 'always' ? 'Otherwise'
+    c.kind === 'always' ? (i === 0 ? 'Every round' : 'Otherwise')
     : c.kind === 'last' ? (c.winner === 'any' ? 'If the round before had a winner' : `If ${c.winner} won the round before`)
     : c.kind === 'streak' ? `If ${won(c.winner)} won the last ${c.n} rounds in a row`
     : c.kind === 'tally' ? `If ${c.winner} won at least ${c.k} of the last ${c.n} rounds`
@@ -252,7 +253,10 @@ export function describe(r: Rule): string {
     : c.kind === 'mine' ? `If my last bet ${c.result === 'void' ? 'was refunded' : c.result}`
     : c.winner === 'any' ? 'If this question was asked before' : `If ${c.winner} won this question last time`
   if (r.pick === 'skip') return `${cond} → skip the round`
-  if (r.pick === 'loop') return `${cond} → follow ${cleanPattern(r.pattern)} over and over${r.rest ? ' (after a loss, wait for the next cycle)' : ''}, ${stakeText(r.unit, r.amount)}`
+  if (r.pick === 'loop') {
+    const p = cleanPattern(r.pattern)
+    return `${cond} → bet in a loop ${p.split('').join(' → ')}${p.length > 1 ? ` (starts over every ${p.length} rounds)` : ''}${r.rest ? ', sitting out the rest of the loop after a loss' : ''}, ${stakeText(r.unit, r.amount)}`
+  }
   const pick = { same: 'that same side', other: 'the other side', A: 'A', B: 'B', random: 'a random side' }[r.pick]
   return `${cond} → bet ${pick}, ${stakeText(r.unit, r.amount)}`
 }

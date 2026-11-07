@@ -55,10 +55,10 @@
 
   const KINDS: [Cond['kind'], string][] = [
     ['last', 'the round before'], ['margin', 'the round before was'], ['streak', 'the last few rounds'], ['tally', 'over the last rounds'],
-    ['question', 'last time this question was asked'], ['mine', 'my last bet'], ['always', 'anything else'],
+    ['question', 'last time this question was asked'], ['mine', 'my last bet'], ['always', 'every round'],
   ]
   function picksFor(c: Cond): [Pick, string][] {
-    const loop: [Pick, string] = ['loop', 'a fixed pattern (loop)']
+    const loop: [Pick, string] = ['loop', 'in a loop (A/B pattern)']
     if (c.kind === 'always') return [['A', 'A'], ['B', 'B'], ['random', 'a random side'], loop, ['skip', 'nothing (skip)']]
     const same = c.kind === 'mine' ? 'the side I picked' : 'that same side'
     return [['same', same], ['other', 'the other side'], ['A', 'A'], ['B', 'B'], ['random', 'a random side'], loop, ['skip', 'nothing (skip)']]
@@ -137,7 +137,7 @@
     <div class="eyebrow">Running rules{game.ap.lanes.length > 1 ? ` · ${game.ap.lanes.length} slots, each bets on its own` : ''}</div>
     {#each game.ap.lanes as l}
       {#if game.ap.lanes.length > 1}<div class="lane-h small"><b>{l.name}</b></div>{/if}
-      <ol>{#each l.live as lr}<li>{describe(lr)}</li>{:else}<li class="faint">no rules: this slot does not bet</li>{/each}</ol>
+      <ol>{#each l.live as lr, k}<li>{describe(lr, k)}</li>{:else}<li class="faint">no rules: this slot does not bet</li>{/each}</ol>
     {/each}
     <div class="budget small">
       <label><input type="checkbox" checked={game.ap.budget.on} onchange={e => setBudget((e.currentTarget as HTMLInputElement).checked, game.ap.budget.near)} /> Daily budget: stop for the day after losing</label>
@@ -176,13 +176,13 @@
         {/if}
       </div>
       <ol class="rules">
-        {#each rules as r, i (i)}
+        {#each rules as r, i (`${game.ap.sel}:${i}`)}
           <li class="rule" transition:slide={{ duration: 160 }}>
             <span class="n">{i + 1}</span>
             <div class="sentence">
-              <span class="w">{r.cond.kind === 'always' ? 'For' : 'If'}</span>
+              {#if r.cond.kind !== 'always'}<span class="w">If</span>{/if}
               <select aria-label="Condition" value={r.cond.kind} onchange={e => setKind(i, (e.currentTarget as HTMLSelectElement).value as Cond['kind'])}>
-                {#each KINDS as [v, t]}<option value={v}>{t}</option>{/each}
+                {#each KINDS as [v, t]}<option value={v}>{v === 'always' ? (i === 0 ? 'every round' : 'otherwise (any other round)') : t}</option>{/each}
               </select>
               {#if r.cond.kind === 'streak'}
                 <select aria-label="How many rounds" value={String(r.cond.n)} onchange={e => { if (r.cond.kind === 'streak') r.cond.n = Number((e.currentTarget as HTMLSelectElement).value); commit() }}>
@@ -219,12 +219,26 @@
                 </select>
               {/if}
               <span class="w">→ bet</span>
-              <select aria-label="Bet" value={r.pick} onchange={e => { r.pick = (e.currentTarget as HTMLSelectElement).value as Pick; if (r.pick === 'loop') { r.pattern = cleanPattern(r.pattern); r.rest = !!r.rest } commit() }}>
-                {#each picksFor(r.cond) as [v, t]}<option value={v}>{t}</option>{/each}
-              </select>
+              {#key r.cond.kind}
+                <select aria-label="Bet" value={r.pick} onchange={e => { r.pick = (e.currentTarget as HTMLSelectElement).value as Pick; if (r.pick === 'loop') { r.pattern = cleanPattern(r.pattern); r.rest = !!r.rest } commit() }}>
+                  {#each picksFor(r.cond) as [v, t]}<option value={v}>{t}</option>{/each}
+                </select>
+              {/key}
               {#if r.pick === 'loop'}
-                <input class="pat" aria-label="Pattern of A and B" maxlength="8" value={r.pattern ?? 'A'} oninput={e => { const el = e.currentTarget as HTMLInputElement; el.value = el.value.toUpperCase().replace(/[^AB]/g, '') }} onchange={e => { r.pattern = cleanPattern((e.currentTarget as HTMLInputElement).value); commit() }} />
-                <label class="rest small"><input type="checkbox" checked={!!r.rest} onchange={e => { r.rest = (e.currentTarget as HTMLInputElement).checked; commit() }} /> after a loss, wait for the next cycle</label>
+                {@const pat = cleanPattern(r.pattern)}
+                {@const now = commitRound()}
+                <div class="loopbox">
+                  <span class="faint small">Tap a letter to switch it:</span>
+                  <div class="letters">
+                    {#each pat.split('') as ch, k}
+                      <button class="lt {ch}" class:cur={now % pat.length === k} onclick={() => { r.pattern = pat.slice(0, k) + (ch === 'A' ? 'B' : 'A') + pat.slice(k + 1); commit() }} aria-label="Letter {k + 1} is {ch}, tap to switch">{ch}</button>
+                    {/each}
+                    <button class="pm" onclick={() => { r.pattern = pat + 'A'; commit() }} disabled={pat.length >= 8} aria-label="Add a letter">+</button>
+                    <button class="pm" onclick={() => { r.pattern = pat.slice(0, -1) || 'A'; commit() }} disabled={pat.length <= 1} aria-label="Remove the last letter">−</button>
+                  </div>
+                  <span class="small">This round (#{now}) bets <b class="side-{pat[now % pat.length]}">{pat[now % pat.length]}</b>, then {pat[(now + 1) % pat.length]}, then {pat[(now + 2) % pat.length]}…</span>
+                  <label class="rest small"><input type="checkbox" checked={!!r.rest} onchange={e => { r.rest = (e.currentTarget as HTMLInputElement).checked; commit() }} /> after a loss, sit out until the loop starts over</label>
+                </div>
               {/if}
               {#if r.pick !== 'skip'}
                 <span class="w">with</span>
@@ -408,7 +422,14 @@
   .lanebar { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; margin: -4px 0 10px }
   .lanebar input { width: 140px }
   .lane-h { margin-top: 6px }
-  .pat { width: 88px; text-transform: uppercase; font-family: inherit; letter-spacing: 0.08em }
+  .loopbox { flex-basis: 100%; display: grid; gap: 6px; padding: 10px 12px; border-radius: 12px; background: var(--surface-2); border: 1px solid var(--line) }
+  .letters { display: flex; flex-wrap: wrap; gap: 6px; align-items: center }
+  .lt { width: 38px; height: 38px; border-radius: 10px; font-weight: 800; font-size: 16px; cursor: pointer; border: 2px solid transparent }
+  .lt.A { background: var(--a-soft); color: var(--a); border-color: var(--a) }
+  .lt.B { background: var(--b-soft); color: var(--b); border-color: var(--b) }
+  .lt.cur { box-shadow: 0 0 0 3px var(--fg) }
+  .pm { width: 34px; height: 34px; border-radius: 10px; border: 1px dashed var(--line); background: transparent; color: var(--fg-2); font-size: 18px; cursor: pointer }
+  .pm:disabled { opacity: 0.35; cursor: default }
   .rest { display: inline-flex; gap: 6px; align-items: center; color: var(--fg-2) }
   .budget { display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line) }
   .budget input[type='number'] { width: 76px }
