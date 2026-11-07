@@ -135,6 +135,27 @@ pub fn miners_key(r: u64, side: u8) -> Vec<u8> {
     k.push(side);
     k
 }
+/// The last BUYBACKS_KEPT buybacks, oldest first: (started at ns, wNEAR sent to the pool, wNEAR
+/// the pool took, BEFEWER that came back and was burned). Raw storage outside the contract
+/// state, like the miner lists (added to the live contract without a migration).
+const BUYBACKS_KEY: &[u8] = b"__bb";
+pub const BUYBACKS_KEPT: usize = 100;
+type BuybackLog = Vec<(u64, u128, u128, u128)>;
+fn buybacks_read() -> BuybackLog {
+    env::storage_read(BUYBACKS_KEY).map(|v| near_sdk::borsh::from_slice(&v).expect("buyback log")).unwrap_or_default()
+}
+fn buybacks_write(log: &BuybackLog) {
+    env::storage_write(BUYBACKS_KEY, &near_sdk::borsh::to_vec(log).expect("buyback log"));
+}
+/// Change the newest entry (the buyback in flight: buybacks never overlap).
+fn buybacks_update_last(f: impl FnOnce(&mut (u64, u128, u128, u128))) {
+    let mut log = buybacks_read();
+    if let Some(last) = log.last_mut() {
+        f(last);
+        buybacks_write(&log);
+    }
+}
+
 fn miners_read(r: u64, side: u8) -> Option<MinerList> {
     env::storage_read(&miners_key(r, side)).map(|v| near_sdk::borsh::from_slice(&v).expect("miner list"))
 }
@@ -401,6 +422,16 @@ pub struct RoundView {
     /// mined, or when the round was played before the list was recorded (then `reward` > 0).
     pub miners: u32,
     pub mining_players: u32,
+}
+
+/// One buyback (`get_buybacks`). `spent` < `near_in`: the pool did not take it all (kept as
+/// wNEAR for the next one); `spent` 0 with `burned` 0: the swap did not go through.
+#[near(serializers = [json])]
+pub struct BuybackView {
+    pub at: U64,
+    pub near_in: U128,
+    pub spent: U128,
+    pub burned: U128,
 }
 
 /// One bet that mined in a round (`get_round_miners`).
@@ -1451,6 +1482,12 @@ impl Contract {
             tgas(80),
         );
         emit("buyback_start", json!({"amount": U128(amount), "from_treasury": U128(fresh), "from_held_wnear": U128(held)}));
+        let mut log = buybacks_read();
+        log.push((now, amount, 0, 0));
+        if log.len() > BUYBACKS_KEPT {
+            log.remove(0);
+        }
+        buybacks_write(&log);
         p.then(Self::ext(me).with_static_gas(tgas(15)).on_buyback(U128(held), U128(fresh)))
     }
 
@@ -1468,6 +1505,7 @@ impl Contract {
             return;
         }
         let spent = amount_of(res).min(amount);
+        buybacks_update_last(|e| e.2 = spent);
         // whatever the DEX did not take came back to us as wNEAR
         self.dex.held_wnear += amount - spent;
         self.dex.bought_near += spent;
@@ -1485,6 +1523,7 @@ impl Contract {
         let from_pool = *from == self.params.dex;
         if from_pool {
             self.dex.bought_burned += amount;
+            buybacks_update_last(|e| e.3 += amount);
         }
         let memo = if from_pool { "bought back from the pool" } else { "sent to the contract" };
         FtBurn { owner_id: &me, amount: U128(amount), memo: Some(memo) }.emit();
@@ -1594,6 +1633,16 @@ impl Contract {
             miners: m.as_ref().map(|m| m.bets).unwrap_or(0),
             mining_players: m.as_ref().map(|m| m.players).unwrap_or(0),
         }
+    }
+
+    /// The last buybacks (at most BUYBACKS_KEPT), newest first. Buybacks made before this list
+    /// existed (Nov 7) are only in the totals of `get_status().dex`.
+    pub fn get_buybacks(&self) -> Vec<BuybackView> {
+        buybacks_read()
+            .into_iter()
+            .rev()
+            .map(|(at, near_in, spent, burned)| BuybackView { at: U64(at), near_in: U128(near_in), spent: U128(spent), burned: U128(burned) })
+            .collect()
     }
 
     /// The bets that mined in a settled round (at most MINERS_LISTED, in reveal order) and what

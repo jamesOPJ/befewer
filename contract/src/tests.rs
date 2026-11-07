@@ -1409,6 +1409,38 @@ fn buyback_spends_at_most_buyback_max_and_burns_what_comes_back() {
     assert_eq!(s.total_burned.0, T / 10);
     assert_eq!(s.total_supply.0, T - T / 10);
     assert_eq!(tokens(&c, &me()), 0);
+    let log = c.get_buybacks();
+    assert_eq!(log.len(), 1, "each buyback is listed");
+    assert_eq!((log[0].at.0, log[0].near_in.0, log[0].spent.0, log[0].burned.0), (now_g() + MIN, N, N, T / 10));
+}
+
+#[test]
+fn the_buyback_list_keeps_the_last_100_newest_first_and_marks_swaps_that_failed() {
+    let mut c = graduated(6 * N);
+    donate(&mut c, 300 * N, now_g());
+    let k = acc("keeper.testnet");
+    for i in 1..=(BUYBACKS_KEPT as u64 + 2) {
+        let t = now_g() + i * MIN;
+        ctx(&k, t);
+        let _ = c.buyback();
+        if i == BUYBACKS_KEPT as u64 + 2 {
+            callback(t, PromiseResult::Failed); // the newest one does not go through
+            c.on_buyback(U128(0), U128(N));
+        } else {
+            callback(t, ok_json(U128(N / 2))); // the pool takes half, the rest is kept as wNEAR
+            c.on_buyback(U128(0), U128(N));
+            ctx_full(&dex(), t, 1, BIG, vec![]);
+            c.ft_transfer(me(), U128(i as u128), None);
+        }
+    }
+    let log = c.get_buybacks();
+    assert_eq!(log.len(), BUYBACKS_KEPT);
+    let (newest, next) = (&log[0], &log[1]);
+    assert_eq!((newest.at.0, newest.spent.0, newest.burned.0), (now_g() + (BUYBACKS_KEPT as u64 + 2) * MIN, 0, 0));
+    assert_eq!((next.at.0, next.spent.0, next.burned.0), (now_g() + (BUYBACKS_KEPT as u64 + 1) * MIN, N / 2, BUYBACKS_KEPT as u128 + 1));
+    assert_eq!(log[BUYBACKS_KEPT - 1].at.0, now_g() + 3 * MIN, "the two oldest dropped out");
+    let s = c.get_status();
+    assert_eq!(s.dex.buybacks as usize, BUYBACKS_KEPT + 1, "the totals still count every swap that went through");
 }
 
 #[test]
