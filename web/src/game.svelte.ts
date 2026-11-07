@@ -1,6 +1,6 @@
 // App-wide reactive state: chain data (polled), the player's session, bets, results, autopilot.
 import {
-  ONE, CHIP, NEAR, ROUND_RECORD_NEAR, view, fmt, fmtN, toNear, toYocto, nsToMs, randomSalt, commitHash, seal, loadSession, saveSession, loadGuestBackup, saveGuestBackup, newKeyPair,
+  ONE, CHIP, NEAR, ROUND_RECORD_NEAR, CONTRACT, view, fmt, fmtN, toNear, toYocto, nsToMs, randomSalt, commitHash, seal, loadSession, saveSession, loadGuestBackup, saveGuestBackup, newKeyPair,
   loadPicks, savePick, pickKey, storageFor, callContract, setOnTopUp, provider, type Status, type Params, type RoundV, type PlayerV, type Session,
 } from './chain'
 import * as H from './history'
@@ -164,29 +164,50 @@ export async function refresh(full = false) {
   if (refreshing) return
   refreshing = true
   try {
-    game.params ??= await view<Params>('get_params')
-    const st = await view<Status>('get_status')
+    // the params never change: kept in this browser, refreshed in the background once per visit
+    let first: Promise<Status> | null = null
+    if (!game.params) {
+      const cached = loadParams()
+      if (cached) { game.params = cached; view<Params>('get_params').then(p => { game.params = p; saveParams(p) }).catch(() => {}) }
+      else {
+        // first visit: params and status at once
+        first = view<Status>('get_status')
+        game.params = await view<Params>('get_params')
+        saveParams(game.params)
+      }
+    }
+    // everything the first screen needs, asked at once (the round number follows from the params).
+    // 12 rounds are enough for it; the deeper history comes behind (loadDeep)
+    const guess = first ? null : roundGuess()
+    const limit = game.rounds.length ? 6 : 12
+    const [st, guessed, me] = await Promise.all([
+      first ?? view<Status>('get_status'),
+      guess != null ? view<RoundV[]>('get_rounds', { from: String(guess + 1), limit }).catch(() => null) : null,
+      game.session ? view<PlayerV>('get_player', { account_id: game.session.accountId }) : null,
+    ])
     game.status = st
     game.skew = nsToMs(st.now) - Date.now()
-    const fresh = await view<RoundV[]>('get_rounds', { from: st.commit_round, limit: full || !game.rounds.length ? 40 : 6 })
+    const fresh = guessed ?? (await view<RoundV[]>('get_rounds', { from: st.commit_round, limit }))
     H.remember(fresh)
-    await H.loadDeep(Number(st.commit_round))
     const byId = new Map(game.rounds.map(r => [r.round, r]))
     for (const r of fresh) byId.set(r.round, r)
     game.rounds = [...byId.values()].sort((a, b) => Number(b.round) - Number(a.round)).slice(0, 60)
     game.history++
-    if (game.session) {
+    // older history (backtests, same-question stats) fills in behind the first screen
+    H.loadDeep(Number(st.commit_round)).then(() => game.history++)
+    if (game.session && me) {
       const before = game.me
-      game.me = await view<PlayerV>('get_player', { account_id: game.session.accountId })
+      game.me = me
       const minedNow = (p: PlayerV) => BigInt(p.mined) + BigInt(p.pending_mined)
       if (before && minedNow(game.me) > minedNow(before))
         toast('ok', `You mined ${fmt(minedNow(game.me) - minedNow(before))} BEFEWER with a 3+ win streak. It stays unrefined in the game until you claim it on the Me page.`, 9000)
-      await loadResults()
+      game.ready = true
+      const acct = game.session.accountId
+      await Promise.all([
+        loadResults(),
+        (provider as any).query({ request_type: 'view_account', finality: 'optimistic', account_id: acct }).then((a: any) => { game.walletNear = String(a.amount) }).catch(() => {}),
+      ])
       selfReveal()
-      try {
-        const a: any = await (provider as any).query({ request_type: 'view_account', finality: 'optimistic', account_id: game.session.accountId })
-        game.walletNear = String(a.amount)
-      } catch {}
     }
     game.ready = true
     game.error = ''
@@ -269,9 +290,23 @@ function announce(list: Result[]) {
 }
 
 export async function loadNpcs() {
-  for (const n of NPCS) {
-    try { game.npcs[n.id] = await view<PlayerV>('get_player', { account_id: n.id }) } catch {}
-  }
+  await Promise.all(NPCS.map(n => view<PlayerV>('get_player', { account_id: n.id }).then(p => { game.npcs[n.id] = p }).catch(() => {})))
+}
+
+// ---------- params cache ----------
+const PARAMS_KEY = `fewer.params.v1.${CONTRACT}`
+function loadParams(): Params | null {
+  try { return JSON.parse(localStorage.getItem(PARAMS_KEY) || 'null') } catch { return null }
+}
+function saveParams(p: Params) {
+  try { localStorage.setItem(PARAMS_KEY, JSON.stringify(p)) } catch {}
+}
+/** The round taking bets now, from the params and this device's clock (null before the params). */
+function roundGuess(): number | null {
+  const p = game.params
+  if (!p) return null
+  const now = BigInt(Date.now() + game.skew) * 1_000_000n
+  return now < BigInt(p.genesis_ns) ? 0 : Number((now - BigInt(p.genesis_ns)) / BigInt(p.commit_ns))
 }
 
 // ---------- account + bets ----------
