@@ -10,8 +10,8 @@ import * as W from './wallet'
 
 export type Side = 'A' | 'B'
 export type Result = { round: number; slot: number; side: Side; amount: bigint; fee: bigint; outcome: 'A' | 'B' | 'void' }
-export type Toast = { id: number; kind: 'ok' | 'err' | 'info'; text: string }
-export type ApLog = { at: number; round: number; text: string; kind: 'bet' | 'skip' | 'err' }
+export type Toast = { id: number; kind: 'ok' | 'err' | 'info'; text: string; action?: { label: string; run: () => void } }
+export type ApLog = { at: number; round: number; text: string; kind: 'bet' | 'skip' | 'err'; lane?: number }
 
 // Two rule sets: `live` is what the autopilot runs; `draft` is what you edit and replay.
 // Editing never touches the running rules until you press "Put live".
@@ -34,14 +34,15 @@ function loadRules(): { live: Rule[]; draft: Rule[] } {
 
 /** A lane runs one rule set on one slot of the account (lane 0 = slot 0, the manual one).
  *  `slot` is null until the slot is opened on chain; `owner` is the account it belongs to. */
-export type Lane = { name: string; slot: number | null; owner: string | null; live: Rule[]; draft: Rule[] }
+/** `on` false = this slot sits out; `strategy` = the preset it came from (or 'Custom rules'). */
+export type Lane = { name: string; slot: number | null; owner: string | null; live: Rule[]; draft: Rule[]; on?: boolean; strategy?: string }
 const LANES_KEY = 'befewer.ap.lanes'
 function loadLanes(): Lane[] {
   try {
     const saved = JSON.parse(localStorage.getItem(LANES_KEY) || 'null')
     if (Array.isArray(saved) && saved.length)
       return saved.map((l: any, i: number) => ({ name: String(l.name ?? `Slot ${i}`), slot: i === 0 ? 0 : l.slot ?? null, owner: l.owner ?? null,
-        live: (l.live ?? []).map(normalizeRule), draft: (l.draft ?? l.live ?? []).map(normalizeRule) }))
+        live: (l.live ?? []).map(normalizeRule), draft: (l.draft ?? l.live ?? []).map(normalizeRule), on: l.on !== false, strategy: l.strategy ?? undefined }))
   } catch {}
   const r = loadRules() // the single rule set from before slots existed becomes lane 0
   return [{ name: 'Main', slot: 0, owner: null, live: r.live, draft: r.draft }]
@@ -104,9 +105,9 @@ export const feeFor = (amount: bigint) => (amount * BigInt(game.params?.fee_bps 
 export const netOf = (x: Result) => (x.outcome === 'void' ? 0n : x.outcome === x.side ? x.amount - x.fee : -(x.amount + x.fee))
 
 let toastId = 0
-export function toast(kind: Toast['kind'], text: string, ms = kind === 'err' ? 9000 : 4500) {
+export function toast(kind: Toast['kind'], text: string, ms = kind === 'err' ? 9000 : 4500, action?: Toast['action']) {
   const id = ++toastId
-  game.toasts.push({ id, kind, text })
+  game.toasts.push({ id, kind, text, action })
   setTimeout(() => dismiss(id), ms)
 }
 export function dismiss(id: number) {
@@ -435,8 +436,69 @@ export function saveRules() {
 export const draftDirty = () => JSON.stringify(lane().draft) !== JSON.stringify(lane().live)
 /** Replace the selected lane's running rules with its draft. Takes effect from the next decision. */
 export function putDraftLive() {
-  lane().live = structuredClone($state.snapshot(lane().draft) as Rule[])
+  const l = lane()
+  l.live = structuredClone($state.snapshot(l.draft) as Rule[])
+  const same = PRESETS.find(p => JSON.stringify(p.rules) === JSON.stringify($state.snapshot(l.live)))
+  l.strategy = same?.name ?? 'Custom rules'
   saveRules()
+}
+/** One tap: run a single-slot strategy on lane `i` right away (draft too), switch the autopilot
+ *  on, and offer an undo. */
+export function runPreset(p: number, i: number) {
+  const l = game.ap.lanes[i]
+  const before = $state.snapshot(l) as Lane
+  const wasOn = game.ap.on
+  l.live = structuredClone(PRESETS[p].rules)
+  l.draft = structuredClone(PRESETS[p].rules)
+  l.strategy = PRESETS[p].name
+  l.on = true
+  saveRules()
+  if (!game.ap.on) setAutopilot(true)
+  toast('ok', `${PRESETS[p].name} is running on ${l.name}.`, 7000, {
+    label: 'Undo',
+    run: () => { game.ap.lanes[i] = before; saveRules(); if (!wasOn) setAutopilot(false) },
+  })
+}
+/** One tap: set up a multi-slot strategy, switch on, offer an undo. */
+export function runSlotSet(k: number) {
+  const before = $state.snapshot(game.ap.lanes) as Lane[]
+  const wasOn = game.ap.on
+  useSlotSet(k)
+  for (const l of game.ap.lanes) { l.strategy = SLOT_SETS[k].name; l.on = true }
+  saveRules()
+  if (!game.ap.on) setAutopilot(true)
+  toast('ok', `${SLOT_SETS[k].name} is running on ${game.ap.lanes.length} slots. Each extra slot holds 0.002 NEAR of storage once it bets.`, 8000, {
+    label: 'Undo',
+    run: () => { game.ap.lanes = before; game.ap.sel = 0; saveRules(); if (!wasOn) setAutopilot(false) },
+  })
+}
+/** The strategy a lane runs: the one it was started from, or the preset its rules match. */
+export function strategyOf(l: Lane): string {
+  if (l.strategy) return l.strategy
+  const live = JSON.stringify($state.snapshot(l.live))
+  return PRESETS.find(p => JSON.stringify(p.rules) === live)?.name ?? (l.live.length ? 'Custom rules' : 'No rules')
+}
+export function setLaneOn(i: number, on: boolean) {
+  game.ap.lanes[i].on = on
+  saveRules()
+}
+/** What lane `i` is doing in the round taking bets right now. */
+export function laneNow(i: number): { kind: 'bet' | 'skip' | 'err' | 'wait' | 'off'; text: string; slot: number | null } {
+  const l = game.ap.lanes[i]
+  const r = commitRound()
+  const slot = i === 0 ? 0 : l.owner === game.session?.accountId ? l.slot : null
+  if (slot != null && game.me) {
+    const bet = game.me.slots.find(s => s.slot === slot)?.open.find(o => Number(o.round) === r)
+    if (bet) {
+      const p = loadPicks(game.session!.accountId)[pickKey(slot, r)]
+      return { kind: 'bet', text: `bet ${fmtN(bet.amount)} NEAR on ${p ? p.side : '?'}`, slot }
+    }
+  }
+  if (l.on === false) return { kind: 'off', text: 'switched off', slot }
+  if (!l.live.length) return { kind: 'off', text: 'no rules', slot }
+  const log = game.ap.log.find(x => x.round === r && x.lane === i)
+  if (log) return { kind: log.kind === 'err' ? 'err' : 'skip', text: log.kind === 'err' ? log.text : 'sits this round out', slot }
+  return { kind: game.ap.on ? 'wait' : 'off', text: game.ap.on ? 'waiting for the round before to finish' : 'autopilot is off', slot }
 }
 /** Throw away the draft: back to a copy of the running rules. */
 export function discardDraft() {
@@ -458,6 +520,7 @@ export function removeLane(i: number) {
 }
 /** Load a multi-slot strategy: lane 0 takes the first slot's rules, more lanes for the rest. */
 export function useSlotSet(i: number) {
+  // (callers set `strategy` and `on`)
   const set = SLOT_SETS[i]
   const keep = game.ap.lanes.slice(1).filter(l => l.slot != null && l.owner === game.session?.accountId)
   game.ap.lanes = set.slots.map((x, k) => {
@@ -472,8 +535,8 @@ export function setAutopilot(on: boolean) {
   localStorage.setItem('befewer.ap.on', on ? '1' : '0')
   if (on) autopilotTick()
 }
-function apLog(round: number, kind: ApLog['kind'], text: string) {
-  game.ap.log = [{ at: Date.now(), round, kind, text }, ...game.ap.log].slice(0, 40)
+function apLog(round: number, kind: ApLog['kind'], text: string, lane?: number) {
+  game.ap.log = [{ at: Date.now(), round, kind, text, lane }, ...game.ap.log].slice(0, 60)
 }
 const localDay = (ms: number) => new Date(ms).toLocaleDateString('en-CA')
 /** Today's result of every slot's settled bets (stake and fee; the reveal reward I may get back is ignored). */
@@ -517,7 +580,7 @@ export async function autopilotTick() {
   for (let i = 0; i < game.ap.lanes.length; i++) {
     const l = game.ap.lanes[i]
     const key = `${i}:${r}`
-    if (apDone.has(key) || !l.live.length) continue
+    if (apDone.has(key) || !l.live.length || l.on === false) continue
     apDone.add(key)
     const tag = game.ap.lanes.length > 1 ? `${l.name}: ` : ''
     try {
@@ -528,17 +591,17 @@ export async function autopilotTick() {
       const me = meFrom(mine)
       const d = decide($state.snapshot(l.live) as Rule[], r, guard(lookup, r), me)
       if ('skip' in d) {
-        apLog(r, 'skip', tag + (d.rule == null ? 'No rule fit, so it skipped.' : `Rule ${d.rule + 1} says skip.`))
+        apLog(r, 'skip', tag + (d.rule == null ? 'No rule fit, so it skipped.' : `Rule ${d.rule + 1} says skip.`), i)
         continue
       }
       // the autopilot counts in chips of 0.01 NEAR (the smallest bet)
       const bal = Number(BigInt(game.me!.balance) / CHIP)
       const chips = stakeFor(d.unit, d.amount, bal, me)
-      if (chips < 1) { apLog(r, 'skip', tag + 'Balance too small to bet (the cap is 25% of it).'); continue }
+      if (chips < 1) { apLog(r, 'skip', tag + 'Balance too small to bet (the cap is 25% of it).', i); continue }
       const placed = await placeBet(d.side, BigInt(chips) * CHIP, 'autopilot', slot)
-      apLog(placed.round, 'bet', `${tag}Rule ${d.rule + 1}: ${fmtN(placed.amount)} NEAR on ${label(placed.round, d.side)} (${d.side}).`)
+      apLog(placed.round, 'bet', `${tag}Rule ${d.rule + 1}: ${fmtN(placed.amount)} NEAR on ${label(placed.round, d.side)} (${d.side}).`, i)
     } catch (e: any) {
-      apLog(r, 'err', tag + String(e.message || e))
+      apLog(r, 'err', tag + String(e.message || e), i)
     } finally {
       game.busy = ''
     }

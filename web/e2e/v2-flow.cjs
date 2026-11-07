@@ -23,8 +23,8 @@ const URL = process.argv[2] || 'http://127.0.0.1:5043/'
   console.log('me:', (await p.$eval('main', e => e.innerText)).replace(/\s+/g, ' ').slice(0, 220))
   await p.goto(URL + '#/autopilot', { waitUntil: 'networkidle2' })
   await p.waitForSelector('.preset')
-  await p.evaluate(() => [...document.querySelectorAll('.preset')].find(x => /Echo/.test(x.textContent)).click())
-  await p.evaluate(() => document.querySelector('.switch input').click())
+  // one tap on Run: Echo goes live on slot 0 and the autopilot switches on
+  await p.evaluate(() => [...document.querySelectorAll('.preset')].find(x => /Echo/.test(x.textContent)).querySelector('.btn.primary').click())
   const t0 = Date.now()
   await p.waitForSelector('.log li', { timeout: 8 * 60_000 })
   console.log(`autopilot log after ${Math.round((Date.now() - t0) / 1000)} s:`, (await p.$eval('.log li', e => e.innerText)).replace(/\s+/g, ' '))

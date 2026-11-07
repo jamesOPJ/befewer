@@ -9,6 +9,7 @@
     <div class="toast {t.kind}" transition:fly={{ y: 16, duration: 220 }}>
       <Icon name={t.kind === 'err' ? 'x' : t.kind === 'ok' ? 'check' : 'info'} size={18} />
       <span>{t.text}</span>
+      {#if t.action}<button class="act" onclick={() => { t.action!.run(); dismiss(t.id) }}>{t.action.label}</button>{/if}
       <button class="close" onclick={() => dismiss(t.id)} aria-label="Dismiss">×</button>
     </div>
   {/each}
@@ -22,5 +23,6 @@
   .toast.ok :global(svg) { color: var(--good) }
   .toast.err { background: var(--err-bg); border-color: var(--err-line); color: var(--err-fg) }
   .toast span { flex: 1 }
+  .act { background: none; border: 1px solid var(--line); border-radius: 8px; color: var(--fg); font-weight: 700; padding: 2px 10px; cursor: pointer }
   .close { background: none; border: 0; color: var(--fg-3); font-size: 20px; line-height: 1; cursor: pointer; padding: 0 2px }
 </style>

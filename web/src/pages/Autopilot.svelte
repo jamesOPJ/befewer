@@ -4,7 +4,8 @@
   import Equity from '../lib/Equity.svelte'
   import { label } from '../questions'
   import { backtest, runsAtLeast, describe, chipsText, cleanPattern, PRESETS, PRESET_GROUPS, SLOT_SETS, type Rule, type Cond, type Pick, type Unit, type Backtest } from '../rules'
-  import { game, commitRound, lookup, saveRules, setAutopilot, draftDirty, putDraftLive, discardDraft, toast, lane, addLane, removeLane, useSlotSet, todayNet, fmtN as fmtNear } from '../game.svelte'
+  import { tick } from 'svelte'
+  import { game, commitRound, lookup, saveRules, setAutopilot, draftDirty, putDraftLive, discardDraft, toast, lane, addLane, removeLane, useSlotSet, todayNet, runPreset, runSlotSet, setLaneOn, laneNow, strategyOf, toYocto, fmtN as fmtNear } from '../game.svelte'
 
   const WINDOW = 60
   // replays count chips of 0.01 NEAR and pay the contract's fee on every bet
@@ -27,8 +28,18 @@
     return backtest($state.snapshot(lane().live) as Rule[], Math.max(0, cur - WINDOW), cur - 1, lookup, 1000, fee(), need())
   })
   const dirty = $derived(JSON.stringify(lane().draft) !== JSON.stringify(lane().live))
-  let confirmLive = $state(false)
-  function goLive() { putDraftLive(); confirmLive = false; toast('ok', game.ap.on ? 'New rules are running from the next round.' : 'New rules saved as the running rules.') }
+  function goLive() { putDraftLive(); toast('ok', game.ap.on ? `${lane().name} runs the new rules from the next round.` : `Saved. Switch the autopilot on to run ${lane().name}.`) }
+  let stab = $state<'one' | 'many'>('one')
+  let target = $state(0)
+  let showAll = $state(false)
+  let allStrats = $state(false)
+  const shown = $derived(allStrats ? PRESETS : PRESETS.slice(0, 4))
+  const activeLanes = $derived(game.ap.lanes.filter(l => l.on !== false && l.live.length).length)
+  const budgetY = $derived(toYocto(game.ap.budget.near))
+  const usedPct = $derived(today < 0n && budgetY > 0n ? Math.min(100, Number((-today * 10000n) / budgetY) / 100) : 0)
+  const budgetHit = $derived(game.ap.budget.on && today < 0n && -today >= budgetY)
+  /** Jump to the rule editor (on a phone it is further down). */
+  async function toEditor() { await tick(); document.getElementById('ap-editor')?.scrollIntoView({ behavior: 'smooth', block: 'start' }) }
   // every lane's running rules replayed on the same rounds, added up
   const btAll = $derived.by(() => {
     game.history
@@ -46,7 +57,7 @@
   })
   const today = $derived.by(() => { game.history; game.resultsBySlot; return todayNet() })
   function setBudget(on: boolean, near: number) { game.ap.budget.on = on; game.ap.budget.near = Math.max(0.01, Math.round(near * 100) / 100); saveRules() }
-  function useSet(i: number) { useSlotSet(i); toast('info', `${SLOT_SETS[i].name}: ${SLOT_SETS[i].slots.length} slots set up. Each extra slot holds 0.002 NEAR of storage when it first bets.`) }
+  function useSet(i: number) { useSlotSet(i); toast('info', `${SLOT_SETS[i].name}: ${SLOT_SETS[i].slots.length} slots set up and running their rules. Edit any of them below.`) }
   const presetBt = $derived.by(() => {
     game.history
     const cur = commitRound()
@@ -95,7 +106,7 @@
     const t = lane().draft[i]; lane().draft[i] = lane().draft[j]; lane().draft[j] = t
     commit()
   }
-  function use(i: number) { lane().draft = structuredClone(PRESETS[i].rules); commit(); toast('info', `${PRESETS[i].name} loaded into the draft. Put it live when you're ready.`) }
+  function use(i: number) { game.ap.sel = target; lane().draft = structuredClone(PRESETS[i].rules); commit(); toast('info', `${PRESETS[i].name} opened in the editor for ${lane().name}. Press Save & run to use it.`) }
   const fmtN = (v: number) => (v / 100).toLocaleString('en-US', { maximumFractionDigits: 2 })
   const FIXED = [1, 2, 5, 10, 20, 50, 100]
   const PCTS = [1, 2, 5, 10, 25]
@@ -118,45 +129,114 @@
 <header class="ph">
   <div>
     <h1>Autopilot</h1>
-    <p class="muted">Write rules, see how they would have done, then let them bet for you. Rules only read rounds that already finished.</p>
+    <p class="muted">Pick a strategy and it bets for you every round while this page is open. Rules only read rounds that already finished.</p>
   </div>
 </header>
 
 <section class="card run" class:on={game.ap.on}>
   <div class="run-top">
     <div class="run-l">
-      <div class="status"><span class="led"></span>{game.ap.on ? 'Running in this tab' : 'Off'}</div>
-      <p class="small muted">{game.ap.on ? 'Each round, once the previous round has finished, the running rules decide and place a sealed bet. Keep this page open.' : 'Turn it on to let the running rules place a bet every round while this page is open.'}</p>
+      <div class="status"><span class="led"></span>{game.ap.on ? `Running · ${activeLanes} slot${activeLanes === 1 ? '' : 's'}` : 'Off'}</div>
+      <p class="small muted">{game.ap.on ? 'Keep this page open. Each slot decides once per round.' : 'Switch on to run the slots below, or pick a strategy and press Run.'}</p>
     </div>
     <label class="switch">
       <input type="checkbox" checked={game.ap.on} onchange={e => setAutopilot((e.currentTarget as HTMLInputElement).checked)} aria-label="Run autopilot" />
       <span class="track"><span class="knob"></span></span>
     </label>
   </div>
-  <div class="live-rules">
-    <div class="eyebrow">Running rules{game.ap.lanes.length > 1 ? ` · ${game.ap.lanes.length} slots, each bets on its own` : ''}</div>
-    {#each game.ap.lanes as l}
-      {#if game.ap.lanes.length > 1}<div class="lane-h small"><b>{l.name}</b></div>{/if}
-      <ol>{#each l.live as lr, k}<li>{describe(lr, k)}</li>{:else}<li class="faint">no rules: this slot does not bet</li>{/each}</ol>
-    {/each}
-    <div class="budget small">
-      <label><input type="checkbox" checked={game.ap.budget.on} onchange={e => setBudget((e.currentTarget as HTMLInputElement).checked, game.ap.budget.near)} /> Daily budget: stop for the day after losing</label>
+  <div class="today">
+    <div class="small"><b>Today</b> <span class="num {today > 0n ? 'good' : today < 0n ? 'burn' : ''}">{today >= 0n ? '+' : '−'}{fmtNear(today >= 0n ? today : -today)} NEAR</span>
+      {#if game.ap.budget.on}<span class="faint">· stops for the day at −{game.ap.budget.near} NEAR{budgetHit ? ' · paused until tomorrow' : ''}</span>{:else}<span class="faint">· no daily limit</span>{/if}</div>
+    {#if game.ap.budget.on}<div class="meter" aria-label="{Math.round(usedPct)}% of today's budget used"><span class:hit={budgetHit} style="width:{usedPct}%"></span></div>{/if}
+    <details class="small budgetset"><summary>Daily budget</summary>
+      <label><input type="checkbox" checked={game.ap.budget.on} onchange={e => setBudget((e.currentTarget as HTMLInputElement).checked, game.ap.budget.near)} /> Stop for the day after losing</label>
       <input type="number" min="0.01" step="0.1" aria-label="Daily budget in NEAR" value={game.ap.budget.near} onchange={e => setBudget(game.ap.budget.on, Number((e.currentTarget as HTMLInputElement).value))} /> NEAR
-      <span class="faint">· today {today >= 0n ? '+' : '−'}{fmtNear(today >= 0n ? today : -today)} NEAR{game.ap.budget.on && -today >= BigInt(Math.round(game.ap.budget.near * 1e6)) * 10n ** 18n ? ' · paused until tomorrow' : ''}</span>
-    </div>
+    </details>
   </div>
+</section>
+
+<section class="card block nowc">
+  <div class="bh"><h2>Slots</h2><span class="faint small">round #{commitRound()}</span></div>
+  <ul class="slotlist">
+    {#each game.ap.lanes as l, i}
+      {@const st = laneNow(i)}
+      {@const sv = st.slot != null ? game.me?.slots.find(x => x.slot === st.slot) : undefined}
+      <li class:off={l.on === false}>
+        <label class="mini" title={l.on === false ? 'Off: this slot sits out' : 'On'}><input type="checkbox" checked={l.on !== false} onchange={e => setLaneOn(i, (e.currentTarget as HTMLInputElement).checked)} aria-label="Slot {l.name} on" /><span></span></label>
+        <div class="sl">
+          <div class="sl-top"><b>{l.name}</b><span class="faint small">{strategyOf(l)}</span></div>
+          <div class="small st-{st.kind}">{st.text}</div>
+        </div>
+        <div class="dots" title="Streak {sv?.streak ?? 0}: {need()} in a row mines" aria-label="streak {sv?.streak ?? 0}">
+          {#each Array(need()) as _, k}<span class:on={k < (sv?.streak ?? 0)}></span>{/each}
+        </div>
+        <button class="btn small ghost" onclick={() => { game.ap.sel = i; toEditor() }}>Edit</button>
+      </li>
+    {/each}
+  </ul>
+  <div class="foot"><button class="btn small" onclick={() => { addLane(); toEditor() }}><Icon name="plus" size={16} /> Add a slot</button><span class="faint small">Each extra slot holds 0.002 NEAR of storage once it bets.</span></div>
+  {#if game.ap.log.length}
+    <ul class="log">
+      {#each game.ap.log.slice(0, showAll ? 60 : 4) as lg}
+        <li class={lg.kind}><span class="num faint">#{lg.round}</span><span>{lg.text}</span><span class="faint small">{ago(lg.at)}</span></li>
+      {/each}
+    </ul>
+    {#if game.ap.log.length > 4}<button class="linkbtn small" onclick={() => (showAll = !showAll)}>{showAll ? 'Show less' : `Show all ${game.ap.log.length}`}</button>{/if}
+  {/if}
 </section>
 
 <div class="cols">
   <div class="col">
     <section class="card block">
+      <div class="bh"><h2>Strategies</h2>
+        <div class="seg" role="tablist" aria-label="Strategy kind">
+          <button role="tab" aria-selected={stab === 'one'} class:on={stab === 'one'} onclick={() => (stab = 'one')}>One slot</button>
+          <button role="tab" aria-selected={stab === 'many'} class:on={stab === 'many'} onclick={() => (stab = 'many')}>Several slots</button>
+        </div>
+      </div>
+      {#if stab === 'one'}
+      <p class="small muted hint">Run puts it to work right away{game.ap.lanes.length > 1 ? ' on' : ' (you can undo)'}{#if game.ap.lanes.length > 1}
+        <select aria-label="Run on which slot" bind:value={target}>{#each game.ap.lanes as l, i}<option value={i}>{l.name}</option>{/each}</select>{/if}. Edit opens it in the editor first. Numbers: replay of the last {presetBt[0]?.rounds ?? 0} rounds (net NEAR from 10, rounds that would have mined, longest win streak).</p>
+      {#each PRESET_GROUPS.filter(g => shown.some(x => x.group === g)) as g}
+      <div class="pg eyebrow">{g}</div>
+      <div class="presets">
+        {#each shown.filter(x => x.group === g) as p}
+          {@const i = PRESETS.indexOf(p)}
+          {@const b = presetBt[i]}
+          <div class="preset">
+            <span class="ptop"><span class="pn">{p.name}</span>{#if b.rounds}<span class="pnum small num"><b class={tone(net(b))}>{signed(net(b))}</b> · mined {b.mines} · best {b.bestStreak}</span>{/if}</span>
+            <span class="pa small muted clamp">{p.about}</span>
+            <span class="btns"><button class="btn small primary" onclick={() => runPreset(i, target)}>Run</button><button class="btn small ghost" onclick={() => { use(i); toEditor() }}>Edit</button></span>
+          </div>
+        {/each}
+      </div>
+      {/each}
+      {#if !allStrats}<button class="btn small more" onclick={() => (allStrats = true)}>Show all {PRESETS.length} strategies</button>{/if}
+      {:else}
+      <p class="small muted hint">Each slot is its own bettor with its own streak; they share your balance. Run replaces your current slots (you can undo).</p>
+      <div class="presets">
+        {#each SLOT_SETS as set, i}
+          {@const b = setBt[i]}
+          <div class="preset">
+            <span class="ptop"><span class="pn">{set.name} <span class="faint small">· {set.slots.length} slots</span></span>{#if b.rounds}<span class="pnum small num"><b class={tone(b.net)}>{signed(b.net)}</b> · <b class="gold">mined {b.mines}</b></span>{/if}</span>
+            <span class="pa small muted clamp">{set.about}</span>
+            <span class="btns"><button class="btn small primary" onclick={() => runSlotSet(i)}>Run {set.slots.length} slots</button><button class="btn small ghost" onclick={() => { useSet(i); toEditor() }}>Edit</button></span>
+          </div>
+        {/each}
+      </div>
+      {/if}
+    </section>
+  </div>
+
+  <div class="col">
+    <section class="card block" id="ap-editor">
+      <div class="bh"><h2>Edit rules</h2><span class="faint small">pick a slot · rules are checked top to bottom</span></div>
       <div class="lanes" role="tablist" aria-label="Slots">
         {#each game.ap.lanes as l, i}
           <button role="tab" aria-selected={game.ap.sel === i} class:on={game.ap.sel === i} onclick={() => (game.ap.sel = i)}>{l.name}<span class="faint">{i === 0 ? ' · slot 0' : l.slot != null ? ` · slot ${l.slot}` : ' · new'}</span></button>
         {/each}
         <button class="add" onclick={() => addLane()} aria-label="Add a slot"><Icon name="plus" size={14} /> Slot</button>
       </div>
-      <div class="bh"><h2>Draft rules{game.ap.lanes.length > 1 ? ` · ${L.name}` : ''}</h2><span class="faint small">checked top to bottom · first match decides</span></div>
       {#if game.ap.sel > 0}
         <div class="lanebar small">
           <label>Name <input aria-label="Slot name" value={L.name} onchange={e => { L.name = (e.currentTarget as HTMLInputElement).value.slice(0, 24) || L.name; commit() }} /></label>
@@ -165,14 +245,10 @@
       {/if}
       <div class="draftbar" class:dirty>
         {#if dirty}
-          <span><b>Draft.</b> Changes here don't affect the running rules{game.ap.on ? ', which keep betting' : ''}.</span>
-          {#if confirmLive}
-            <span class="acts"><button class="btn small" onclick={() => (confirmLive = false)}>Cancel</button><button class="btn small primary" onclick={goLive}>Yes, run these</button></span>
-          {:else}
-            <span class="acts"><button class="btn small ghost" onclick={() => { discardDraft(); toast('info', 'Draft reset to the running rules.') }}>Discard</button><button class="btn small primary" onclick={() => (confirmLive = true)}>Put these rules live</button></span>
-          {/if}
+          <span><b>Not saved yet.</b> {L.name} keeps running its current rules until you save.</span>
+          <span class="acts"><button class="btn small ghost" onclick={() => { discardDraft(); toast('info', 'Changes thrown away.') }}>Discard</button><button class="btn small primary" onclick={goLive}>Save &amp; run</button></span>
         {:else}
-          <span class="faint">Same as the running rules. Edit freely: nothing changes until you put a draft live.</span>
+          <span class="faint">These are the rules {L.name} runs. Change anything, then press Save &amp; run.</span>
         {/if}
       </div>
       <ol class="rules">
@@ -274,40 +350,6 @@
     </section>
 
     <section class="card block">
-      <div class="bh"><h2>Start from a strategy</h2><span class="faint small">loads into the draft</span></div>
-      {#each PRESET_GROUPS as g}
-      <div class="pg eyebrow">{g}</div>
-      <div class="presets">
-        {#each PRESETS.filter(x => x.group === g) as p}
-          {@const i = PRESETS.indexOf(p)}
-          {@const b = presetBt[i]}
-          <button class="preset" onclick={() => use(i)}>
-            <span class="pn">{p.name}</span>
-            <span class="pa small muted">{p.about}</span>
-            {#if b.rounds}<span class="pr small num">staked {fmtN(b.staked)} → <b class={tone(net(b))}>{signed(net(b))}</b> <span class="faint">· last {b.rounds} rounds</span></span>
-              <span class="pr small num">best streak <b>{b.bestStreak}</b> · {need()}+ in a row: <b>{runsAtLeast(b, need())}</b> <span class="faint">· mined in {roundsText(b.mines)}</span></span>{/if}
-            <span class="use small">Load into draft</span>
-          </button>
-        {/each}
-      </div>
-      {/each}
-      <div class="pg eyebrow">Several slots at once</div>
-      <div class="presets">
-        {#each SLOT_SETS as set, i}
-          {@const b = setBt[i]}
-          <button class="preset" onclick={() => useSet(i)}>
-            <span class="pn">{set.name} <span class="faint small">· {set.slots.length} slots</span></span>
-            <span class="pa small muted">{set.about}</span>
-            {#if b.rounds}<span class="pr small num">staked {fmtN(b.staked)} → <b class={tone(b.net)}>{signed(b.net)}</b> · <b class="gold">mined in {roundsText(b.mines)}</b> <span class="faint">· last {b.rounds} rounds</span></span>{/if}
-            <span class="use small">Set up these slots</span>
-          </button>
-        {/each}
-      </div>
-    </section>
-  </div>
-
-  <div class="col">
-    <section class="card block">
       <div class="bh"><h2>Replay on the last {bt.rounds} rounds</h2><span class="faint small">{dirty ? 'draft' : 'running rules'}</span></div>
       {#if bt.rounds}
         <div class="kpis">
@@ -343,19 +385,6 @@
         </details>
       {:else}
         <p class="muted">No finished rounds to replay yet.</p>
-      {/if}
-    </section>
-
-    <section class="card block">
-      <div class="bh"><h2>Activity</h2><span class="faint small">this tab</span></div>
-      {#if game.ap.log.length}
-        <ul class="log">
-          {#each game.ap.log as l}
-            <li class={l.kind}><span class="num faint">#{l.round}</span><span>{l.text}</span><span class="faint small">{ago(l.at)}</span></li>
-          {/each}
-        </ul>
-      {:else}
-        <p class="muted small">Nothing yet. {game.ap.on ? 'The first decision happens once the previous round finishes.' : 'Turn the autopilot on to start.'}</p>
       {/if}
     </section>
   </div>
@@ -408,8 +437,47 @@
   .pg { margin: 14px 0 8px }
   .pg:first-of-type { margin-top: 2px }
   .presets { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px }
-  .preset { display: grid; gap: 4px; text-align: left; padding: 14px; border-radius: 14px; border: 1px solid var(--line); background: var(--surface-2); cursor: pointer; color: var(--fg); transition: border-color 0.15s var(--ease) }
-  .preset:hover { border-color: var(--fg-3) }
+  .preset { display: grid; gap: 4px; align-content: start; text-align: left; padding: 14px; border-radius: 14px; border: 1px solid var(--line); background: var(--surface-2); color: var(--fg) }
+  .btns { display: flex; gap: 8px; margin-top: 6px }
+  #ap-editor { scroll-margin-top: 76px }
+  .ptop { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 2px 10px }
+  .pnum { color: var(--fg-2) }
+  .clamp { display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden }
+  .more { margin-top: 10px; width: 100% }
+  .btns .btn { min-width: 64px }
+  .hint { margin: 0 0 12px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center }
+  .hint select { min-height: 30px }
+  .bh .seg { display: flex; gap: 4px; padding: 3px; border-radius: 999px; background: var(--surface-2); border: 1px solid var(--line) }
+  .bh .seg button { padding: 4px 12px; border-radius: 999px; border: 0; background: transparent; color: var(--fg-2); font-size: 13px; font-weight: 650; cursor: pointer }
+  .bh .seg button.on { background: var(--fg); color: var(--bg) }
+  .today { display: grid; gap: 6px; padding-top: 10px; border-top: 1px solid var(--line) }
+  .meter { height: 8px; border-radius: 999px; background: var(--surface-2); border: 1px solid var(--line); overflow: hidden }
+  .meter span { display: block; height: 100%; background: var(--brand) }
+  .meter span.hit { background: var(--burn) }
+  .budgetset summary { cursor: pointer; color: var(--fg-2) }
+  .budgetset { display: grid; gap: 6px }
+  .budgetset[open] { padding-bottom: 2px }
+  .budgetset input[type='number'] { width: 76px; margin-right: 4px }
+  .nowc { margin-bottom: 16px }
+  .slotlist { list-style: none; margin: 0 0 10px; padding: 0; display: grid; gap: 8px }
+  .slotlist li { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; gap: 10px; align-items: center; padding: 10px 12px; border-radius: 12px; background: var(--surface-2); border: 1px solid var(--line) }
+  .slotlist li.off { opacity: 0.6 }
+  .sl-top { display: flex; flex-wrap: wrap; gap: 2px 8px; align-items: baseline }
+  .st-bet { color: var(--good) }
+  .st-err { color: var(--err-fg) }
+  .st-skip, .st-wait, .st-off { color: var(--fg-3) }
+  .dots { display: flex; gap: 4px }
+  .dots span { width: 10px; height: 10px; border-radius: 50%; border: 1.5px solid var(--brand) }
+  .dots span.on { background: var(--brand) }
+  .mini { position: relative; display: inline-block; width: 38px; height: 22px; cursor: pointer }
+  .mini input { position: absolute; inset: 0; opacity: 0; margin: 0; cursor: pointer }
+  .mini span { position: absolute; inset: 0; border-radius: 999px; background: var(--surface-3); border: 1px solid var(--line); transition: background 0.15s }
+  .mini span::after { content: ''; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: var(--fg-2); transition: transform 0.15s }
+  .mini input:checked + span { background: var(--good) }
+  .mini input:checked + span::after { transform: translateX(16px); background: #0f1a0c }
+  .mini input:focus-visible + span { outline: 2px solid var(--brand); outline-offset: 2px }
+  .linkbtn { border: 0; background: none; color: var(--brand); padding: 6px 0 0; cursor: pointer }
+  @media (max-width: 520px) { .slotlist li { grid-template-columns: auto minmax(0, 1fr) auto; } .slotlist li .btn { grid-column: 3; grid-row: 1 } .slotlist li .dots { grid-column: 2; grid-row: 2 } }
   .pn { font-weight: 750 }
   .use { color: var(--brand); font-weight: 650; margin-top: 4px }
   .kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-bottom: 8px }
