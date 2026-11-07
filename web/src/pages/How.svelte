@@ -10,6 +10,8 @@
   const need = $derived(pr?.streak_min ?? 3)
   const mins = $derived(game.params ? Number(BigInt(game.params.commit_ns) / 1_000_000_000n) : 0)
   const revealS = $derived(game.params ? Number(BigInt(game.params.reveal_ns) / 1_000_000_000n) : 0)
+  // years to the cap if every round is played: cap / per-round x round length
+  const capYears = $derived(pr && BigInt(pr.reward_per_round) > 0n ? (Number(BigInt(pr.max_supply) / BigInt(pr.reward_per_round)) * mins) / (365 * 86400) : 0)
   // the worked example: a 0.1 NEAR bet, with this contract's fee and reveal reward
   const bountyPct = $derived((pr?.reveal_bounty_bps ?? 0) / 100)
   const treasuryPct = $derived(100 - (pr?.reveal_bounty_bps ?? 0) / 100) // of each revealed bet's fee
@@ -30,7 +32,7 @@
 <section class="card block">
   <h2>Why it is built to hold value</h2>
   <div class="facts">
-    <div class="fact"><Icon name="lock" /><div><b>Capped at {fmt(pr?.max_supply ?? '0')}.</b> {fmt(pr?.reward_per_round ?? '0')} BEFEWER is added to the pot each round, and issuance stops at the cap.</div></div>
+    <div class="fact"><Icon name="lock" /><div><b>Capped at {fmt(pr?.max_supply ?? '0')}.</b> {fmt(pr?.reward_per_round ?? '0')} BEFEWER is added to the pot each round (one every {Math.round(mins / 60)} minutes), so the cap is reached after about {capYears.toFixed(1)} years if every round is played. Then issuance stops for good.</div></div>
     <div class="fact"><Icon name="users" /><div><b>No premine, no team share.</b> Supply started at zero, and every coin is mined by a winning streak. The only other mint was the one-time pool seed, paired with the treasury's NEAR as pool liquidity that can never be withdrawn.</div></div>
     <div class="fact"><Icon name="bolt" /><div><b>Mining costs something.</b> Coins come only from streaks, and every bet pays a fee. Like proof of work, except the work is reading the crowd.</div></div>
     <div class="fact"><Icon name="shield" /><div><b>The game's revenue backs it.</b> Its {treasuryPct}% of every fee and the bigger side's extra stake fill the treasury. It opened a NEAR pool whose liquidity can never be taken out, and keeps buying BEFEWER there and burning it (<a href="#/pool">see the pool</a>).</div></div>
@@ -144,7 +146,7 @@
   <h2>Check it yourself</h2>
   <ul class="links">
     <li>Contract (game + token): <a href="{EXPLORER}/address/{CONTRACT}" target="_blank" rel="noopener">{CONTRACT}</a> on NEAR testnet. DEX: Ref Finance <code>{pr?.dex ?? ''}</code>.</li>
-    <li>This demo runs a round every {Math.round(mins / 60) || mins} {mins >= 60 ? 'minutes' : 'seconds'} with a {revealS}-second reveal. The mechanic is designed for one round a day.</li>
+    <li>This demo runs a round every {Math.round(mins / 60) || mins} {mins >= 60 ? 'minutes' : 'seconds'} with a {revealS}-second reveal. Mainnet keeps the same pace.</li>
     <li>Questions come from a fixed public list of {QUESTIONS.length}; round <i>r</i> uses question <i>r</i> mod {QUESTIONS.length}. The contract only knows A and B, so the wording can't change who wins.</li>
     <li>A fingerprint is <code>sha256("fewer:&lt;account&gt;:&lt;slot&gt;:&lt;round&gt;:&lt;A|B&gt;:&lt;secret&gt;")</code>. After a round, every answer and secret is public, so anyone can recompute it.</li>
   </ul>
