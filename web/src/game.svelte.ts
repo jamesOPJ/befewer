@@ -195,11 +195,13 @@ async function selfReveal() {
     selfRevealed.add(`${s.slot}:${r}`)
     items.push({ round: String(r), slot: s.slot, account_id: game.session.accountId, side: p.side, salt: p.salt })
   }
-  if (!items.length) return
-  try {
-    await callContract(game.session, 'reveal_many', { items }, 300)
-  } catch (e) {
-    console.warn('self reveal failed (the keeper will reveal):', e)
+  // a few per call: guests can only attach 40 Tgas
+  for (let i = 0; i < items.length; i += 3) {
+    try {
+      await callContract(game.session, 'reveal_many', { items: items.slice(i, i + 3) }, 300)
+    } catch (e) {
+      console.warn('self reveal failed (the keeper will reveal):', e)
+    }
   }
 }
 
@@ -322,15 +324,19 @@ export function claimPreview(p: PlayerV) {
   const fee = (u * BigInt(game.params?.refine_fee_bps ?? 0)) / 10000n
   return { out: u - fee + BigInt(p.refined), fee }
 }
-/** Slots with settled bets that still need booking (booked first by withdraw/claim). */
-const toBook = (p: PlayerV) => [0, ...p.slots.filter(s => s.slot !== 0 && s.open.some(o => o.result)).map(s => s.slot)].slice(0, 20)
+/** Book the finished bets of every extra slot (one small call each), so a following withdraw or
+ *  claim (which books slot 0 itself) includes them. */
+async function bookExtraSlots(p: PlayerV) {
+  for (const s of p.slots) if (s.slot !== 0 && s.open.some(o => o.result)) await callContract(game.session!, 'claim', { slot: s.slot }, 60)
+}
 /** Claim all mined BEFEWER (unrefined minus the fee, plus refined) to this browser's wallet. */
 export async function claimBefewer() {
   if (!game.session || !game.me) return
   try {
     game.busy = 'Claiming your BEFEWER'
     const { out, fee } = claimPreview(game.me)
-    await callContract(game.session, 'claim_befewer', { book: toBook(game.me) }, 300)
+    await bookExtraSlots(game.me)
+    await callContract(game.session, 'claim_befewer', { book: [0] }, 60)
     toast('ok', `${fmt(out)} BEFEWER are in your wallet. ${fmt(fee)} went to everyone still holding unrefined BEFEWER.`)
   } finally {
     game.busy = ''
@@ -345,7 +351,8 @@ export async function withdrawAll() {
   if (amount === 0n) throw new Error('Nothing to withdraw.')
   try {
     game.busy = 'Sending NEAR to your wallet'
-    await callContract(game.session, 'withdraw', { book: toBook(game.me) }, 300)
+    await bookExtraSlots(game.me)
+    await callContract(game.session, 'withdraw', { book: [0] }, 60)
     toast('ok', `${fmtN(amount)} NEAR moved to your wallet ${short(game.session.accountId)}.`)
   } finally {
     game.busy = ''
@@ -398,7 +405,7 @@ export async function closeSlot(slot: number) {
   if (!game.session) return
   try {
     game.busy = `Closing slot ${slot}`
-    await callContract(game.session, 'close_slot', { slot }, 100)
+    await callContract(game.session, 'close_slot', { slot }, 60)
     for (const l of game.ap.lanes) if (l.slot === slot && l.owner === game.session.accountId) { l.slot = null; l.owner = null }
     saveRules()
     toast('ok', `Slot ${slot} closed; its 0.002 NEAR is back in your balance.`)

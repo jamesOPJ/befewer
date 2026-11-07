@@ -155,7 +155,12 @@ export function savePick(accountId: string, round: number, p: Pick, slot = 0) {
 /** NEAR the contract holds for a bet's storage (same formula as the contract; returned when booked). */
 export const storageFor = (accountId: string, sealedLen: number) => BigInt(2 * accountId.length + sealedLen + 260) * 10n ** 19n
 
+/** Guest wallets hold 0.05 NEAR, and NEAR only accepts a transaction if the wallet could pay for
+ *  all its prepaid gas at 1e9 yocto per gas (100 Tgas needs 0.1 NEAR up front; unused gas is
+ *  refunded). So guests never attach more than this. */
+export const GUEST_MAX_TGAS = 40
 export async function callContract(s: Session, methodName: string, args: Record<string, unknown>, gasT = 30, deposit = 0n) {
+  if (s.kind === 'guest') gasT = Math.min(gasT, GUEST_MAX_TGAS)
   const res: any = await accountFor(s).callFunctionRaw({ contractId: CONTRACT, methodName, args, gas: BigInt(gasT) * 10n ** 12n, deposit })
   const fail = res?.status?.Failure || res?.receipts_outcome?.find((r: any) => r.outcome.status?.Failure)?.outcome.status.Failure
   if (fail) {
