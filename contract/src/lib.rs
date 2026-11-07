@@ -109,6 +109,36 @@ const fn tgas(n: u64) -> Gas {
     Gas::from_tgas(n)
 }
 
+/// Who mined in a round: the revealed bets that would mine if their side wins, one list per
+/// side, kept in raw storage under its own prefix (outside the contract state, so it was added
+/// to the live contract without a migration). Settling keeps the winning side's list only if
+/// that round mined, and removes the rest.
+const MINERS_PREFIX: &[u8] = b"__mn";
+/// Bets listed by name per round and side (all of them are counted).
+pub const MINERS_LISTED: usize = 100;
+
+#[near(serializers = [borsh])]
+#[derive(Default)]
+pub struct MinerList {
+    /// Mining bets on this side, and the accounts they came from.
+    pub bets: u32,
+    pub players: u32,
+    /// Sum of their shares: equals the round's `reward_shares` only if every one was recorded.
+    pub shares: u128,
+    /// (account, slot, streak, shares), the first MINERS_LISTED.
+    pub list: Vec<(AccountId, u32, u32, u128)>,
+}
+
+pub fn miners_key(r: u64, side: u8) -> Vec<u8> {
+    let mut k = MINERS_PREFIX.to_vec();
+    k.extend_from_slice(&r.to_le_bytes());
+    k.push(side);
+    k
+}
+fn miners_read(r: u64, side: u8) -> Option<MinerList> {
+    env::storage_read(&miners_key(r, side)).map(|v| near_sdk::borsh::from_slice(&v).expect("miner list"))
+}
+
 #[derive(BorshStorageKey)]
 #[near(serializers = [borsh])]
 enum StorageKey {
@@ -367,6 +397,22 @@ pub struct RoundView {
     pub reward: U128,
     pub reward_shares: U128,
     pub reward_booked: U128,
+    /// Bets that mined this round and the accounts they came from. Both 0 when nothing was
+    /// mined, or when the round was played before the list was recorded (then `reward` > 0).
+    pub miners: u32,
+    pub mining_players: u32,
+}
+
+/// One bet that mined in a round (`get_round_miners`).
+#[near(serializers = [json])]
+pub struct MinerView {
+    pub account_id: AccountId,
+    pub slot: u32,
+    /// The streak this win completed.
+    pub streak: u32,
+    pub shares: U128,
+    /// Its part of the round's reward (unrefined BEFEWER).
+    pub mined: U128,
 }
 
 #[near(serializers = [json])]
@@ -958,6 +1004,19 @@ impl Contract {
         }
         round.revealed_fees += fee;
         round.bounties += bounty;
+        if shares > 0 {
+            let mut m = miners_read(r, s).unwrap_or_default();
+            // a new account (past the listed ones, each unlisted bet counts as one)
+            if !m.list.iter().any(|x| &x.0 == who) {
+                m.players += 1;
+            }
+            m.bets += 1;
+            m.shares += shares;
+            if m.list.len() < MINERS_LISTED {
+                m.list.push((who.clone(), slot, streak_if_win, shares));
+            }
+            env::storage_write(&miners_key(r, s), &near_sdk::borsh::to_vec(&m).expect("miner list"));
+        }
         emit(
             "reveal",
             json!({"account_id": who, "slot": slot, "round": U64(r), "side": side, "amount": U128(amount),
@@ -1040,6 +1099,11 @@ impl Contract {
             self.pot = 0;
         }
         let (reward, committed) = (round.reward, round.committed);
+        for side in [SIDE_A, SIDE_B] {
+            if !(reward > 0 && side == outcome) {
+                env::storage_remove(&miners_key(r, side));
+            }
+        }
         self.escrow -= to_treasury;
         self.treasury += to_treasury;
         self.treasury_in += to_treasury;
@@ -1503,6 +1567,7 @@ impl Contract {
     pub fn get_round(&self, round: U64) -> RoundView {
         let r = round.0;
         let x = self.rounds.get(&r).cloned().unwrap_or_default();
+        let m = self.round_miners(r, &x);
         RoundView {
             round,
             commit_starts_at: U64(self.round_commit_start(r)),
@@ -1526,7 +1591,34 @@ impl Contract {
             reward: U128(x.reward),
             reward_shares: U128(x.reward_shares),
             reward_booked: U128(x.reward_booked),
+            miners: m.as_ref().map(|m| m.bets).unwrap_or(0),
+            mining_players: m.as_ref().map(|m| m.players).unwrap_or(0),
         }
+    }
+
+    /// The bets that mined in a settled round (at most MINERS_LISTED, in reveal order) and what
+    /// each one mined. Empty if the round mined nothing or was played before this was recorded.
+    pub fn get_round_miners(&self, round: U64) -> Vec<MinerView> {
+        let Some(x) = self.rounds.get(&round.0) else { return vec![] };
+        let Some(m) = self.round_miners(round.0, x) else { return vec![] };
+        m.list
+            .into_iter()
+            .map(|(account_id, slot, streak, shares)| MinerView {
+                account_id,
+                slot,
+                streak,
+                shares: U128(shares),
+                mined: U128(mul_div(x.reward, shares, x.reward_shares)),
+            })
+            .collect()
+    }
+
+    /// The winners' list of a round that mined, if it is complete.
+    fn round_miners(&self, r: u64, x: &Round) -> Option<MinerList> {
+        if !x.settled || x.reward == 0 {
+            return None;
+        }
+        miners_read(r, x.outcome).filter(|m| m.shares == x.reward_shares)
     }
 
     /// Rounds `from`, `from-1`, ... (newest first), skipping rounds nobody played.

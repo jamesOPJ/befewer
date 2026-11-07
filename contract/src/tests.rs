@@ -1586,3 +1586,82 @@ fn random_play_keeps_invariants() {
     assert!(s.mined.0 > 0, "40 random rounds should produce some 3-win streaks");
     assert!(s.refine_fees.0 > 0, "and some refining fees");
 }
+
+/// Three rounds where A is the smaller side: alice's two A slots and bob mine in round 2.
+/// `wipe` drops round 2's list after alice reveals, as for a round played before the list existed.
+fn three_a_rounds(wipe: bool) -> (Contract, [AccountId; 3], [u32; 2]) {
+    let mut c = setup();
+    let (a, b, cc) = (acc("alice.testnet"), acc("bob.testnet"), acc("carol.testnet"));
+    for p in [&a, &b, &cc] {
+        join(&mut c, p);
+    }
+    let (s1, s2) = (new_slot(&mut c, &a), new_slot(&mut c, &a));
+    for r in 0..3u64 {
+        commit_s(&mut c, &a, s1, r, "A", N / 10);
+        commit_s(&mut c, &a, s2, r, "A", N / 5);
+        commit(&mut c, &b, r, "A", N / 2);
+        commit(&mut c, &cc, r, "B", N);
+        reveal_s(&mut c, &a, &a, s1, r, "A");
+        reveal_s(&mut c, &a, &a, s2, r, "A");
+        if wipe && r == 2 {
+            env::storage_remove(&miners_key(2, SIDE_A));
+        }
+        reveal(&mut c, &b, r, "A");
+        reveal(&mut c, &cc, r, "B");
+    }
+    ctx(&cc, t_after(2));
+    c.settle_due();
+    (c, [a, b, cc], [s1, s2])
+}
+
+#[test]
+fn each_round_records_who_mined_and_how_much() {
+    let (mut c, [a, b, cc], [s1, s2]) = three_a_rounds(false);
+    for r in 0..2u64 {
+        assert_eq!(c.get_round(U64(r)).miners, 0, "streaks of 1 and 2 do not mine");
+    }
+    let v = c.get_round(U64(2));
+    assert_eq!(v.reward.0, 3 * T);
+    assert_eq!((v.miners, v.mining_players), (3, 2), "three bets from two accounts");
+    let m = c.get_round_miners(U64(2));
+    let got: Vec<(String, u32, u32, u128)> = m.iter().map(|x| (x.account_id.to_string(), x.slot, x.streak, x.mined.0)).collect();
+    // shares = stake / 0.001 NEAR x (streak - 2): 100, 200 and 500 of 800
+    assert_eq!(
+        got,
+        vec![
+            (a.to_string(), s1, 3, 3 * T * 100 / 800),
+            (a.to_string(), s2, 3, 3 * T * 200 / 800),
+            (b.to_string(), 0, 3, 3 * T * 500 / 800),
+        ]
+    );
+    // the list agrees with what each account is credited
+    assert_eq!(c.get_player(a.clone()).unrefined.0, got[0].3 + got[1].3);
+    assert_eq!(c.get_player(b.clone()).unrefined.0, got[2].3);
+    assert!(env::storage_has_key(&miners_key(2, SIDE_A)), "the winners' list stays");
+
+    // round 3: alice and bob carry their streaks onto A, which loses; nobody on B mines
+    commit_s(&mut c, &a, s1, 3, "A", N / 10);
+    commit(&mut c, &b, 3, "A", N / 2);
+    commit(&mut c, &cc, 3, "B", N / 10);
+    reveal_s(&mut c, &a, &a, s1, 3, "A");
+    reveal(&mut c, &b, 3, "A");
+    reveal(&mut c, &cc, 3, "B");
+    assert!(env::storage_has_key(&miners_key(3, SIDE_A)), "listed while the round is open");
+    ctx(&cc, t_after(3));
+    c.settle_due();
+    let v = c.get_round(U64(3));
+    assert_eq!((v.outcome.as_deref(), v.reward.0, v.miners), (Some("B"), 0, 0));
+    assert!(!env::storage_has_key(&miners_key(3, SIDE_A)), "a losing side's list is removed");
+    assert!(c.get_round_miners(U64(3)).is_empty());
+    check_invariants(&c, &[a, b, cc], 0);
+}
+
+#[test]
+fn a_round_without_a_complete_list_shows_no_miner_count() {
+    let (c, [a, b, cc], _) = three_a_rounds(true);
+    let v = c.get_round(U64(2));
+    assert_eq!(v.reward.0, 3 * T, "the round still mined");
+    assert_eq!((v.miners, v.mining_players), (0, 0), "but who mined was not fully recorded");
+    assert!(c.get_round_miners(U64(2)).is_empty());
+    check_invariants(&c, &[a, b, cc], 0);
+}
