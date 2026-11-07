@@ -14,6 +14,10 @@ export const TOKEN = 10n ** 18n // 1 BEFEWER
 export const NEAR = 10n ** 24n // 1 NEAR in yocto
 export const CHIP = 10n ** 22n // 0.01 NEAR: the smallest bet, and the autopilot's unit
 export const ONE = TOKEN
+/** NEAR a void round's record locks for good (291 bytes); its revealed bets pay it, split by stake. */
+export const ROUND_RECORD_NEAR = 291n * 10n ** 19n
+/** Least a buyback spends (the contract's MIN_BUYBACK). */
+export const MIN_BUYBACK = 10n ** 23n
 
 export const provider = new FailoverRpcProvider([
   new JsonRpcProvider({ url: 'https://test.rpc.fastnear.com' }),
@@ -65,6 +69,8 @@ export interface DexV {
   stage: string; step: number; busy: boolean; dex: string; wnear: string; pool_id: number | null
   near_amount: string; seed: string; shares: string; graduated_at: string; held_wnear: string
   next_buyback_at: string; buybacks: number; bought_near: string; bought_burned: string
+  /** what a buyback would spend now (daily DCA share + held wNEAR; it runs at >= 0.1 NEAR) and the most it pays per BEFEWER (yocto per 1 BEFEWER) */
+  buyback_now: string; buyback_ceiling: string
 }
 export interface Status {
   now: string; commit_round: string; commit_ends_at: string

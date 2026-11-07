@@ -1,6 +1,6 @@
 // App-wide reactive state: chain data (polled), the player's session, bets, results, autopilot.
 import {
-  ONE, CHIP, NEAR, view, fmt, fmtN, toNear, toYocto, nsToMs, randomSalt, commitHash, seal, loadSession, saveSession, loadGuestBackup, saveGuestBackup, newKeyPair,
+  ONE, CHIP, NEAR, ROUND_RECORD_NEAR, view, fmt, fmtN, toNear, toYocto, nsToMs, randomSalt, commitHash, seal, loadSession, saveSession, loadGuestBackup, saveGuestBackup, newKeyPair,
   loadPicks, savePick, pickKey, storageFor, callContract, setOnTopUp, provider, type Status, type Params, type RoundV, type PlayerV, type Session,
 } from './chain'
 import * as H from './history'
@@ -9,7 +9,7 @@ import { decide, guard, normalizeRule, stakeFor, meFrom, PRESETS, SLOT_SETS, typ
 import * as W from './wallet'
 
 export type Side = 'A' | 'B'
-export type Result = { round: number; slot: number; side: Side; amount: bigint; fee: bigint; outcome: 'A' | 'B' | 'void' }
+export type Result = { round: number; slot: number; side: Side; amount: bigint; fee: bigint; outcome: 'A' | 'B' | 'void'; revealed?: bigint }
 export type Toast = { id: number; kind: 'ok' | 'err' | 'info'; text: string; action?: { label: string; run: () => void } }
 export type ApLog = { at: number; round: number; text: string; kind: 'bet' | 'skip' | 'err'; lane?: number }
 
@@ -143,8 +143,10 @@ export { fmt, fmtN, toNear, toYocto, label, ONE, CHIP, NEAR }
 export const GUEST_GAME_NEAR = toYocto(0.29)
 /** Fee the contract adds on top of a stake. */
 export const feeFor = (amount: bigint) => (amount * BigInt(game.params?.fee_bps ?? 0)) / 10000n
-/** Net result of a settled bet in NEAR yocto: win +stake-fee, loss -stake-fee, void 0. */
-export const netOf = (x: Result) => (x.outcome === 'void' ? 0n : x.outcome === x.side ? x.amount - x.fee : -(x.amount + x.fee))
+/** A void bet's part of the round's record storage (split by stake over the revealed stake). */
+export const voidCost = (x: Result) => (x.outcome === 'void' && x.revealed && x.revealed > 0n ? (ROUND_RECORD_NEAR * (x.amount < x.revealed ? x.amount : x.revealed)) / x.revealed : 0n)
+/** Net result of a settled bet in NEAR yocto: win +stake-fee, loss -stake-fee, void -its record share. */
+export const netOf = (x: Result) => (x.outcome === 'void' ? -voidCost(x) : x.outcome === x.side ? x.amount - x.fee : -(x.amount + x.fee))
 
 let toastId = 0
 export function toast(kind: Toast['kind'], text: string, ms = kind === 'err' ? 9000 : 4500, action?: Toast['action']) {
@@ -217,7 +219,7 @@ async function loadResults() {
     const pick = pk[e.key]
     const amount = BigInt(pick.amount)
     const fee = pick.fee != null ? BigInt(pick.fee!) : (amount * BigInt(game.params?.fee_bps ?? 0)) / 10000n
-    ;(by[e.slot] ??= []).push({ round: e.round, slot: e.slot, side: pick.side, amount, fee, outcome: rv.outcome })
+    ;(by[e.slot] ??= []).push({ round: e.round, slot: e.slot, side: pick.side, amount, fee, outcome: rv.outcome, revealed: BigInt(rv.revealed_a) + BigInt(rv.revealed_b) })
   }
   const out = by[0] ?? []
   const prevNewest = Math.max(-1, ...Object.values(game.resultsBySlot).flat().map(x => x.round))
@@ -258,10 +260,10 @@ function announce(list: Result[]) {
   if (list.length > 1) {
     const net = list.reduce((t, y) => t + netOf(y), 0n)
     const won = list.filter(y => y.outcome !== 'void' && y.outcome === y.side).length
-    toast(net >= 0n ? 'ok' : 'info', `Round ${x.round}: ${x.outcome === 'void' ? 'void, everything came back' : `${label(x.round, x.outcome)} was the smaller side`}. ${won} of your ${list.length} slots won · net ${net >= 0n ? '+' : '−'}${fmtN(net >= 0n ? net : -net)} NEAR.`)
+    toast(net >= 0n ? 'ok' : 'info', `Round ${x.round}: ${x.outcome === 'void' ? 'void, refunded but for the round record' : `${label(x.round, x.outcome)} was the smaller side`}. ${won} of your ${list.length} slots won · net ${net >= 0n ? '+' : '−'}${fmtN(net >= 0n ? net : -net)} NEAR.`)
     return
   }
-  if (x.outcome === 'void') toast('info', `Round ${x.round} was void: your ${fmtN(x.amount + x.fee)} NEAR came back, fee included.`)
+  if (x.outcome === 'void') toast('info', `Round ${x.round} was void: your ${fmtN(x.amount + x.fee - voidCost(x))} NEAR came back, fee included, less ${fmtN(voidCost(x), 5)} for the round's record.`)
   else if (x.outcome === x.side) toast('ok', `Round ${x.round}: ${label(x.round, x.side)} was the smaller side. You won +${fmtN(x.amount)} NEAR.`)
   else toast('info', `Round ${x.round}: ${label(x.round, x.outcome)} was the smaller side. You lost ${fmtN(x.amount)} NEAR.`)
 }

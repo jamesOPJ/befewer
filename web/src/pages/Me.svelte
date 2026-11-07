@@ -155,7 +155,7 @@
             <span class="no num">#{x.round}</span>
             <span class="body"><span class="q">{questionFor(x.round).q}</span>
               <span class="small muted">{multi() ? `${slotName(x.slot)} picked` : 'You picked'} {label(x.round, x.side)} · {x.outcome === 'void' ? 'void' : `${label(x.round, x.outcome)} was smaller`}</span></span>
-            {#if x.outcome === 'void'}<span class="amt num">±0</span>
+            {#if x.outcome === 'void'}<span class="amt num" title="the round's record, split by stake">−{fmtN(-netOf(x), 5)}</span>
             {:else if n > 0n}<span class="amt num good">+{fmtN(n)}</span>
             {:else}<span class="amt num burn">−{fmtN(-n)}</span>{/if}
           </li>

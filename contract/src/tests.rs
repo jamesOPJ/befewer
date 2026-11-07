@@ -139,6 +139,12 @@ fn reveal(c: &mut Contract, who: &AccountId, r: u64, side: &str) {
     ctx(who, t_reveal(r));
     c.reveal(U64(r), None, side.into(), salt(who, r), None);
 }
+/// NEAR a void round's record locks for good (ROUND_RECORD_BYTES x 1e19), and a revealed bet's
+/// part of it (split by stake over the round's revealed stake).
+const REC: u128 = 291 * 10_000_000_000_000_000_000;
+fn rec(stake: u128, revealed: u128) -> u128 {
+    (U256::from(REC) * U256::from(stake) / U256::from(revealed)).as_u128()
+}
 fn bal(c: &Contract, who: &AccountId) -> u128 {
     c.get_player(who.clone()).balance.0
 }
@@ -404,8 +410,8 @@ fn tie_voids_refunds_stake_and_fee_and_unrevealed_goes_to_the_treasury() {
         c.claim(Some(p.clone()), None);
     }
     assert_eq!(c.get_round(U64(0)).outcome.as_deref(), Some("void"));
-    assert_eq!(bal(&c, &a), START, "void: stake and fee both come back");
-    assert_eq!(bal(&c, &b), START);
+    assert_eq!(bal(&c, &a), START - REC / 2, "void: stake and fee come back, minus half the round's record");
+    assert_eq!(bal(&c, &b), START - REC / 2);
     assert_eq!(bal(&c, &ch), START - N / 2 - fee(N / 2), "unrevealed: stake and fee are lost");
     assert_eq!(c.get_status().treasury.0, N / 2 + fee(N / 2));
     assert_eq!(c.get_player(ch.clone()).forfeits, 1);
@@ -425,9 +431,12 @@ fn one_sided_round_is_refunded() {
     ctx(&a, t_after(0));
     c.claim(Some(a.clone()), None);
     c.claim(Some(b.clone()), None);
-    assert_eq!(bal(&c, &a), START);
-    assert_eq!(bal(&c, &b), START);
+    // everything back except the round's record, split by stake (3:1)
+    assert_eq!(bal(&c, &a), START - rec(N, N + N / 3));
+    assert_eq!(bal(&c, &b), START - rec(N / 3, N + N / 3));
+    assert!(REC - rec(N, N + N / 3) - rec(N / 3, N + N / 3) <= 1, "the two parts make up the record");
     assert_eq!(c.get_status().treasury.0, 0);
+    check_invariants(&c, &[a, b], 0);
 }
 
 #[test]
@@ -558,7 +567,7 @@ fn hedging_alone_is_free_but_never_mines() {
     ctx(&h1, t_after(4));
     c.claim(Some(h1.clone()), None);
     c.claim(Some(h2.clone()), None);
-    assert_eq!(bal(&c, &h1) + bal(&c, &h2), 2 * START, "void rounds refund everything");
+    assert_eq!(bal(&c, &h1) + bal(&c, &h2), 2 * START - 5 * REC, "void rounds refund everything but their records");
     assert_eq!(c.get_player(h1.clone()).streak, 0, "a void is not a win");
     assert_eq!(c.get_status().mined.0, 0);
     assert_eq!(c.get_status().pot.0, 5 * T, "the pot keeps growing for the next real streak");
@@ -852,9 +861,9 @@ fn the_refining_fee_is_shared_pro_rata_and_refined_is_claimed_without_a_fee() {
     assert_eq!(view_p(&c, &z).refined.0, 15 * T / 100);
     // y claims half its unrefined: 1.5 - 0.15 fee + its 0.45 refined (no fee on that) = 1.8
     assert_eq!(claim_tokens(&mut c, &y, Some(5_000)), 18 * T / 10);
-    // the 0.15 fee splits over what is still unrefined: y 1.5, z 1 -> 0.09 / 0.06
-    assert_eq!(view_p(&c, &y).refined.0, 9 * T / 100);
-    assert_eq!(view_p(&c, &z).refined.0, 21 * T / 100);
+    // the 0.15 fee goes to the OTHER holders only: z gets all of it, y none of its own fee
+    assert_eq!(view_p(&c, &y).refined.0, 0);
+    assert_eq!(view_p(&c, &z).refined.0, 30 * T / 100);
     assert_eq!(view_p(&c, &y).unrefined.0, 15 * T / 10);
     let s = c.get_status();
     assert_eq!(s.refine_fees.0, 75 * T / 100);
@@ -911,6 +920,62 @@ fn reveal_by(c: &mut Contract, by: &AccountId, who: &AccountId, r: u64, side: &s
 fn new_slot(c: &mut Contract, who: &AccountId) -> u32 {
     ctx(who, G);
     c.open_slot()
+}
+
+#[test]
+fn a_refining_fee_is_never_divided_by_dust() {
+    // audit finding 1: with the other holders down to 1 yocto, the fee used to be divided by 1
+    // and the index pushed toward u128::MAX, after which every claim overflowed
+    let mut c = setup();
+    let (m, d) = (acc("mallory.testnet"), acc("dust.testnet"));
+    join(&mut c, &m);
+    join(&mut c, &d);
+    give_unrefined(&mut c, &m, 10 * T);
+    give_unrefined(&mut c, &d, 10_000_000_000); // 1e-8 BEFEWER: the step would still fit in u128
+    let ix = c.refine_index;
+    assert_eq!(claim_tokens(&mut c, &m, Some(5_000)), 45 * T / 10);
+    assert_eq!(c.refine_index, ix, "others hold less than 1 BEFEWER: the index does not move");
+    assert_eq!(c.get_status().refine_to_pot.0, T / 2, "the fee went to the pot");
+    // the last holder can always claim everything
+    assert_eq!(claim_tokens(&mut c, &m, None), 45 * T / 10);
+    assert_eq!(view_p(&c, &d).refined.0, 0);
+    check_invariants(&c, &[m, d], 0);
+}
+
+#[test]
+fn a_dominant_holder_cannot_get_its_own_refining_fee_back() {
+    // audit finding 5: claiming 99.99% used to share the fee with the claimant's own 0.01%
+    let mut c = setup();
+    let w = acc("whale.testnet");
+    join(&mut c, &w);
+    give_unrefined(&mut c, &w, 10 * T);
+    let first = claim_tokens(&mut c, &w, Some(9_999));
+    let rest = claim_tokens(&mut c, &w, None);
+    assert_eq!(first + rest, 9 * T, "90% either way: the 10% fee never comes back");
+    assert_eq!(c.get_status().refine_to_pot.0, T, "nobody else holds unrefined BEFEWER: the fee went to the pot");
+    check_invariants(&c, &[w], 0);
+}
+
+#[test]
+fn refundable_slot_fees_are_not_spendable_by_the_treasury() {
+    // audit finding 7: an open slot's fee left the owed total, so a balance-limited treasury
+    // could spend it and the refund on close_slot would then come out of players' NEAR
+    let mut c = setup();
+    let a = acc("alice.testnet");
+    join(&mut c, &a);
+    donate(&mut c, 3 * N, now_g());
+    ctx(&a, now_g());
+    let s = c.get_status();
+    let storage = env::storage_usage() as u128 * env::storage_byte_cost().as_yoctonear();
+    let held = s.balances_total.0 + s.escrow.0 + s.storage_held.0 + s.storage_fees.0 + storage + SAFETY_RESERVE + N;
+    ctx_full(&a, now_g(), 0, held, vec![]);
+    assert_eq!(c.get_status().treasury_spendable.0, N);
+    for _ in 0..20 {
+        let _ = c.open_slot();
+    }
+    ctx_full(&a, now_g(), 0, held, vec![]);
+    let storage2 = env::storage_usage() as u128 * env::storage_byte_cost().as_yoctonear();
+    assert!(c.get_status().treasury_spendable.0 <= N - (storage2 - storage), "20 slot fees did not become spendable");
 }
 
 #[test]
@@ -1158,7 +1223,7 @@ fn a_void_round_refunds_the_stake_and_the_fee_minus_the_reveal_reward() {
     reveal_by(&mut c, &k, &a, 0, "A");
     ctx(&a, t_after(0));
     c.claim(None, None);
-    assert_eq!(bal(&c, &a), START - bounty(N), "everything back except the reward the keeper earned");
+    assert_eq!(bal(&c, &a), START - bounty(N) - REC, "back: all but the keeper's reward and (alone) the whole round record");
     assert_eq!(bal(&c, &k), START + bounty(N));
     check_invariants(&c, &[a, k], 0);
 }
@@ -1234,7 +1299,7 @@ fn the_treasury_never_spends_player_money() {
     ctx(&a, t_commit(0)); // a fresh context: same storage_usage as the ones below
     let s = c.get_status();
     let storage = env::storage_usage() as u128 * env::storage_byte_cost().as_yoctonear();
-    let owed = s.balances_total.0 + s.escrow.0 + s.storage_held.0 + storage + SAFETY_RESERVE;
+    let owed = s.balances_total.0 + s.escrow.0 + s.storage_held.0 + s.storage_fees.0 + storage + SAFETY_RESERVE;
     // the contract really holds only 1 NEAR more than it owes: only that 1 NEAR is spendable
     ctx_full(&a, t_commit(0), 0, owed + N, vec![]);
     assert_eq!(c.get_status().treasury_spendable.0, N);
@@ -1276,30 +1341,32 @@ fn graduated(donation: u128) -> Contract {
     let _ = c.graduate();
     assert!(c.get_status().dex.busy);
     callback(now_g(), PromiseResult::Successful(vec![]));
-    c.on_graduate(STEP_START);
-    // 1: register + create the pool
+    c.on_graduate(STEP_START, None);
+    // 1: register at the DEX (the pool is created later, together with its liquidity)
     ctx(&k, now_g());
     let _ = c.graduate();
-    callback(now_g(), ok_json(7u64));
-    c.on_graduate(STEP_REGISTER);
+    callback(now_g(), PromiseResult::Successful(vec![]));
+    c.on_graduate(STEP_REGISTER, None);
     // 2: deposit the wNEAR
     let near_amount = c.get_status().dex.near_amount.0;
     ctx(&k, now_g());
     let _ = c.graduate();
     callback(now_g(), ok_json(U128(near_amount)));
-    c.on_graduate(STEP_SEND_NEAR);
+    c.on_graduate(STEP_SEND_NEAR, None);
     // 3: mint + deposit the seed
     ctx(&k, now_g());
     let _ = c.graduate();
     let seed = c.get_status().dex.seed.0;
     assert_eq!(tokens(&c, &dex()), seed, "the seed sits with the DEX");
     callback(now_g(), ok_json(U128(seed)));
-    c.on_graduate(STEP_SEND_TOKEN);
-    // 4: add liquidity
+    c.on_graduate(STEP_SEND_TOKEN, None);
+    // 4: learn the next pool id (7), then create pool 7 and fill it in one receipt
     ctx(&k, now_g());
     let _ = c.graduate();
+    callback(now_g(), ok_json(7u64));
+    let _ = c.on_pool_count();
     callback(now_g(), ok_json(U128(1_000_000)));
-    c.on_graduate(STEP_ADD_LIQUIDITY);
+    c.on_graduate(STEP_ADD_LIQUIDITY, Some(7));
     c
 }
 
@@ -1333,20 +1400,103 @@ fn a_failed_graduation_step_is_retried_and_a_failed_wrap_refunds_the_treasury() 
     ctx(&k, now_g());
     let _ = c.graduate();
     callback(now_g(), PromiseResult::Failed);
-    c.on_graduate(STEP_START);
+    c.on_graduate(STEP_START, None);
     let s = c.get_status();
     assert_eq!((s.dex.step, s.treasury.0, s.dex.busy), (STEP_START, 6 * N, false));
     // try again, succeed, then fail creating the pool: stays on that step
     ctx(&k, now_g());
     let _ = c.graduate();
     callback(now_g(), PromiseResult::Successful(vec![]));
-    c.on_graduate(STEP_START);
+    c.on_graduate(STEP_START, None);
     ctx(&k, now_g());
     let _ = c.graduate();
     callback(now_g(), PromiseResult::Failed);
-    c.on_graduate(STEP_REGISTER);
+    c.on_graduate(STEP_REGISTER, None);
     assert_eq!(c.get_status().dex.step, STEP_REGISTER);
     assert_eq!(c.get_status().dex.pool_id, None);
+}
+
+/// Steps 0-3 of the pool opening, leaving step 4 (create + fill) to the caller.
+fn ready_to_add_liquidity() -> Contract {
+    let mut c = setup();
+    donate(&mut c, 6 * N, now_g());
+    let k = acc("keeper.testnet");
+    for (step, res) in [(STEP_START, PromiseResult::Successful(vec![])), (STEP_REGISTER, PromiseResult::Successful(vec![]))] {
+        ctx(&k, now_g());
+        let _ = c.graduate();
+        callback(now_g(), res);
+        c.on_graduate(step, None);
+    }
+    let near_amount = c.get_status().dex.near_amount.0;
+    ctx(&k, now_g());
+    let _ = c.graduate();
+    callback(now_g(), ok_json(U128(near_amount)));
+    c.on_graduate(STEP_SEND_NEAR, None);
+    ctx(&k, now_g());
+    let _ = c.graduate();
+    callback(now_g(), ok_json(U128(T)));
+    c.on_graduate(STEP_SEND_TOKEN, None);
+    assert_eq!(c.get_status().dex.step, STEP_ADD_LIQUIDITY);
+    c
+}
+
+#[test]
+fn the_pool_is_created_and_filled_in_one_receipt_with_min_amounts() {
+    let mut c = ready_to_add_liquidity();
+    let k = acc("keeper.testnet");
+    ctx(&k, now_g());
+    let _ = c.graduate();
+    assert!(fn_call_args("add_simple_pool").is_empty(), "no pool yet: first the id it will get");
+    assert_eq!(fn_call_args("get_number_of_pools").len(), 1);
+    callback(now_g(), ok_json(41u64));
+    let _ = c.on_pool_count();
+    let receipts = near_sdk::test_utils::get_created_receipts();
+    let batch = receipts
+        .iter()
+        .find(|r| r.actions.iter().any(|a| matches!(a, near_sdk::mock::MockAction::FunctionCallWeight { method_name, .. } if method_name == b"add_simple_pool")))
+        .expect("pool creation");
+    let methods: Vec<String> = batch
+        .actions
+        .iter()
+        .filter_map(|a| match a {
+            near_sdk::mock::MockAction::FunctionCallWeight { method_name, .. } => Some(String::from_utf8(method_name.clone()).unwrap()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(methods, vec!["add_simple_pool", "add_liquidity"], "one receipt: it reverts as a whole");
+    let near_amount = c.get_status().dex.near_amount.0;
+    let args = fn_call_args("add_liquidity")[0].clone();
+    assert!(args.contains(r#""pool_id":41"#), "{args}");
+    assert!(args.contains(&format!(r#""min_amounts":["{}","{}"]"#, near_amount, T)), "{args}");
+    callback(now_g(), ok_json(U128(5_000)));
+    c.on_graduate(STEP_ADD_LIQUIDITY, Some(41));
+    let s = c.get_status();
+    assert_eq!((s.dex.stage.as_str(), s.dex.pool_id, s.dex.shares.0), ("open", Some(41), 5_000));
+}
+
+#[test]
+fn if_someone_creates_a_pool_in_between_the_last_step_is_retried() {
+    let mut c = ready_to_add_liquidity();
+    let k = acc("keeper.testnet");
+    ctx(&k, now_g());
+    let _ = c.graduate();
+    callback(now_g(), ok_json(41u64));
+    let _ = c.on_pool_count();
+    // pool 41 was someone else's by then: add_liquidity failed and the receipt reverted
+    callback(now_g(), PromiseResult::Failed);
+    c.on_graduate(STEP_ADD_LIQUIDITY, Some(41));
+    let s = c.get_status();
+    assert_eq!((s.dex.step, s.dex.busy, s.dex.pool_id), (STEP_ADD_LIQUIDITY, false, None));
+    // shares without the pool id they were added to never count as open
+    callback(now_g(), ok_json(U128(5_000)));
+    c.on_graduate(STEP_ADD_LIQUIDITY, None);
+    assert_eq!(c.get_status().dex.stage, "adding liquidity");
+    // and a failed lookup also just waits for the next try
+    ctx(&k, now_g());
+    let _ = c.graduate();
+    callback(now_g(), PromiseResult::Failed);
+    let _ = c.on_pool_count();
+    assert_eq!((c.get_status().dex.step, c.get_status().dex.busy), (STEP_ADD_LIQUIDITY, false));
 }
 
 #[test]
@@ -1368,20 +1518,20 @@ fn a_refunded_seed_is_resent_not_minted_twice() {
         ctx(&k, now_g());
         let _ = c.graduate();
         callback(now_g(), res);
-        c.on_graduate(step);
+        c.on_graduate(step, None);
     }
     let near_amount = c.get_status().dex.near_amount.0;
     ctx(&k, now_g());
     let _ = c.graduate();
     callback(now_g(), ok_json(U128(near_amount)));
-    c.on_graduate(STEP_SEND_NEAR);
+    c.on_graduate(STEP_SEND_NEAR, None);
     ctx(&k, now_g());
     let _ = c.graduate();
     // the DEX refused: ft_resolve_transfer moved the seed back to us and reported 0 used
     ctx_full(&me(), now_g(), 0, BIG, vec![ok_json(U128(T))]); // ft_on_transfer said: all unused
     c.ft_resolve_transfer(me(), dex(), U128(T));
     callback(now_g(), ok_json(U128(0)));
-    c.on_graduate(STEP_SEND_TOKEN);
+    c.on_graduate(STEP_SEND_TOKEN, None);
     assert_eq!(c.get_status().dex.step, STEP_SEND_TOKEN);
     assert_eq!(tokens(&c, &me()), T);
     ctx(&k, now_g());
@@ -1391,18 +1541,37 @@ fn a_refunded_seed_is_resent_not_minted_twice() {
     assert_eq!(tokens(&c, &dex()), T);
 }
 
+fn fn_call_args(method: &str) -> Vec<String> {
+    near_sdk::test_utils::get_created_receipts()
+        .into_iter()
+        .flat_map(|r| r.actions)
+        .filter_map(|a| match a {
+            near_sdk::mock::MockAction::FunctionCallWeight { method_name, args, .. } if method_name == method.as_bytes() => {
+                Some(String::from_utf8(args).unwrap())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 #[test]
-fn buyback_spends_at_most_buyback_max_and_burns_what_comes_back() {
+fn buyback_spends_the_daily_dca_share_and_burns_what_comes_back() {
     let mut c = graduated(6 * N);
-    donate(&mut c, 3 * N, now_g());
+    donate(&mut c, 365 * N, now_g());
     let k = acc("keeper.testnet");
-    ctx(&k, now_g() + MIN);
+    let t = now_g() + DAY_NS;
+    ctx(&k, t);
+    assert_eq!(c.get_status().dex.buyback_now.0, N, "365 NEAR spendable: one day's share is 1 NEAR");
+    let ceiling = c.get_status().dex.buyback_ceiling.0;
+    assert_eq!(ceiling, ceiling_from(6 * N - GRADUATION_COST, T), "first ceiling: 125% of the opening price");
     let _ = c.buyback();
-    assert_eq!(c.get_status().treasury.0, 2 * N, "one buyback spends at most buyback_max");
-    callback(now_g() + MIN, ok_json(U128(N)));
+    assert_eq!(c.get_status().treasury.0, 364 * N);
+    let min_out = (U256::from(N) * U256::from(TOKEN) / U256::from(ceiling)).as_u128();
+    assert!(fn_call_args("ft_transfer_call")[0].contains(&format!(r#"\"min_amount_out\":\"{}\""#, min_out)), "the swap pays at most the ceiling");
+    callback(t, ok_json(U128(N)));
     c.on_buyback(U128(0), U128(N));
     // the pool sends the bought BEFEWER to the contract: it is burned on arrival
-    ctx_full(&dex(), now_g() + MIN, 1, BIG, vec![]);
+    ctx_full(&dex(), t, 1, BIG, vec![]);
     c.ft_transfer(me(), U128(T / 10), None);
     let s = c.get_status();
     assert_eq!((s.dex.bought_near.0, s.dex.bought_burned.0, s.dex.buybacks), (N, T / 10, 1));
@@ -1411,71 +1580,99 @@ fn buyback_spends_at_most_buyback_max_and_burns_what_comes_back() {
     assert_eq!(tokens(&c, &me()), 0);
     let log = c.get_buybacks();
     assert_eq!(log.len(), 1, "each buyback is listed");
-    assert_eq!((log[0].at.0, log[0].near_in.0, log[0].spent.0, log[0].burned.0), (now_g() + MIN, N, N, T / 10));
+    assert_eq!((log[0].at.0, log[0].near_in.0, log[0].spent.0, log[0].burned.0), (t, N, N, T / 10));
+    assert_eq!(s.dex.buyback_ceiling.0, 125 * N / 10, "paid 10 NEAR per BEFEWER: next time at most 12.5");
+}
+
+#[test]
+#[should_panic(expected = "waits until it reaches 0.1 NEAR")]
+fn a_buyback_below_a_tenth_of_a_near_waits() {
+    let mut c = graduated(6 * N);
+    donate(&mut c, 3 * N, now_g()); // 3 NEAR / 365 = 0.008 NEAR a day
+    ctx(&acc("keeper.testnet"), now_g() + DAY_NS);
+    let _ = c.buyback();
+}
+
+#[test]
+fn the_dca_share_accumulates_until_it_is_worth_a_buyback() {
+    let mut c = graduated(6 * N);
+    donate(&mut c, 3 * N, now_g());
+    let k = acc("keeper.testnet");
+    ctx(&k, now_g() + 12 * DAY_NS);
+    assert!(c.get_status().dex.buyback_now.0 < MIN_BUYBACK, "12 days x 3/365 = 0.099 NEAR: not yet");
+    ctx(&k, now_g() + 13 * DAY_NS);
+    let share = 3 * N * 13 / 365;
+    assert_eq!(c.get_status().dex.buyback_now.0, share, "13 days: 0.107 NEAR");
+    let _ = c.buyback();
+    assert_eq!(c.get_status().treasury.0, 3 * N - share);
+}
+
+#[test]
+#[should_panic(expected = "too soon")]
+fn buybacks_are_at_most_daily() {
+    let mut c = graduated(6 * N);
+    donate(&mut c, 365 * N, now_g());
+    let k = acc("keeper.testnet");
+    ctx(&k, now_g() + DAY_NS);
+    let _ = c.buyback();
+    callback(now_g() + DAY_NS, ok_json(U128(N)));
+    c.on_buyback(U128(0), U128(N));
+    ctx(&k, now_g() + DAY_NS + DAY_NS / 2);
+    let _ = c.buyback();
+}
+
+#[test]
+fn a_refused_swap_keeps_the_wnear_and_raises_the_price_ceiling_by_a_quarter() {
+    let mut c = graduated(6 * N);
+    donate(&mut c, 365 * N, now_g());
+    let k = acc("keeper.testnet");
+    let t1 = now_g() + DAY_NS;
+    ctx(&k, t1);
+    let ceil0 = c.get_status().dex.buyback_ceiling.0;
+    let _ = c.buyback();
+    callback(t1, ok_json(U128(0))); // the DEX refused (price above the ceiling): all came back as wNEAR
+    c.on_buyback(U128(0), U128(N));
+    let s = c.get_status();
+    assert_eq!((s.dex.held_wnear.0, s.dex.bought_near.0, s.treasury.0), (N, 0, 364 * N));
+    assert_eq!(s.dex.buyback_ceiling.0, ceil0 * 5 / 4, "25% more next time");
+    assert_eq!(c.get_buybacks()[0].spent.0, 0, "listed as not gone through");
+    // a day later it swaps the held wNEAR first (already buyback_max: nothing new from the treasury)
+    let t2 = t1 + DAY_NS;
+    ctx(&k, t2);
+    let _ = c.buyback();
+    assert_eq!(c.get_status().treasury.0, 364 * N);
+    callback(t2, PromiseResult::Failed); // and if the whole call fails
+    c.on_buyback(U128(N), U128(0));
+    let s = c.get_status();
+    assert_eq!((s.dex.held_wnear.0, s.treasury.0), (N, 364 * N), "nothing is lost");
 }
 
 #[test]
 fn the_buyback_list_keeps_the_last_100_newest_first_and_marks_swaps_that_failed() {
     let mut c = graduated(6 * N);
-    donate(&mut c, 300 * N, now_g());
+    donate(&mut c, 40_000 * N, now_g());
     let k = acc("keeper.testnet");
     for i in 1..=(BUYBACKS_KEPT as u64 + 2) {
-        let t = now_g() + i * MIN;
+        let t = now_g() + i * DAY_NS;
         ctx(&k, t);
         let _ = c.buyback();
         if i == BUYBACKS_KEPT as u64 + 2 {
             callback(t, PromiseResult::Failed); // the newest one does not go through
             c.on_buyback(U128(0), U128(N));
         } else {
-            callback(t, ok_json(U128(N / 2))); // the pool takes half, the rest is kept as wNEAR
+            callback(t, ok_json(U128(N))); // the pool took it all
             c.on_buyback(U128(0), U128(N));
             ctx_full(&dex(), t, 1, BIG, vec![]);
-            c.ft_transfer(me(), U128(i as u128), None);
+            c.ft_transfer(me(), U128(T / 1000), None);
         }
     }
     let log = c.get_buybacks();
     assert_eq!(log.len(), BUYBACKS_KEPT);
     let (newest, next) = (&log[0], &log[1]);
-    assert_eq!((newest.at.0, newest.spent.0, newest.burned.0), (now_g() + (BUYBACKS_KEPT as u64 + 2) * MIN, 0, 0));
-    assert_eq!((next.at.0, next.spent.0, next.burned.0), (now_g() + (BUYBACKS_KEPT as u64 + 1) * MIN, N / 2, BUYBACKS_KEPT as u128 + 1));
-    assert_eq!(log[BUYBACKS_KEPT - 1].at.0, now_g() + 3 * MIN, "the two oldest dropped out");
-    let s = c.get_status();
-    assert_eq!(s.dex.buybacks as usize, BUYBACKS_KEPT + 1, "the totals still count every swap that went through");
-}
-
-#[test]
-#[should_panic(expected = "too soon")]
-fn buybacks_are_rate_limited() {
-    let mut c = graduated(6 * N);
-    donate(&mut c, 3 * N, now_g());
-    let k = acc("keeper.testnet");
-    ctx(&k, now_g() + MIN);
-    let _ = c.buyback();
-    callback(now_g() + MIN, ok_json(U128(N)));
-    c.on_buyback(U128(0), U128(N));
-    ctx(&k, now_g() + MIN + MIN / 2);
-    let _ = c.buyback();
-}
-
-#[test]
-fn a_swap_that_does_not_go_through_keeps_the_wnear_for_next_time() {
-    let mut c = graduated(6 * N);
-    donate(&mut c, 3 * N, now_g());
-    let k = acc("keeper.testnet");
-    ctx(&k, now_g() + MIN);
-    let _ = c.buyback();
-    callback(now_g() + MIN, ok_json(U128(0))); // the DEX refunded everything
-    c.on_buyback(U128(0), U128(N));
-    let s = c.get_status();
-    assert_eq!((s.dex.held_wnear.0, s.dex.bought_near.0, s.treasury.0), (N, 0, 2 * N));
-    // next time it swaps the held wNEAR first and takes nothing new from the treasury
-    ctx(&k, now_g() + 3 * MIN);
-    let _ = c.buyback();
-    assert_eq!(c.get_status().treasury.0, 2 * N);
-    callback(now_g() + 3 * MIN, PromiseResult::Failed); // and if the whole call fails
-    c.on_buyback(U128(N), U128(0));
-    let s = c.get_status();
-    assert_eq!((s.dex.held_wnear.0, s.treasury.0), (N, 2 * N), "nothing is lost");
+    assert_eq!((newest.at.0, newest.spent.0, newest.burned.0), (now_g() + (BUYBACKS_KEPT as u64 + 2) * DAY_NS, 0, 0));
+    assert_eq!((next.at.0, next.spent.0, next.burned.0), (now_g() + (BUYBACKS_KEPT as u64 + 1) * DAY_NS, N, T / 1000));
+    assert_eq!(log[BUYBACKS_KEPT - 1].at.0, now_g() + 3 * DAY_NS, "the two oldest dropped out");
+    assert_eq!(c.get_status().dex.buybacks as usize, BUYBACKS_KEPT + 1, "the totals still count every swap that went through");
 }
 
 #[test]

@@ -63,7 +63,6 @@
   const sharesIfWin = $derived(nextStreak >= need ? nextStreak - need + 1 : 0)
   const dex = $derived(st?.dex)
   const toGraduate = $derived(st ? Math.min(1, toNear(st.treasury) / Math.max(1e-9, toNear(st.graduate_at))) : 0)
-  const everyMin = $derived(game.params ? Math.round(Number(BigInt(game.params.buyback_every_ns) / 1_000_000_000n) / 60) : 0)
 
   let ctaEl = $state<HTMLButtonElement | null>(null)
   function pickSide(S: Side) {
@@ -211,7 +210,7 @@
         </div>
         <Orbs round={lastSettled} />
         <p class="fine center">
-          {#if lastSettled.outcome === 'void'}Everyone was on one side, so everyone got their bet back.
+          {#if lastSettled.outcome === 'void'}Everyone was on one side, so everyone got their bet back, less a share of the round's record (0.0029 NEAR, split by stake).
           {:else}<span class="gold"><Icon name="flame" size={14} /> {fmtN(lastSettled.to_treasury)} NEAR to the treasury</span> · bets on the smaller side won +100%{#if BigInt(lastSettled.reward) > 0n} · <a class="good" href="#/rounds"><b>{fmt(lastSettled.reward)} BEFEWER mined</b></a> by {lastSettled.miners ? `${lastSettled.mining_players} streak winner${lastSettled.mining_players === 1 ? '' : 's'}` : 'streak winners'}{/if}.{/if}
         </p>
       </section>
@@ -225,7 +224,7 @@
           {#if last.list.length > 1}
             <b class={last.net > 0n ? 'good' : last.net < 0n ? 'burn' : ''}>Net {last.net >= 0n ? '+' : '−'}{fmtN(last.net >= 0n ? last.net : -last.net)} NEAR</b>
             <span class="muted">· {last.list.filter(y => y.outcome !== 'void' && y.outcome === y.side).length} of {last.list.length} slots won</span>
-          {:else if x.outcome === 'void'}<b>Refunded {fmtN(x.amount + x.fee)} NEAR</b>
+          {:else if x.outcome === 'void'}<b>Refunded {fmtN(x.amount + x.fee + netOf(x))} NEAR</b>
           {:else if x.outcome === x.side}<b class="good">Won +{fmtN(x.amount)} NEAR</b>
           {:else}<b class="burn">Lost {fmtN(x.amount)} NEAR</b>{/if}
           {#if last.list.length === 1}<span class="muted">· you picked {label(x.round, x.side)}</span>{/if}
@@ -263,7 +262,7 @@
             </p>
           {:else}
             <div class="pot"><b class="num">{fmtN(st.treasury)}</b> NEAR</div>
-            <p class="fine">Pool <a href="https://testnet.ref.finance/pool/{dex.pool_id}" target="_blank" rel="noopener">#{dex.pool_id} on Ref Finance</a> is open, its shares locked in the contract. Every {everyMin} min the treasury buys up to {fmtN(game.params.buyback_max)} NEAR of BEFEWER there and burns it: {dex.buybacks} buyback{dex.buybacks === 1 ? '' : 's'} so far, {fmtN(dex.bought_near)} NEAR spent, <b>{fmt(dex.bought_burned)} BEFEWER burned</b>.</p>
+            <p class="fine">Pool <a href="https://testnet.ref.finance/pool/{dex.pool_id}" target="_blank" rel="noopener">#{dex.pool_id} on Ref Finance</a> is open, its shares locked in the contract. Every day the treasury spends 1/365 of its NEAR (once that is at least 0.1) buying BEFEWER there and burns it: {dex.buybacks} buyback{dex.buybacks === 1 ? '' : 's'} so far, {fmtN(dex.bought_near)} NEAR spent, <b>{fmt(dex.bought_burned)} BEFEWER burned</b>.</p>
           {/if}
         </section>
       {/if}

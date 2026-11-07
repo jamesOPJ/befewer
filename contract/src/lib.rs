@@ -73,7 +73,24 @@ pub const STORAGE_FEE: u128 = NEAR / 100;
 /// NEAR the treasury never spends, on top of what the contract owes players and its storage.
 pub const SAFETY_RESERVE: u128 = NEAR;
 /// Smallest buyback worth sending.
-pub const MIN_BUYBACK: u128 = NEAR / 100;
+/// Buybacks are a daily DCA: each spends (spendable treasury) x (time since the last one) /
+/// DCA_DAYS days, at most `buyback_max`, and waits until that reaches MIN_BUYBACK (a smaller
+/// buy would mostly pay gas). At most one a day.
+pub const MIN_BUYBACK: u128 = NEAR / 10;
+pub const DAY_NS: u64 = 86_400_000_000_000;
+pub const DCA_DAYS: u128 = 365;
+/// The most a buyback pays per BEFEWER: 25% above the last buyback's price, and 25% more after
+/// each one the pool refused. Someone pumping the price right before a buyback (to sell into
+/// it) gets the swap refused instead.
+pub const BUYBACK_CEILING_BPS: u128 = 12_500;
+const BUYBACK_CEILING_KEY: &[u8] = b"__bc";
+/// A refining fee is shared only if the other holders hold at least this much unrefined
+/// BEFEWER; otherwise it goes to the pot. (Dividing a fee by a dust amount would push the
+/// index toward u128::MAX, after which every claim would overflow.)
+pub const REFINE_MIN_OTHERS: u128 = TOKEN;
+/// Bytes a round's record keeps on chain for good: key 9 + Round 242 + 40 per-record overhead.
+/// A void round brings the treasury nothing, so its revealed bets pay for it, split by stake.
+pub const ROUND_RECORD_BYTES: u128 = 291;
 /// Shares count stakes in milli-NEAR, so `pot * shares` always fits in u128.
 pub const SHARE_UNIT: u128 = NEAR / 1_000;
 
@@ -153,6 +170,30 @@ fn buybacks_update_last(f: impl FnOnce(&mut (u64, u128, u128, u128))) {
     if let Some(last) = log.last_mut() {
         f(last);
         buybacks_write(&log);
+    }
+}
+
+/// The price ceiling for the next buyback, yoctoNEAR per 1 BEFEWER (0 = not set yet).
+fn ceiling_read() -> u128 {
+    env::storage_read(BUYBACK_CEILING_KEY).and_then(|v| v.try_into().ok()).map(u128::from_le_bytes).unwrap_or(0)
+}
+fn ceiling_write(v: u128) {
+    env::storage_write(BUYBACK_CEILING_KEY, &v.to_le_bytes());
+}
+/// yoctoNEAR per 1 BEFEWER for `near` spent on `tokens`, times BUYBACK_CEILING_BPS.
+fn ceiling_from(near: u128, tokens: u128) -> u128 {
+    if tokens == 0 {
+        return 0;
+    }
+    let v = U256::from(near) * U256::from(TOKEN) * U256::from(BUYBACK_CEILING_BPS) / (U256::from(tokens) * U256::from(BPS));
+    if v > U256::from(u128::MAX) { u128::MAX } else { v.as_u128() }
+}
+/// Once the newest buyback has both its NEAR and its BEFEWER, its price sets the next ceiling.
+fn reprice_from_last() {
+    if let Some(&(_, _, spent, burned)) = buybacks_read().last() {
+        if spent > 0 && burned > 0 {
+            ceiling_write(ceiling_from(spent, burned));
+        }
     }
 }
 
@@ -461,6 +502,10 @@ pub struct DexView {
     pub graduated_at: U64,
     pub held_wnear: U128,
     pub next_buyback_at: U64,
+    /// What a buyback would spend right now (DCA share + held wNEAR); it runs at >= 0.1 NEAR.
+    pub buyback_now: U128,
+    /// Most a buyback pays per BEFEWER, in yoctoNEAR per 1 BEFEWER (0 before the pool opens).
+    pub buyback_ceiling: U128,
     pub buybacks: u32,
     pub bought_near: U128,
     pub bought_burned: U128,
@@ -642,6 +687,17 @@ pub fn commit_storage(account_id: &AccountId, sealed_len: usize) -> u128 {
 }
 
 /// floor(a * b / c) for b <= c, without overflowing as long as (c - 1) * b fits in u128.
+/// A revealed bet's part of a void round's record storage: ROUND_RECORD_BYTES worth of NEAR,
+/// split over the round's revealed stake.
+pub fn void_record_share(round: &Round, amount: u128) -> u128 {
+    let revealed = round.revealed_a + round.revealed_b;
+    if revealed == 0 {
+        return 0;
+    }
+    let fee = ROUND_RECORD_BYTES * env::storage_byte_cost().as_yoctonear();
+    (U256::from(fee) * U256::from(amount.min(revealed)) / U256::from(revealed)).as_u128() // <= fee
+}
+
 pub fn mul_div(a: u128, b: u128, c: u128) -> u128 {
     require!(c > 0 && b <= c, "mul_div: bad arguments");
     (a / c) * b + (a % c) * b / c
@@ -826,10 +882,42 @@ impl Contract {
 
     /// Treasury NEAR that can leave the contract without touching player funds, escrow, the
     /// NEAR held for bets' storage, storage itself, or the safety reserve.
+    /// Least time between buybacks: a day, or `buyback_every_ns` if that is longer.
+    fn buyback_every(&self) -> u64 {
+        self.params.buyback_every_ns.0.max(DAY_NS)
+    }
+
+    /// The treasury's DCA share since the last buyback (or the pool opening): spendable NEAR x
+    /// elapsed / DCA_DAYS days (at most all of it after DCA_DAYS days).
+    fn dca_share(&self, now: u64) -> u128 {
+        let since = if self.dex.last_buyback_ns == 0 { self.dex.graduated_at_ns } else { self.dex.last_buyback_ns };
+        let year = DCA_DAYS * DAY_NS as u128;
+        let elapsed = (now.saturating_sub(since) as u128).min(year);
+        (U256::from(self.spendable()) * U256::from(elapsed) / U256::from(year)).as_u128() // <= spendable
+    }
+
+    /// What a buyback may pay per BEFEWER now: the stored ceiling, else 125% of the newest priced
+    /// buyback, of the average so far, or of the price the pool opened at.
+    fn buyback_ceiling(&self) -> u128 {
+        let c = ceiling_read();
+        if c > 0 {
+            return c;
+        }
+        if let Some(&(_, _, spent, burned)) = buybacks_read().iter().rev().find(|e| e.2 > 0 && e.3 > 0) {
+            return ceiling_from(spent, burned);
+        }
+        if self.dex.bought_near > 0 && self.dex.bought_burned > 0 {
+            return ceiling_from(self.dex.bought_near, self.dex.bought_burned);
+        }
+        ceiling_from(self.dex.near_amount, self.dex.seed)
+    }
+
     fn spendable(&self) -> u128 {
         let balance = env::account_balance().as_yoctonear();
         let storage = env::storage_usage() as u128 * env::storage_byte_cost().as_yoctonear();
-        let owed = self.balances_total + self.escrow + self.storage_held + storage + SAFETY_RESERVE;
+        // storage_fees holds the refundable slot fees (and the one-time account fees, whose
+        // storage is in `storage` already: counted twice, on the safe side)
+        let owed = self.balances_total + self.escrow + self.storage_held + self.storage_fees + storage + SAFETY_RESERVE;
         self.treasury.min(balance.saturating_sub(owed))
     }
 
@@ -1180,7 +1268,10 @@ impl Contract {
                 ("forfeit", 0)
             } else if round.outcome == OUTCOME_VOID {
                 s.voids += 1;
-                ("void", c.amount + c.fee - c.bounty)
+                let share = void_record_share(&round, c.amount);
+                self.storage_fees += share; // kept to pay for the round's record
+                self.escrow -= share;
+                ("void", c.amount + c.fee - c.bounty - share)
             } else if c.side == round.outcome {
                 s.wins += 1;
                 s.streak += 1;
@@ -1262,9 +1353,9 @@ impl Contract {
 
     /// Claim the caller's mined BEFEWER to its wallet: `bps` (default 10000 = all) of the
     /// unrefined balance minus the refining fee, plus all refined BEFEWER (no fee). The fee is
-    /// shared pro rata among everyone still holding unrefined BEFEWER (the caller too, for what
-    /// it keeps); if nobody holds any, it goes back to the mining pot. `book` lists slots to
-    /// book first (default: slot 0). Returns the amount minted.
+    /// shared pro rata among the OTHER holders of unrefined BEFEWER (never the caller, for what
+    /// it keeps); if they hold less than 1 BEFEWER, it goes back to the mining pot. `book` lists
+    /// slots to book first (default: slot 0). Returns the amount minted.
     pub fn claim_befewer(&mut self, bps: Option<u16>, book: Option<Vec<u32>>) -> U128 {
         let who = env::predecessor_account_id();
         self.settle_due();
@@ -1286,12 +1377,23 @@ impl Contract {
         self.unrefined_total -= take;
         if fee > 0 {
             self.refine_fees += fee;
-            if self.unrefined_total > 0 {
-                let step = U256::from(fee) * U256::from(REFINE_SCALE) / U256::from(self.unrefined_total);
-                self.refine_index += step.as_u128();
+            // the claimant's own remaining unrefined BEFEWER does not share its fee
+            let others = self.unrefined_total - p.unrefined;
+            let index = if others >= REFINE_MIN_OTHERS {
+                let step = U256::from(fee) * U256::from(REFINE_SCALE) / U256::from(others);
+                if step > U256::from(u128::MAX) { None } else { self.refine_index.checked_add(step.as_u128()) }
             } else {
-                self.pot += fee;
-                self.refine_to_pot += fee;
+                None
+            };
+            match index {
+                Some(ix) => {
+                    self.refine_index = ix;
+                    p.refine_index = ix; // the claimant moves past its own fee
+                }
+                None => {
+                    self.pot += fee;
+                    self.refine_to_pot += fee;
+                }
             }
         }
         self.players.insert(who.clone(), p);
@@ -1355,12 +1457,6 @@ impl Contract {
                         ONE_YOCTO,
                         tgas(10),
                     )
-                    .function_call(
-                        "add_simple_pool",
-                        json!({"tokens": [wnear, me], "fee": self.params.pool_fee}).to_string().into_bytes(),
-                        NearToken::from_yoctonear(DEX_POOL_STORAGE),
-                        tgas(20),
-                    )
             }
             STEP_SEND_NEAR => Promise::new(wnear).function_call(
                 "ft_transfer_call",
@@ -1390,24 +1486,55 @@ impl Contract {
                     )
                     .then(Self::ext(me.clone()).with_static_gas(tgas(10)).ft_resolve_transfer(me.clone(), dex, U128(seed)))
             }
-            STEP_ADD_LIQUIDITY => Promise::new(dex).function_call(
-                "add_liquidity",
-                json!({"pool_id": self.dex.pool_id.expect("pool created"),
-                       "amounts": [U128(self.dex.near_amount), U128(self.dex.seed)]})
-                .to_string()
-                .into_bytes(),
-                NearToken::from_yoctonear(DEX_LP_STORAGE),
-                tgas(30),
-            ),
+            // The pool is created and filled in ONE receipt (on_pool_count), so nobody can add
+            // liquidity to an empty pool in between and set its price. First learn its id.
+            STEP_ADD_LIQUIDITY => {
+                self.dex.busy = true;
+                emit("graduate_step", json!({"step": self.dex.step}));
+                return Promise::new(dex)
+                    .function_call("get_number_of_pools", b"{}".to_vec(), NearToken::from_yoctonear(0), tgas(5))
+                    .then(Self::ext(me).with_static_gas(tgas(90)).on_pool_count());
+            }
             _ => env::panic_str("unknown graduation step"),
         };
         self.dex.busy = true;
         emit("graduate_step", json!({"step": self.dex.step}));
-        p.then(Self::ext(me).with_static_gas(tgas(15)).on_graduate(self.dex.step))
+        p.then(Self::ext(me).with_static_gas(tgas(15)).on_graduate(self.dex.step, None))
+    }
+
+    /// Graduation step 4, second half: one receipt to the DEX that creates the pool (it gets id
+    /// `count`) and adds all the liquidity to pool `count` with min_amounts = amounts. If anyone
+    /// created a pool in between, `count` is not ours, add_liquidity fails and the whole receipt
+    /// reverts (the pool creation too): the step is simply retried.
+    #[private]
+    pub fn on_pool_count(&mut self) -> PromiseOrValue<()> {
+        let Some(pool_id) = promise_ok().and_then(|v| serde_json::from_slice::<u64>(&v).ok()) else {
+            self.dex.busy = false;
+            emit("graduate_result", json!({"step": STEP_ADD_LIQUIDITY, "ok": false, "now": self.dex.step}));
+            return PromiseOrValue::Value(());
+        };
+        let me = env::current_account_id();
+        let amounts = json!([U128(self.dex.near_amount), U128(self.dex.seed)]);
+        PromiseOrValue::Promise(
+            Promise::new(self.params.dex.clone())
+                .function_call(
+                    "add_simple_pool",
+                    json!({"tokens": [self.params.wnear, me], "fee": self.params.pool_fee}).to_string().into_bytes(),
+                    NearToken::from_yoctonear(DEX_POOL_STORAGE),
+                    tgas(20),
+                )
+                .function_call(
+                    "add_liquidity",
+                    json!({"pool_id": pool_id, "amounts": amounts, "min_amounts": amounts}).to_string().into_bytes(),
+                    NearToken::from_yoctonear(DEX_LP_STORAGE),
+                    tgas(30),
+                )
+                .then(Self::ext(me).with_static_gas(tgas(15)).on_graduate(STEP_ADD_LIQUIDITY, Some(pool_id))),
+        )
     }
 
     #[private]
-    pub fn on_graduate(&mut self, step: u8) {
+    pub fn on_graduate(&mut self, step: u8, pool_id: Option<u64>) {
         self.dex.busy = false;
         let res = promise_ok();
         let ok = match step {
@@ -1419,18 +1546,13 @@ impl Contract {
                 }
                 res.is_some()
             }
-            STEP_REGISTER => match res.and_then(|v| serde_json::from_slice::<u64>(&v).ok()) {
-                Some(pool_id) => {
-                    self.dex.pool_id = Some(pool_id);
-                    true
-                }
-                None => false,
-            },
+            STEP_REGISTER => res.is_some(),
             // ft_transfer_call / ft_resolve_transfer return the amount the receiver kept
             STEP_SEND_NEAR => amount_of(res) == self.dex.near_amount,
             STEP_SEND_TOKEN => amount_of(res) == self.dex.seed,
             STEP_ADD_LIQUIDITY => match amount_opt(res) {
-                Some(shares) if shares > 0 => {
+                Some(shares) if shares > 0 && pool_id.is_some() => {
+                    self.dex.pool_id = pool_id;
                     self.dex.shares = shares;
                     self.dex.graduated_at_ns = env::block_timestamp();
                     true
@@ -1445,31 +1567,34 @@ impl Contract {
         emit("graduate_result", json!({"step": step, "ok": ok, "now": self.dex.step}));
     }
 
-    /// Spend up to `buyback_max` of the treasury buying BEFEWER from the pool. Anyone can call
-    /// it once the pool is open, at most once per `buyback_every_ns`. The BEFEWER the pool
-    /// sends back lands on this contract and is burned on arrival.
+    /// Buy BEFEWER from the pool with the treasury's daily DCA share (see MIN_BUYBACK) and burn
+    /// it on arrival. Anyone can call it once the pool is open, at most once a day (or per
+    /// `buyback_every_ns` if longer). The swap pays at most the price ceiling (see
+    /// BUYBACK_CEILING_BPS); a refused swap keeps its NEAR as wNEAR for the next one.
     pub fn buyback(&mut self) -> Promise {
         require!(self.dex.step == STEP_DONE, "the pool is not open yet");
         require!(!self.dex.busy, "a buyback is in flight");
         let now = env::block_timestamp();
-        require!(now >= self.dex.last_buyback_ns + self.params.buyback_every_ns.0, "too soon since the last buyback");
+        require!(now >= self.dex.last_buyback_ns + self.buyback_every(), "too soon since the last buyback (one a day)");
         let me = env::current_account_id();
         let (dex, wnear) = (self.params.dex.clone(), self.params.wnear.clone());
         let held = self.dex.held_wnear;
-        let fresh = if held >= self.params.buyback_max.0 {
-            0
-        } else {
-            self.spendable().min(self.params.buyback_max.0 - held)
-        };
-        let fresh = if held + fresh < MIN_BUYBACK { 0 } else { fresh };
+        let fresh = self.dca_share(now).min(self.params.buyback_max.0.saturating_sub(held));
         let amount = held + fresh;
-        require!(amount >= MIN_BUYBACK, "the treasury has less than 0.01 NEAR to spend");
+        require!(amount >= MIN_BUYBACK, format!("the treasury's DCA share so far is {} yoctoNEAR; a buyback waits until it reaches 0.1 NEAR", amount));
+        let ceiling = self.buyback_ceiling();
+        let min_out = if ceiling == 0 {
+            1
+        } else {
+            let v = U256::from(amount) * U256::from(TOKEN) / U256::from(ceiling);
+            if v > U256::from(u128::MAX) { u128::MAX } else { v.as_u128().max(1) }
+        };
         self.treasury -= fresh;
         self.dex.held_wnear = 0;
         self.dex.busy = true;
         self.dex.last_buyback_ns = now;
         let msg = json!({"actions": [{"pool_id": self.dex.pool_id.expect("pool open"), "token_in": wnear,
-                                      "token_out": me, "amount_in": U128(amount), "min_amount_out": "1"}]})
+                                      "token_out": me, "amount_in": U128(amount), "min_amount_out": U128(min_out)}]})
         .to_string();
         let mut p = Promise::new(wnear);
         if fresh > 0 {
@@ -1506,6 +1631,16 @@ impl Contract {
         }
         let spent = amount_of(res).min(amount);
         buybacks_update_last(|e| e.2 = spent);
+        if spent > 0 {
+            reprice_from_last();
+        } else {
+            // refused (most likely the price was above the ceiling): allow 25% more next time
+            let c = self.buyback_ceiling();
+            if c > 0 {
+                let up = U256::from(c) * U256::from(BUYBACK_CEILING_BPS) / U256::from(BPS);
+                ceiling_write(if up > U256::from(u128::MAX) { u128::MAX } else { up.as_u128() });
+            }
+        }
         // whatever the DEX did not take came back to us as wNEAR
         self.dex.held_wnear += amount - spent;
         self.dex.bought_near += spent;
@@ -1524,6 +1659,7 @@ impl Contract {
         if from_pool {
             self.dex.bought_burned += amount;
             buybacks_update_last(|e| e.3 += amount);
+            reprice_from_last();
         }
         let memo = if from_pool { "bought back from the pool" } else { "sent to the contract" };
         FtBurn { owner_id: &me, amount: U128(amount), memo: Some(memo) }.emit();
@@ -1595,7 +1731,13 @@ impl Contract {
                 shares: U128(d.shares),
                 graduated_at: U64(d.graduated_at_ns),
                 held_wnear: U128(d.held_wnear),
-                next_buyback_at: U64(if d.step == STEP_DONE { d.last_buyback_ns + self.params.buyback_every_ns.0 } else { 0 }),
+                next_buyback_at: U64(if d.step == STEP_DONE { d.last_buyback_ns + self.buyback_every() } else { 0 }),
+                buyback_now: U128(if d.step == STEP_DONE {
+                    d.held_wnear + self.dca_share(env::block_timestamp()).min(self.params.buyback_max.0.saturating_sub(d.held_wnear))
+                } else {
+                    0
+                }),
+                buyback_ceiling: U128(if d.step == STEP_DONE { self.buyback_ceiling() } else { 0 }),
                 buybacks: d.buybacks,
                 bought_near: U128(d.bought_near),
                 bought_burned: U128(d.bought_burned),
@@ -1714,7 +1856,7 @@ impl Contract {
             let (res, pay) = if c.side == SIDE_NONE {
                 ("forfeit", 0)
             } else if x.outcome == OUTCOME_VOID {
-                ("void", c.amount + c.fee - c.bounty)
+                ("void", c.amount + c.fee - c.bounty - void_record_share(x, c.amount))
             } else if c.side == x.outcome {
                 ("win", 2 * c.amount)
             } else {

@@ -4,7 +4,7 @@
   import { onMount } from 'svelte'
   import Icon from '../lib/Icon.svelte'
   import { game, fmt, fmtN } from '../game.svelte'
-  import { view, viewOn, CONTRACT, GRADUATION_COST, type BuybackV, type RefPool } from '../chain'
+  import { view, viewOn, CONTRACT, GRADUATION_COST, MIN_BUYBACK, type BuybackV, type RefPool } from '../chain'
 
   const st = $derived(game.status)
   const pr = $derived(game.params)
@@ -39,11 +39,10 @@
     const today = d.toDateString() === new Date().toDateString()
     return d.toLocaleString(undefined, today ? { hour: '2-digit', minute: '2-digit' } : { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
   }
-  const everyMin = $derived(pr ? Math.round(Number(B(pr.buyback_every_ns) / 1_000_000_000n) / 60) : 0)
   const nextIn = $derived(dex ? Math.max(0, Number(B(dex.next_buyback_at) / 1_000_000n) - game.now) : 0)
   const mmss = (ms: number) => `${Math.floor(ms / 60000)}:${String(Math.floor((ms % 60000) / 1000)).padStart(2, '0')}`
-  const MIN_BUYBACK = 10n ** 22n // 0.01 NEAR, fixed in the contract
-  const canSpend = $derived(B(st?.treasury_spendable) + B(dex?.held_wnear))
+  const hm = (ms: number) => (ms >= 3_600_000 ? `${Math.floor(ms / 3_600_000)} h ${Math.floor((ms % 3_600_000) / 60_000)} min` : mmss(ms))
+  const buyNow = $derived(B(dex?.buyback_now))
   const listed = $derived((buys ?? []).filter(b => B(b.spent) > 0n).length)
   const earlier = $derived(Math.max(0, (dex?.buybacks ?? 0) - listed))
 
@@ -112,11 +111,13 @@
       <div><div class="eyebrow">Next</div>
         {#if !open}<div class="v">after the pool opens</div>
         {:else if dex.busy}<div class="v">in flight now</div>
-        {:else if canSpend < MIN_BUYBACK}<div class="v">waiting for NEAR</div><div class="faint small">the treasury can spend {fmtN(canSpend)} NEAR; a buyback needs 0.01</div>
-        {:else}<div class="v num">{nextIn > 0 ? `in ${mmss(nextIn)}` : 'due now'}</div><div class="faint small">{fmtN(canSpend < B(pr.buyback_max) ? canSpend : B(pr.buyback_max))} NEAR (at most {fmtN(pr.buyback_max)} every {everyMin} min)</div>{/if}
+        {:else if nextIn > 0}<div class="v num">in {hm(nextIn)}</div><div class="faint small">{buyNow >= MIN_BUYBACK ? `${fmtN(buyNow)} NEAR so far` : `then it waits until the day's share reaches 0.1 NEAR (${fmtN(buyNow, 5)} so far)`}</div>
+        {:else if buyNow < MIN_BUYBACK}<div class="v">waiting for the share</div><div class="faint small">{fmtN(buyNow, 5)} of 0.1 NEAR so far (1/365 of the treasury per day)</div>
+        {:else}<div class="v num">due now</div><div class="faint small">{fmtN(buyNow)} NEAR</div>{/if}
       </div>
+      <div><div class="eyebrow">Price limit</div><div class="v num">{open ? p4(Number(B(dex.buyback_ceiling)) / 1e24) : '—'} <span class="faint">NEAR per BEFEWER</span></div><div class="faint small">25% above the last buyback's price; 25% more after a refused one</div></div>
     </div>
-    <p class="fine">Every {everyMin} minutes anyone can make the contract buy BEFEWER from the pool with treasury NEAR; it burns all of it on arrival. The keeper does it when it is due.</p>
+    <p class="fine">Once a day anyone can make the contract spend 1/365 of the treasury's NEAR on BEFEWER from the pool (it waits until that is at least 0.1 NEAR, so gas stays small) and burn all of it. It never pays more than the price limit, so pumping the price just before a buyback gets it refused: the NEAR waits for the next day. The keeper calls it when it is due.</p>
     {#if buys?.length}
       <table class="tab">
         <thead><tr><th>When</th><th class="r">NEAR used</th><th class="r">BEFEWER burned</th><th class="r">Price</th></tr></thead>
@@ -124,7 +125,7 @@
           {#each buys as b}
             <tr>
               <td>{when(b.at)}</td>
-              {#if B(b.spent) === 0n}<td class="r faint" colspan="3">did not go through: its {fmtN(b.near_in)} NEAR is kept as wNEAR for the next one</td>
+              {#if B(b.spent) === 0n}<td class="r faint" colspan="3">refused (price above the limit): its {fmtN(b.near_in)} NEAR waits as wNEAR for the next one</td>
               {:else}
                 <td class="r num">{fmtN(b.spent)}{#if B(b.spent) < B(b.near_in)}<span class="faint sub">of {fmtN(b.near_in)} sent</span>{/if}</td>
                 <td class="r num">{B(b.burned) > 0n ? fmt(b.burned) : '…'}</td>
