@@ -56,6 +56,17 @@
 </section>
 
 <section class="card block">
+  <h2>Anyone can run a keeper</h2>
+  <p class="muted small">The contract has no operator. Every job a server would do is a public method anyone can call, so the game keeps running as long as one keeper, or one open page, is around.</p>
+  <div class="facts">
+    <div class="fact"><Icon name="lock" /><div><b>Reveal sealed bets, get paid.</b> After betting closes, a keeper opens the drand timelocks of bets whose pages are closed and reveals them. Whoever reveals a bet first earns {(pr?.reveal_bounty_bps ?? 0) / 100}% of its fee in NEAR: 0.0004 NEAR on a 0.01 bet. Revealing many in one call costs about 0.0002 NEAR of gas each (one at a time costs more).</div></div>
+    <div class="fact"><Icon name="clock" /><div><b>Public work.</b> Settling finished rounds nobody settled, opening the pool and running buybacks pay nothing; any keeper does them when they are due.</div></div>
+    <div class="fact"><Icon name="users" /><div><b>More keepers, sooner reveals.</b> Keepers race for the reward, so bets open sooner and no single server matters. Your own open page is a keeper for your own bets.</div></div>
+    <div class="fact"><Icon name="bolt" /><div><b>Run one.</b> Any NEAR account with a little NEAR: <code>FEWER_KEEPER_ONLY=1 FEWER_KEEPER_ACCOUNT=you.testnet node keeper/run.mjs</code> from the source. It registers itself with a 0.02 NEAR game deposit (rewards are paid into a game balance) and needs nothing from us.</div></div>
+  </div>
+</section>
+
+<section class="card block">
   <h2>The token and the treasury</h2>
   <p class="muted small">$BEFEWER started at zero supply. It is only ever mined by streaks (plus the one-time pool seed) and only ever burned by buybacks. "Supply now" counts BEFEWER claimed to wallets; mined BEFEWER still unrefined in the game is not in it yet.</p>
   <div class="tok">

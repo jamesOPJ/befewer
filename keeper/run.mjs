@@ -4,9 +4,14 @@
 // treasury is big enough and runs the treasury buybacks. Bets are booked lazily by the contract.
 // Everything the keeper does is permissionless: anyone can run this file against the contract.
 //
-// usage: FEWER_CONTRACT=v4.befewer.testnet node run.mjs            (loop forever)
-//        FEWER_CONTRACT=v4.befewer.testnet node run.mjs --setup    (create + fund NPC/keeper accounts, deposit NEAR)
-//        FEWER_KEEPER_ONLY=1 ... node run.mjs                       (no NPCs, just reveal + claim + DEX)
+// usage: FEWER_CONTRACT=v6.befewer.testnet node run.mjs            (loop forever)
+//        FEWER_CONTRACT=v6.befewer.testnet node run.mjs --setup    (create + fund NPC/keeper accounts, deposit NEAR)
+//
+// Run your own keeper (anyone can; no keys or permission from us):
+//        FEWER_KEEPER_ONLY=1 FEWER_KEEPER_ACCOUNT=you.testnet node run.mjs
+// It signs with ~/.near-credentials/testnet/you.testnet.json (what `near login` writes), registers
+// the account with a 0.02 NEAR game deposit if needed (reveal rewards are paid into a game
+// balance), then reveals, settles, opens the pool and runs buybacks whenever they are due.
 import fs from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import tlock from 'tlock-js'
@@ -17,7 +22,7 @@ import { loadAccount, hasKey, newKeyFor, view, call, provider, newSalt, commitHa
 const { timelockEncrypt, timelockDecrypt, roundAt, roundTime, mainnetClient } = tlock
 const CONTRACT = process.env.FEWER_CONTRACT || 'v6.befewer.testnet'
 const ROOT = 'befewer.testnet'
-const KEEPER = `keeper.${ROOT}`
+const KEEPER = process.env.FEWER_KEEPER_ACCOUNT || `keeper.${ROOT}`
 const KEEPER_ONLY = process.env.FEWER_KEEPER_ONLY === '1'
 const drand = mainnetClient() // drand quicknet (3 s rounds), the chain tlock uses
 const drandInfo = await drand.chain().info()
@@ -82,11 +87,15 @@ async function setup() {
       log('deposited', fmtN(NPC_TOP_UP), 'NEAR for', n.id)
     }
   }
-  // the keeper needs a game balance to receive reveal rewards
+  await registerKeeper()
+}
+
+/** Reveal rewards are paid into a game balance: a keeper without one deposits 0.02 NEAR first. */
+async function registerKeeper() {
   const k = await view(CONTRACT, 'get_player', { account_id: KEEPER })
   if (!k.registered) {
     await call(loadAccount(KEEPER), CONTRACT, 'deposit', {}, { deposit: near(0.02) })
-    log('keeper registered for reveal rewards')
+    log(KEEPER, 'registered for reveal rewards (0.02 NEAR game deposit)')
   }
 }
 
@@ -286,7 +295,9 @@ async function dexTick() {
 
 async function main() {
   if (process.argv.includes('--setup')) return setup()
-  log('runner on', CONTRACT, KEEPER_ONLY ? '(keeper only)' : `with ${NPCS.length} NPCs`)
+  if (!hasKey(KEEPER)) throw new Error(`no key for ${KEEPER}: put it in ~/.near-credentials/testnet/${KEEPER}.json (near login does)`)
+  await registerKeeper()
+  log('runner on', CONTRACT, KEEPER_ONLY ? `(keeper only, as ${KEEPER})` : `with ${NPCS.length} NPCs, keeper ${KEEPER}`)
   for (;;) {
     try {
       const st = await view(CONTRACT, 'get_status')
