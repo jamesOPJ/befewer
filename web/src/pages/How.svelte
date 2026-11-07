@@ -10,6 +10,14 @@
   const need = $derived(pr?.streak_min ?? 3)
   const mins = $derived(game.params ? Number(BigInt(game.params.commit_ns) / 1_000_000_000n) : 0)
   const revealS = $derived(game.params ? Number(BigInt(game.params.reveal_ns) / 1_000_000_000n) : 0)
+  // the worked example: a 0.1 NEAR bet, with this contract's fee and reveal reward
+  const bountyPct = $derived((pr?.reveal_bounty_bps ?? 0) / 100)
+  const ex = $derived.by(() => {
+    const stake = 0.1, fee = (stake * (pr?.fee_bps ?? 0)) / 10_000
+    const record = 0.00291 // a round's record: 291 bytes of storage
+    return { stake, fee, bounty: (fee * (pr?.reveal_bounty_bps ?? 0)) / 10_000, record, share: (record * stake) / 4 }
+  })
+  const n = (x: number) => (Math.round(x * 1e6) / 1e6).toString()
 </script>
 
 <section class="hero">
@@ -39,6 +47,51 @@
   <div class="card step"><span class="si"><Icon name="flame" size={22} /></span><h3>3 · The smaller side wins +100%</h3><p>When the reveal ends, everyone on the side with less NEAR gets their stake back plus the same amount again. The other side loses its stake. A tie or a one-sided round refunds everyone (minus the reveal reward, if someone else revealed your bet).</p></div>
   <div class="card step"><span class="si"><Icon name="spark" size={22} /></span><h3>4 · Streaks mine BEFEWER</h3><p>Each round adds {fmt(pr?.reward_per_round ?? '0')} BEFEWER to a pot. A win that completes {need} wins in a row takes a share of it: 1 share per 0.001 NEAR staked at {need} in a row, 2 at {need + 1}, and so on. If nobody qualifies, the pot rolls over. Mined BEFEWER stays unrefined in the game: claiming it to your wallet costs {(pr?.refine_fee_bps ?? 0) / 100}%, shared among everyone still holding unrefined BEFEWER (like ORE's refining fee).</p></div>
   <div class="card step"><span class="si"><Icon name="shield" size={22} /></span><h3>5 · The treasury backs the token</h3><p>Fees, the gap between the sides and unopened bets go to the treasury. At {fmtN(st?.graduate_at ?? '0')} NEAR it opens a BEFEWER/NEAR pool on Ref Finance and locks the pool shares forever. After that, every {pr ? Math.round(Number(BigInt(pr.buyback_every_ns) / 1_000_000_000n) / 60) : 0} minutes it buys BEFEWER from the pool with 1/365 of its NEAR (when that is at least 0.1 NEAR), never more than 25% above the last buyback's price, and burns it.</p></div>
+</section>
+
+<section class="card block ex">
+  <h2>One round, every way it can end</h2>
+  <p class="muted small">Say the question is <b>Cats or dogs?</b> When betting closes, 3 NEAR is on Cats and 2 NEAR on Dogs. You bet {n(ex.stake)} NEAR on Dogs and pay the {feePct}% fee ({n(ex.fee)}). Whoever reveals your bet gets {bountyPct}% of that fee ({n(ex.bounty)}): your own page if it is open, otherwise a keeper.</p>
+  <div class="outs">
+    <div class="out win">
+      <div class="oh">You win</div>
+      <p>Dogs has less NEAR, so every bet on Dogs pays double.</p>
+      <dl>
+        <div><dt>Back</dt><dd class="num">{n(2 * ex.stake)} NEAR</dd></div>
+        <div><dt>Net</dt><dd class="num good">+{n(ex.stake - ex.fee + ex.bounty)} NEAR <span class="faint">(+{n(ex.stake - ex.fee)} if a keeper revealed it)</span></dd></div>
+        <div><dt>Streak</dt><dd>+1. At {need} in a row, this win mines BEFEWER</dd></div>
+      </dl>
+    </div>
+    <div class="out lose">
+      <div class="oh">You lose</div>
+      <p>Had you picked Cats, the side with more NEAR: the stake pays the winners.</p>
+      <dl>
+        <div><dt>Back</dt><dd class="num">0</dd></div>
+        <div><dt>Net</dt><dd class="num burn">−{n(ex.stake + ex.fee - ex.bounty)} NEAR <span class="faint">(−{n(ex.stake + ex.fee)} if a keeper revealed it)</span></dd></div>
+        <div><dt>Streak</dt><dd>back to 0</dd></div>
+      </dl>
+    </div>
+    <div class="out void">
+      <div class="oh">Void</div>
+      <p>A tie (2 against 2), or nobody on the other side: nobody wins, everyone is refunded.</p>
+      <dl>
+        <div><dt>Back</dt><dd class="num">{n(ex.stake + ex.fee - ex.share)} NEAR</dd></div>
+        <div><dt>Net</dt><dd class="num">−{n(ex.share)} NEAR <span class="faint">(−{n(ex.bounty + ex.share)} if a keeper revealed it)</span></dd></div>
+        <div><dt>Streak</dt><dd>unchanged (a void is not a win)</dd></div>
+      </dl>
+      <p class="faint small">Stake and fee come back, less your part of the round's record ({n(ex.record)} NEAR, split by stake: here 0.1 of 4 NEAR).</p>
+    </div>
+    <div class="out miss">
+      <div class="oh">Never revealed</div>
+      <p>Only if your page was closed, the timelock failed and no keeper opened it in time.</p>
+      <dl>
+        <div><dt>Back</dt><dd class="num">0</dd></div>
+        <div><dt>Net</dt><dd class="num burn">−{n(ex.stake + ex.fee)} NEAR</dd></div>
+        <div><dt>Streak</dt><dd>back to 0</dd></div>
+      </dl>
+    </div>
+  </div>
+  <p class="muted small">Where the NEAR goes: the Dogs bets (2 NEAR) are paid 4 NEAR, their own 2 plus 2 of the 3 on Cats. The extra 1 NEAR on Cats and the fees (less reveal rewards) go to the treasury. Every bet also holds a little NEAR for its storage, returned with the result in all four cases.</p>
 </section>
 
 <section class="card block">
@@ -135,4 +188,15 @@
   code { font-family: var(--mono); font-size: 12.5px; background: var(--surface-2); padding: 1px 5px; border-radius: 5px; overflow-wrap: anywhere }
   .note { margin: 14px 0 0; padding: 10px 12px; border-radius: 10px; background: rgba(232, 182, 94, 0.07); border: 1px solid rgba(232, 182, 94, 0.25); font-size: 13.5px; color: var(--fg-2) }
   .gold { color: var(--brand) }
+  .outs { display: grid; gap: 12px; margin: 14px 0 }
+  @media (min-width: 860px) { .outs { grid-template-columns: repeat(2, minmax(0, 1fr)) } }
+  .out { border: 1px solid var(--line-soft); border-radius: 14px; padding: 14px; background: var(--surface) }
+  .out p { margin: 4px 0 8px; font-size: 14px; color: var(--fg-2); line-height: 1.5 }
+  .oh { font-weight: 800; font-size: 16px }
+  .out.win .oh { color: var(--good, #8fbf7f) } .out.lose .oh, .out.miss .oh { color: var(--burn, #e07a5f) }
+  .out dl { display: grid; gap: 4px; margin: 0 }
+  .out dl div { display: grid; grid-template-columns: 56px minmax(0, 1fr); gap: 8px; font-size: 14px }
+  .out dt { color: var(--fg-3); font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; padding-top: 2px }
+  .out dd { margin: 0 }
+  .ex .good { color: var(--good, #8fbf7f) } .ex .burn { color: var(--burn, #e07a5f) }
 </style>
