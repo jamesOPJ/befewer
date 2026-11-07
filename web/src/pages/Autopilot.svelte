@@ -2,6 +2,7 @@
   import { slide } from 'svelte/transition'
   import Icon from '../lib/Icon.svelte'
   import Equity from '../lib/Equity.svelte'
+  import LowBalance from '../lib/LowBalance.svelte'
   import { label } from '../questions'
   import { backtest, runsAtLeast, describe, chipsText, cleanPattern, PRESETS, PRESET_GROUPS, SLOT_SETS, type Rule, type Cond, type Pick, type Unit, type Backtest } from '../rules'
   import { tick } from 'svelte'
@@ -133,6 +134,7 @@
   </div>
 </header>
 
+<LowBalance />
 <section class="card run" class:on={game.ap.on}>
   <div class="run-top">
     <div class="run-l">

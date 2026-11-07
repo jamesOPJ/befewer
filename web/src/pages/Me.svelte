@@ -1,7 +1,7 @@
 <script lang="ts">
   import Icon from '../lib/Icon.svelte'
   import { questionFor, label } from '../questions'
-  import { game, fmt, fmtN, netOf, GUEST_GAME_NEAR, short, picks, forgetDevice, toast, commitRound, withdrawAll, claimBefewer, claimPreview, openWallet, depositMore, disconnectWallet, closeSlot } from '../game.svelte'
+  import { game, fmt, fmtN, netOf, GUEST_GAME_NEAR, short, picks, forgetDevice, toast, commitRound, withdrawAll, claimBefewer, claimPreview, openWallet, depositMore, disconnectWallet, closeSlot, movable, moveToGame } from '../game.svelte'
 
   const me = $derived(game.me)
   const decided = $derived(me ? me.wins + me.losses : 0)
@@ -17,8 +17,13 @@
   async function deposit(n: number) {
     try { await depositMore(n) } catch (e: any) { toast('err', String(e.message || e)) }
   }
+  let confirmWd = $state(false)
   async function withdraw() {
+    confirmWd = false
     try { await withdrawAll() } catch (e: any) { toast('err', String(e.message || e)) }
+  }
+  async function moveBack() {
+    try { await moveToGame() } catch (e: any) { toast('err', String(e.message || e)) }
   }
   async function copy() {
     try { await navigator.clipboard.writeText(game.session!.accountId); toast('ok', 'Account name copied.') } catch { toast('err', 'Could not copy.') }
@@ -51,7 +56,18 @@
           {#each [0.5, 1, 2] as n}<button class="btn small" onclick={() => deposit(n)} disabled={!!game.busy}>Deposit {n} NEAR</button>{/each}
         </div>
       {/if}
-      <button class="btn small wd" onclick={withdraw} disabled={!!game.busy || BigInt(me.balance) + BigInt(me.pending_near) === 0n}>Withdraw {fmtN(BigInt(me.balance) + BigInt(me.pending_near))} NEAR to the wallet</button>
+      <div class="wallet small">
+        <span><b class="num">{game.walletNear == null ? '…' : fmtN(BigInt(game.walletNear))}</b> NEAR in your wallet <span class="faint">(outside the game{game.session.kind === 'guest' ? '; 0.05 of it pays for gas' : ''})</span></span>
+        {#if movable() > 0n}<button class="btn small primary" onclick={moveBack} disabled={!!game.busy}>Move {fmtN(movable())} NEAR into the game</button>{/if}
+      </div>
+      {#if confirmWd}
+        <div class="confirm small">
+          <span>Withdraw {fmtN(BigInt(me.balance) + BigInt(me.pending_near))} NEAR from the game to your wallet? Betting (and the autopilot) stops until you move NEAR back.</span>
+          <span class="row"><button class="btn small" onclick={() => (confirmWd = false)}>Cancel</button><button class="btn small primary" onclick={withdraw} disabled={!!game.busy}>Withdraw</button></span>
+        </div>
+      {:else}
+        <button class="btn small wd" onclick={() => (confirmWd = true)} disabled={!!game.busy || BigInt(me.balance) + BigInt(me.pending_near) === 0n}>Withdraw to the wallet…</button>
+      {/if}
     </div>
     <div class="card score">
       <div class="eyebrow">Picked the smaller side</div>
@@ -179,6 +195,8 @@
   .money span { font-size: 15px; font-weight: 600; color: var(--fg-3); margin-left: 4px }
   .tok { font-size: 15px; color: var(--fg-2) }
   .wrap { flex-wrap: wrap; margin-top: 4px }
+  .wallet { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; justify-content: space-between; padding: 10px 12px; margin-top: 6px; border-radius: 12px; background: var(--surface-2); border: 1px solid var(--line) }
+  .confirm { display: grid; gap: 8px; padding: 10px 12px; margin-top: 6px; border-radius: 12px; border: 1px solid rgba(232, 182, 94, 0.45); background: rgba(232, 182, 94, 0.08) }
   .walletbox { display: flex; justify-content: space-between; gap: 16px; align-items: center; padding: 16px 18px; flex-wrap: wrap }
   .walletbox h3 { font-size: 15px }
   .walletbox p { margin: 4px 0 0; max-width: 520px }

@@ -1,7 +1,7 @@
 // App-wide reactive state: chain data (polled), the player's session, bets, results, autopilot.
 import {
   ONE, CHIP, NEAR, view, fmt, fmtN, toNear, toYocto, nsToMs, randomSalt, commitHash, seal, loadSession, saveSession, loadGuestBackup, saveGuestBackup, newKeyPair,
-  loadPicks, savePick, pickKey, storageFor, callContract, type Status, type Params, type RoundV, type PlayerV, type Session,
+  loadPicks, savePick, pickKey, storageFor, callContract, provider, type Status, type Params, type RoundV, type PlayerV, type Session,
 } from './chain'
 import * as H from './history'
 import { label } from './questions'
@@ -69,6 +69,8 @@ export const game = $state({
   now: Date.now(),
   session: loadSession() as Session | null,
   me: null as PlayerV | null,
+  /** NEAR in the account's own wallet (outside the game), yocto; null until loaded */
+  walletNear: null as string | null,
   rounds: [] as RoundV[], // newest first
   history: 0, // bumps whenever the round history changes, so derived views recompute
   results: [] as Result[], // slot 0's settled bets, newest first
@@ -139,6 +141,10 @@ export async function refresh(full = false) {
         toast('ok', `You mined ${fmt(minedNow(game.me) - minedNow(before))} BEFEWER with a 3+ win streak. It stays unrefined in the game until you claim it on the Me page.`, 9000)
       await loadResults()
       selfReveal()
+      try {
+        const a: any = await (provider as any).query({ request_type: 'view_account', finality: 'optimistic', account_id: game.session.accountId })
+        game.walletNear = String(a.amount)
+      } catch {}
     }
     game.ready = true
     game.error = ''
@@ -345,6 +351,30 @@ export async function claimBefewer() {
   }
 }
 
+/** NEAR left in the wallet for gas when moving NEAR into the game (a guest's calls need up to
+ *  0.04 NEAR of prepaid gas up front). */
+export const WALLET_RESERVE = toYocto(0.05)
+/** NEAR in the wallet that can go back into the game (0 if less than 0.01). */
+export function movable(): bigint {
+  const w = BigInt(game.walletNear ?? '0') - WALLET_RESERVE
+  return w >= toYocto(0.01) ? w : 0n
+}
+/** Put the wallet's NEAR (minus the gas reserve) back into the game balance. */
+export async function moveToGame() {
+  if (!game.session) return
+  const amount = movable()
+  if (amount === 0n) throw new Error('Not enough NEAR in the wallet (it keeps 0.05 for gas).')
+  try {
+    game.busy = game.session.kind === 'wallet' ? 'Waiting for the wallet' : 'Moving NEAR into the game'
+    if (game.session.kind === 'wallet') await W.depositFromWallet(amount)
+    else await callContract(game.session, 'deposit', {}, 30, amount)
+    toast('ok', `${fmtN(amount)} NEAR moved into your game balance.`)
+  } finally {
+    game.busy = ''
+    await refresh(true)
+  }
+}
+
 /** Move NEAR from the game balance back to this browser's testnet wallet. */
 export async function withdrawAll() {
   if (!game.session || !game.me) return
@@ -354,7 +384,7 @@ export async function withdrawAll() {
     game.busy = 'Sending NEAR to your wallet'
     await bookExtraSlots(game.me)
     await callContract(game.session, 'withdraw', { book: [0] }, 60)
-    toast('ok', `${fmtN(amount)} NEAR moved to your wallet ${short(game.session.accountId)}.`)
+    toast('ok', `${fmtN(amount)} NEAR moved to your wallet. Betting stops until you move NEAR back into the game (Me page).`, 9000)
   } finally {
     game.busy = ''
     await refresh(true)
@@ -418,6 +448,7 @@ export async function closeSlot(slot: number) {
 
 export function forgetDevice() {
   game.resultsBySlot = {}
+  game.walletNear = null
   saveSession(null)
   game.session = null
   game.me = null

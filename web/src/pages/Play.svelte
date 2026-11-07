@@ -5,6 +5,7 @@
   import Countdown from '../lib/Countdown.svelte'
   import Orbs from '../lib/Orbs.svelte'
   import Icon from '../lib/Icon.svelte'
+  import LowBalance from '../lib/LowBalance.svelte'
   import {
     game, fmt, fmtN, toNear, toYocto, feeFor, GUEST_GAME_NEAR, openWallet, commitRound, revealRound, started, msLeft, clock, roundById, myOpen, picks, placeBet, capFor, toast,
     type Side,
@@ -71,6 +72,7 @@
   }
 </script>
 
+<LowBalance />
 <div class="grid">
   <section class="card round" aria-labelledby="q">
     <div class="head">
