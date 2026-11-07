@@ -262,7 +262,7 @@
             </p>
           {:else}
             <div class="pot"><b class="num">{fmtN(st.treasury)}</b> NEAR</div>
-            <p class="fine">Pool <a href="https://testnet.ref.finance/pool/{dex.pool_id}" target="_blank" rel="noopener">#{dex.pool_id} on Ref Finance</a> is open, its shares locked in the contract. Every day the treasury spends 1/365 of its NEAR (once that is at least 0.1) buying BEFEWER there and burns it: {dex.buybacks} buyback{dex.buybacks === 1 ? '' : 's'} so far, {fmtN(dex.bought_near)} NEAR spent, <b>{fmt(dex.bought_burned)} BEFEWER burned</b>.</p>
+            <p class="fine">Pool <a href="https://testnet.ref.finance/pool/{dex.pool_id}" target="_blank" rel="noopener">#{dex.pool_id} on Ref Finance</a> is open, its shares locked in the contract. Every {(Number(BigInt(game.params.buyback_every_ns) / 1_000_000_000n) / 60).toFixed(0)} min the treasury spends 1/365 of its NEAR (when that is at least 0.1) buying BEFEWER there and burns it: {dex.buybacks} buyback{dex.buybacks === 1 ? '' : 's'} so far, {fmtN(dex.bought_near)} NEAR spent, <b>{fmt(dex.bought_burned)} BEFEWER burned</b>.</p>
           {/if}
         </section>
       {/if}

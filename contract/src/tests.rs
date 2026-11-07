@@ -1555,13 +1555,13 @@ fn fn_call_args(method: &str) -> Vec<String> {
 }
 
 #[test]
-fn buyback_spends_the_daily_dca_share_and_burns_what_comes_back() {
+fn buyback_spends_1_365th_of_the_treasury_and_burns_what_comes_back() {
     let mut c = graduated(6 * N);
     donate(&mut c, 365 * N, now_g());
     let k = acc("keeper.testnet");
-    let t = now_g() + DAY_NS;
+    let t = now_g() + MIN;
     ctx(&k, t);
-    assert_eq!(c.get_status().dex.buyback_now.0, N, "365 NEAR spendable: one day's share is 1 NEAR");
+    assert_eq!(c.get_status().dex.buyback_now.0, N, "365 NEAR spendable: 1/365 is 1 NEAR");
     let ceiling = c.get_status().dex.buyback_ceiling.0;
     assert_eq!(ceiling, ceiling_from(6 * N - GRADUATION_COST, T), "first ceiling: 125% of the opening price");
     let _ = c.buyback();
@@ -1585,39 +1585,40 @@ fn buyback_spends_the_daily_dca_share_and_burns_what_comes_back() {
 }
 
 #[test]
-#[should_panic(expected = "waits until it reaches 0.1 NEAR")]
+#[should_panic(expected = "wait until it reaches 0.1 NEAR")]
 fn a_buyback_below_a_tenth_of_a_near_waits() {
     let mut c = graduated(6 * N);
-    donate(&mut c, 3 * N, now_g()); // 3 NEAR / 365 = 0.008 NEAR a day
-    ctx(&acc("keeper.testnet"), now_g() + DAY_NS);
+    donate(&mut c, 3 * N, now_g()); // 3 NEAR / 365 = 0.008 NEAR
+    ctx(&acc("keeper.testnet"), now_g() + 100 * MIN); // waiting longer does not change it
     let _ = c.buyback();
 }
 
 #[test]
-fn the_dca_share_accumulates_until_it_is_worth_a_buyback() {
+fn buybacks_start_once_the_treasury_holds_36_and_a_half_near() {
     let mut c = graduated(6 * N);
-    donate(&mut c, 3 * N, now_g());
+    donate(&mut c, 36 * N, now_g());
     let k = acc("keeper.testnet");
-    ctx(&k, now_g() + 12 * DAY_NS);
-    assert!(c.get_status().dex.buyback_now.0 < MIN_BUYBACK, "12 days x 3/365 = 0.099 NEAR: not yet");
-    ctx(&k, now_g() + 13 * DAY_NS);
-    let share = 3 * N * 13 / 365;
-    assert_eq!(c.get_status().dex.buyback_now.0, share, "13 days: 0.107 NEAR");
+    ctx(&k, now_g() + MIN);
+    assert!(c.get_status().dex.buyback_now.0 < MIN_BUYBACK, "36 / 365 = 0.0986 NEAR: not yet");
+    donate(&mut c, N, now_g() + MIN);
+    ctx(&k, now_g() + MIN);
+    let share = 37 * N / 365;
+    assert_eq!(c.get_status().dex.buyback_now.0, share, "37 / 365 = 0.101 NEAR");
     let _ = c.buyback();
-    assert_eq!(c.get_status().treasury.0, 3 * N - share);
+    assert_eq!(c.get_status().treasury.0, 37 * N - share);
 }
 
 #[test]
 #[should_panic(expected = "too soon")]
-fn buybacks_are_at_most_daily() {
+fn buybacks_are_rate_limited() {
     let mut c = graduated(6 * N);
     donate(&mut c, 365 * N, now_g());
     let k = acc("keeper.testnet");
-    ctx(&k, now_g() + DAY_NS);
+    ctx(&k, now_g() + MIN);
     let _ = c.buyback();
-    callback(now_g() + DAY_NS, ok_json(U128(N)));
+    callback(now_g() + MIN, ok_json(U128(N)));
     c.on_buyback(U128(0), U128(N));
-    ctx(&k, now_g() + DAY_NS + DAY_NS / 2);
+    ctx(&k, now_g() + MIN + MIN / 2);
     let _ = c.buyback();
 }
 
@@ -1626,7 +1627,7 @@ fn a_refused_swap_keeps_the_wnear_and_raises_the_price_ceiling_by_a_quarter() {
     let mut c = graduated(6 * N);
     donate(&mut c, 365 * N, now_g());
     let k = acc("keeper.testnet");
-    let t1 = now_g() + DAY_NS;
+    let t1 = now_g() + MIN;
     ctx(&k, t1);
     let ceil0 = c.get_status().dex.buyback_ceiling.0;
     let _ = c.buyback();
@@ -1636,8 +1637,8 @@ fn a_refused_swap_keeps_the_wnear_and_raises_the_price_ceiling_by_a_quarter() {
     assert_eq!((s.dex.held_wnear.0, s.dex.bought_near.0, s.treasury.0), (N, 0, 364 * N));
     assert_eq!(s.dex.buyback_ceiling.0, ceil0 * 5 / 4, "25% more next time");
     assert_eq!(c.get_buybacks()[0].spent.0, 0, "listed as not gone through");
-    // a day later it swaps the held wNEAR first (already buyback_max: nothing new from the treasury)
-    let t2 = t1 + DAY_NS;
+    // next time it swaps the held wNEAR first (already buyback_max: nothing new from the treasury)
+    let t2 = t1 + MIN;
     ctx(&k, t2);
     let _ = c.buyback();
     assert_eq!(c.get_status().treasury.0, 364 * N);
@@ -1653,7 +1654,7 @@ fn the_buyback_list_keeps_the_last_100_newest_first_and_marks_swaps_that_failed(
     donate(&mut c, 40_000 * N, now_g());
     let k = acc("keeper.testnet");
     for i in 1..=(BUYBACKS_KEPT as u64 + 2) {
-        let t = now_g() + i * DAY_NS;
+        let t = now_g() + i * MIN;
         ctx(&k, t);
         let _ = c.buyback();
         if i == BUYBACKS_KEPT as u64 + 2 {
@@ -1669,9 +1670,9 @@ fn the_buyback_list_keeps_the_last_100_newest_first_and_marks_swaps_that_failed(
     let log = c.get_buybacks();
     assert_eq!(log.len(), BUYBACKS_KEPT);
     let (newest, next) = (&log[0], &log[1]);
-    assert_eq!((newest.at.0, newest.spent.0, newest.burned.0), (now_g() + (BUYBACKS_KEPT as u64 + 2) * DAY_NS, 0, 0));
-    assert_eq!((next.at.0, next.spent.0, next.burned.0), (now_g() + (BUYBACKS_KEPT as u64 + 1) * DAY_NS, N, T / 1000));
-    assert_eq!(log[BUYBACKS_KEPT - 1].at.0, now_g() + 3 * DAY_NS, "the two oldest dropped out");
+    assert_eq!((newest.at.0, newest.spent.0, newest.burned.0), (now_g() + (BUYBACKS_KEPT as u64 + 2) * MIN, 0, 0));
+    assert_eq!((next.at.0, next.spent.0, next.burned.0), (now_g() + (BUYBACKS_KEPT as u64 + 1) * MIN, N, T / 1000));
+    assert_eq!(log[BUYBACKS_KEPT - 1].at.0, now_g() + 3 * MIN, "the two oldest dropped out");
     assert_eq!(c.get_status().dex.buybacks as usize, BUYBACKS_KEPT + 1, "the totals still count every swap that went through");
 }
 

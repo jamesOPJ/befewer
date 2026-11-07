@@ -41,6 +41,7 @@
   }
   const nextIn = $derived(dex ? Math.max(0, Number(B(dex.next_buyback_at) / 1_000_000n) - game.now) : 0)
   const mmss = (ms: number) => `${Math.floor(ms / 60000)}:${String(Math.floor((ms % 60000) / 1000)).padStart(2, '0')}`
+  const everyMin = $derived(pr ? Math.round(Number(B(pr.buyback_every_ns) / 1_000_000_000n) / 60) : 0)
   const hm = (ms: number) => (ms >= 3_600_000 ? `${Math.floor(ms / 3_600_000)} h ${Math.floor((ms % 3_600_000) / 60_000)} min` : mmss(ms))
   const buyNow = $derived(B(dex?.buyback_now))
   const listed = $derived((buys ?? []).filter(b => B(b.spent) > 0n).length)
@@ -111,13 +112,13 @@
       <div><div class="eyebrow">Next</div>
         {#if !open}<div class="v">after the pool opens</div>
         {:else if dex.busy}<div class="v">in flight now</div>
-        {:else if nextIn > 0}<div class="v num">in {hm(nextIn)}</div><div class="faint small">{buyNow >= MIN_BUYBACK ? `${fmtN(buyNow)} NEAR so far` : `then it waits until the day's share reaches 0.1 NEAR (${fmtN(buyNow, 5)} so far)`}</div>
-        {:else if buyNow < MIN_BUYBACK}<div class="v">waiting for the share</div><div class="faint small">{fmtN(buyNow, 5)} of 0.1 NEAR so far (1/365 of the treasury per day)</div>
-        {:else}<div class="v num">due now</div><div class="faint small">{fmtN(buyNow)} NEAR</div>{/if}
+        {:else if buyNow < MIN_BUYBACK}<div class="v">waiting for the treasury</div><div class="faint small">1/365 of it is {fmtN(buyNow, 5)} NEAR; buybacks start at 0.1 (a treasury of 36.5 NEAR)</div>
+        {:else if nextIn > 0}<div class="v num">in {hm(nextIn)}</div><div class="faint small">{fmtN(buyNow)} NEAR (1/365 of the treasury)</div>
+        {:else}<div class="v num">due now</div><div class="faint small">{fmtN(buyNow)} NEAR (1/365 of the treasury)</div>{/if}
       </div>
       <div><div class="eyebrow">Price limit</div><div class="v num">{open ? p4(Number(B(dex.buyback_ceiling)) / 1e24) : '—'} <span class="faint">NEAR per BEFEWER</span></div><div class="faint small">25% above the last buyback's price; 25% more after a refused one</div></div>
     </div>
-    <p class="fine">Once a day anyone can make the contract spend 1/365 of the treasury's NEAR on BEFEWER from the pool (it waits until that is at least 0.1 NEAR, so gas stays small) and burn all of it. It never pays more than the price limit, so pumping the price just before a buyback gets it refused: the NEAR waits for the next day. The keeper calls it when it is due.</p>
+    <p class="fine">Every {everyMin} minutes anyone can make the contract spend 1/365 of the treasury's NEAR on BEFEWER from the pool and burn all of it, as long as that 1/365 is at least 0.1 NEAR (so gas stays small). It never pays more than the price limit, so pumping the price just before a buyback gets it refused: the NEAR waits for the next one. The keeper calls it when it is due.</p>
     {#if buys?.length}
       <table class="tab">
         <thead><tr><th>When</th><th class="r">NEAR used</th><th class="r">BEFEWER burned</th><th class="r">Price</th></tr></thead>
