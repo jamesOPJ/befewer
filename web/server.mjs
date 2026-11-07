@@ -22,7 +22,8 @@ const PER_DAY = 60
 // Pages that may call /api/guest besides this server's own host. claude.aifinode.xyz/p/5043/ is
 // the owner's password-gated preview proxy (it rewrites Host to 127.0.0.1:5043 but keeps Origin).
 const ORIGINS = (process.env.FEWER_ORIGINS || 'https://fewer.aifinode.xyz,https://claude.aifinode.xyz').split(',')
-const TRUSTED_ORIGINS = new Set(['https://claude.aifinode.xyz']) // owner-only: not rate limited
+// No Origin is trusted for the rate limits: any program can send any Origin header, so an
+// exemption by Origin let anyone create guests without limit (and empty the faucet account).
 const DIST = process.env.FEWER_DIST || path.join(path.dirname(fileURLToPath(import.meta.url)), 'dist')
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.json': 'application/json', '.png': 'image/png', '.mp4': 'video/mp4' }
 
@@ -30,7 +31,7 @@ const cache = new Map() // path -> { raw, gz, type }
 function file(p) {
   if (cache.has(p)) return cache.get(p)
   const full = path.join(DIST, p)
-  if (!full.startsWith(DIST) || !fs.existsSync(full) || fs.statSync(full).isDirectory()) return null
+  if (!full.startsWith(DIST + path.sep) || !fs.existsSync(full) || fs.statSync(full).isDirectory()) return null
   const raw = fs.readFileSync(full)
   const type = TYPES[path.extname(full)] || 'application/octet-stream'
   const entry = { raw, gz: /text|javascript|json|svg/.test(type) ? zlib.gzipSync(raw, { level: 9 }) : null, type }
@@ -101,7 +102,7 @@ http.createServer(async (req, res) => {
     try { pk = JSON.parse(body).publicKey } catch { return reject(res, req, 400, 'bad json') }
     if (typeof pk !== 'string' || !/^ed25519:[1-9A-HJ-NP-Za-km-z]{43,44}$/.test(pk)) return reject(res, req, 400, 'publicKey must be ed25519:<base58>')
     // loopback without a Cloudflare header = someone on this machine or an SSH tunnel: not rate limited
-    const local = (!req.headers['cf-connecting-ip'] && /^(::ffff:)?127\.0\.0\.1$|^::1$/.test(req.socket.remoteAddress || '')) || TRUSTED_ORIGINS.has(origin)
+    const local = !req.headers['cf-connecting-ip'] && /^(::ffff:)?127\.0\.0\.1$|^::1$/.test(req.socket.remoteAddress || '')
     const why = local ? null : allowed(ip)
     if (why) return reject(res, req, 429, why)
     try {
@@ -123,6 +124,8 @@ http.createServer(async (req, res) => {
     'content-type': f.type,
     'cache-control': p.startsWith('/assets/') ? 'public, max-age=31536000, immutable' : 'no-cache',
     'x-frame-options': 'DENY',
+    'x-content-type-options': 'nosniff',
+    'referrer-policy': 'no-referrer',
     'content-security-policy': "frame-ancestors 'none'",
     ...(gz ? { 'content-encoding': 'gzip', vary: 'accept-encoding' } : {}),
   })

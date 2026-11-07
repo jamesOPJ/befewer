@@ -10,6 +10,7 @@
 import fs from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import tlock from 'tlock-js'
+import { createOpener, orderForOpening } from './opener.mjs'
 import { actions } from 'near-api-js'
 import { loadAccount, hasKey, newKeyFor, view, call, provider, newSalt, commitHash, NEAR, fmt, fmtN, sleep, log } from './lib.mjs'
 
@@ -20,6 +21,8 @@ const KEEPER = `keeper.${ROOT}`
 const KEEPER_ONLY = process.env.FEWER_KEEPER_ONLY === '1'
 const drand = mainnetClient() // drand quicknet (3 s rounds), the chain tlock uses
 const drandInfo = await drand.chain().info()
+const opener = createOpener(4) // opens timelocks on worker threads (see opener.mjs)
+const junk = new Set() // "round:account:slot" of timelocks that opened to something not matching their commitment
 
 const coin = () => (Math.random() < 0.5 ? 'A' : 'B')
 const other = s => (s === 'A' ? 'B' : 'A')
@@ -187,29 +190,42 @@ async function revealTick(st) {
   const windowMs = Number(BigInt((await params()).reveal_ns) / 1_000_000n)
   const revealStarts = revealEnds - windowMs
   if (Number(BigInt(st.now) / 1_000_000n) < revealStarts + Math.min(SELF_REVEAL_GRACE_MS, windowMs / 3)) return
-  const commits = await allCommits(r)
+  // timelocks already found not to open to their commitment are not opened again every tick
+  for (const k of junk) if (Number(k.split(':')[0]) < r - 2) junk.delete(k)
+  const pending = (await allCommits(r)).filter(c => !c.side && !junk.has(`${r}:${c.account_id}:${c.slot}`))
   const items = []
-  for (const c of commits) {
-    if (c.side) continue
-    let side, salt
-    if (c.sealed) {
-      try {
-        const pt = (await timelockDecrypt(c.sealed, drand)).toString()
-        ;[side, salt] = [pt.slice(0, 1), pt.slice(2)]
-      } catch (e) {
-        if (!String(e.message || e).includes('too early')) log('keeper', `cannot open ${c.account_id}/${c.slot}'s timelock: ${String(e.message || e).slice(0, 120)}`)
-      }
-    }
-    const mine = state.salts[`${c.account_id}:${c.slot}:${r}`] // our own NPCs' fallback
-    if (!side && mine) ({ side, salt } = mine)
-    if (!side) continue
-    if (commitHash(c.account_id, c.slot, r, side, salt) !== c.hash) {
-      log('keeper', `skip ${c.account_id}/${c.slot}: opened value does not match its commitment`)
-      continue
-    }
+  const fallback = c => state.salts[`${c.account_id}:${c.slot}:${r}`] // our own NPCs' bets
+  const add = (c, side, salt) => {
+    if (commitHash(c.account_id, c.slot, r, side, salt) !== c.hash) { junk.add(`${r}:${c.account_id}:${c.slot}`); return void skipped.mismatch++ }
     items.push({ round: String(r), slot: c.slot, account_id: c.account_id, side, salt })
   }
-  // one call reveals as many as its gas allows and says how far it got
+  const skipped = { mismatch: 0, unopened: 0 }
+  for (const c of pending) if (!c.sealed && fallback(c)) add(c, fallback(c).side, fallback(c).salt)
+  // fair order (every account's first bet before anyone's second; timelocks aimed at the drand
+  // round honest pages use first), opened on worker threads, revealed as they come
+  const queue = orderForOpening(pending.filter(c => c.sealed), roundAt(revealStarts, drandInfo))
+  const deadline = revealEnds - 3000
+  let lastSend = Date.now(), done = 0
+  for (let i = 0; i < queue.length && Date.now() < deadline; i += 16) {
+    await Promise.all(queue.slice(i, i + 16).map(async c => {
+      let side, salt
+      try {
+        const pt = await opener.open(c.sealed)
+        ;[side, salt] = [pt.slice(0, 1), pt.slice(2)]
+      } catch {}
+      if (!side && fallback(c)) ({ side, salt } = fallback(c))
+      side ? add(c, side, salt) : skipped.unopened++
+    }))
+    done = Math.min(queue.length, i + 16)
+    if (items.length >= 30 || Date.now() - lastSend > 5000) { await sendReveals(r, items.splice(0)); lastSend = Date.now() }
+  }
+  await sendReveals(r, items.splice(0))
+  if (skipped.mismatch || skipped.unopened) log('keeper', `round ${r}: ${skipped.unopened} timelock(s) could not be opened, ${skipped.mismatch} opened to something that does not match its commitment`)
+  if (done < queue.length) log('keeper', `round ${r}: reveal window nearly over, ${queue.length - done} of ${queue.length} sealed bets not opened`)
+}
+
+/** reveal_many in chunks; each call reveals as many as its gas allows and says how far it got. */
+async function sendReveals(r, items) {
   while (items.length) {
     const chunk = items.splice(0, 60)
     const res = await loadAccount(KEEPER).callFunctionRaw({ contractId: CONTRACT, methodName: 'reveal_many', args: { items: chunk }, gas: 300_000_000_000_000n })

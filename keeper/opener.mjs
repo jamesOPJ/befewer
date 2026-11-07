@@ -1,0 +1,60 @@
+// Opening players' drand timelocks fast enough that nobody can crowd a round out.
+//
+// One sealed bet takes ~250 ms to open the naive way (the drand beacon is fetched and its BLS
+// signature verified again for every bet, on one thread). That is ~150 bets per reveal window,
+// and anyone could fill a round with junk timelocks (cheap: the fee mostly comes back as the
+// reveal reward) so the keeper runs out of time before it reaches other players' bets.
+// So: each drand round's beacon is fetched and verified once (~50 ms per bet after that), the
+// work is spread over worker threads, and the order is fair: every account's first bet before
+// anyone's second, and timelocks aimed at the round an honest page uses come before the rest.
+import { Worker } from 'node:worker_threads'
+
+/** The drand round a sealed bet can be opened at (from its age "tlock" stanza), or null. */
+export function stanzaRound(sealed) {
+  try {
+    const b64 = String(sealed).replace(/-----[^-]+-----/g, '').replace(/\s+/g, '')
+    const m = Buffer.from(b64, 'base64').toString('latin1').match(/-> tlock (\d+) /)
+    return m ? Number(m[1]) : null
+  } catch {
+    return null
+  }
+}
+
+/** Unrevealed sealed commits in the order to open them: aimed at the expected drand round
+ *  (within `slack`) first, then the rest; inside each group, round-robin over accounts. */
+export function orderForOpening(commits, expectedRound, slack = 3) {
+  const fair = list => {
+    const by = new Map()
+    for (const c of list) (by.get(c.account_id) ?? by.set(c.account_id, []).get(c.account_id)).push(c)
+    const queues = [...by.values()], out = []
+    for (let i = 0; out.length < list.length; i++) for (const q of queues) if (q[i]) out.push(q[i])
+    return out
+  }
+  const ok = [], odd = []
+  for (const c of commits) {
+    const dr = stanzaRound(c.sealed)
+    ;(dr != null && Math.abs(dr - expectedRound) <= slack ? ok : odd).push(c)
+  }
+  return [...fair(ok), ...fair(odd)]
+}
+
+/** A pool of worker threads that open timelocks: open(sealed) -> "A:salt" text. */
+export function createOpener(workers = 4) {
+  const pool = Array.from({ length: workers }, () => new Worker(new URL('./opener-worker.mjs', import.meta.url)))
+  const waiting = new Map()
+  let next = 0, id = 0
+  for (const w of pool) {
+    w.on('message', m => { const p = waiting.get(m.id); waiting.delete(m.id); m.err ? p.reject(new Error(m.err)) : p.resolve(m.pt) })
+    w.on('error', e => { for (const [k, p] of waiting) { waiting.delete(k); p.reject(e) } })
+  }
+  return {
+    open(sealed) {
+      return new Promise((resolve, reject) => {
+        const n = ++id
+        waiting.set(n, { resolve, reject })
+        pool[next++ % pool.length].postMessage({ id: n, sealed })
+      })
+    },
+    close: () => Promise.all(pool.map(w => w.terminate())),
+  }
+}
