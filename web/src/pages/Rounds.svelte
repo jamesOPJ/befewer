@@ -141,7 +141,7 @@
                   {@const total = BigInt(x.reward_shares)}
                   {@const paid = ms.reduce((t, m) => t + BigInt(m.mined), 0n)}
                   <table class="mtab">
-                    <thead><tr><th>Bet</th><th class="r">Shares</th><th class="r">Share</th><th class="r">BEFEWER</th></tr></thead>
+                    <thead><tr><th>Bet</th><th class="r">Shares (count)</th><th class="r">% of pot</th><th class="r">BEFEWER</th></tr></thead>
                     <tbody>
                       {#each ms as m}
                         {@const mult = m.streak - need() + 1}
@@ -155,7 +155,7 @@
                       {/each}
                     </tbody>
                     {#if ms.length === x.miners && ms.length > 1}
-                      <tfoot><tr><td>All</td><td class="r num">{total}</td><td class="r num">100%</td><td class="r num">{fmt(paid)}</td></tr></tfoot>
+                      <tfoot><tr><td>All</td><td class="r num">{total} shares</td><td class="r num">100%</td><td class="r num">{fmt(paid)}</td></tr></tfoot>
                     {/if}
                   </table>
                   {#if (x.miners ?? 0) > ms.length}<div class="faint">and {(x.miners ?? 0) - ms.length} more bets</div>

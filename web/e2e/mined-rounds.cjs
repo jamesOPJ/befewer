@@ -35,6 +35,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms))
   const body = tab.filter(r => r.length === 4 && /\d/.test(r[1]) && !/^All$/.test(r[0]) && !/^Bet$/i.test(r[0]))
   const tot = body.reduce((t, r) => t + Number(r[1]), 0)
   const foot = tab.find(r => r[0] === 'All')
+  if (foot) foot[1] = foot[1].replace(/ shares$/, '')
   const bad = body.filter(r => Math.abs(Number(r[2].replace('%', '')) - (Number(r[1]) / tot) * 100) > 0.11)
   const note = await p.$eval('.list .row.open .miners', e => [...e.querySelectorAll('.small-note')].map(x => x.innerText).join(' ')).catch(() => '')
   if (/The 0 left/.test(note)) { console.error('E2E FAILED: a leftover that rounds to 0 is printed'); process.exitCode = 1 }
