@@ -48,6 +48,17 @@ export function plainRpcError(e: any): string {
 export async function view<T = any>(method: string, args: Record<string, unknown> = {}): Promise<T> {
   return (await provider.callFunction({ contractId: CONTRACT, method, args, finality: 'optimistic' } as any)) as T
 }
+/** A view on another contract (Ref Finance). */
+export async function viewOn<T = any>(contractId: string, method: string, args: Record<string, unknown> = {}): Promise<T> {
+  return (await provider.callFunction({ contractId, method, args, finality: 'optimistic' } as any)) as T
+}
+/** One buyback (get_buybacks): wNEAR sent to the pool, the part it took, BEFEWER burned. */
+export interface BuybackV { at: string; near_in: string; spent: string; burned: string }
+/** A Ref Finance simple pool (get_pool). */
+export interface RefPool { token_account_ids: string[]; amounts: string[]; total_fee: number; shares_total_supply: string }
+/** NEAR the contract spends opening the pool: storage at wrap.near and Ref (GRADUATION_COST in
+ *  the contract: 0.00125 + 0.1 + 0.1 + 0.05). */
+export const GRADUATION_COST = 1_250_000_000_000_000_000_000n + 10n ** 23n + 10n ** 23n + 5n * 10n ** 22n
 
 // ---- types mirrored from the contract views ----
 export interface DexV {

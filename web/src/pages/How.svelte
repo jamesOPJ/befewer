@@ -48,7 +48,7 @@
     <div><div class="eyebrow">Supply now</div><div class="v num">{fmt(st?.total_supply ?? '0')}</div><div class="faint small">{fmt(st?.issued ?? '0')} of {fmt(st?.max_supply ?? '0')} issued</div></div>
     <div><div class="eyebrow">Mined</div><div class="v num">{fmt(st?.mined ?? '0')}</div><div class="faint small">{fmt(st?.unrefined_total ?? '0')} still unrefined · {fmt(st?.refine_fees ?? '0')} paid in refining fees · {fmt(st?.pot ?? '0')} in the pot</div></div>
     <div><div class="eyebrow">Treasury</div><div class="v num gold">{fmtN(st?.treasury ?? '0', 2)}</div><div class="faint small">NEAR · {fmtN(st?.treasury_in ?? '0', 2)} in so far</div></div>
-    <div><div class="eyebrow">Pool</div><div class="v num">{st?.dex.stage === 'open' ? `#${st?.dex.pool_id}` : (st?.dex.stage ?? '—')}</div><div class="faint small">{st?.dex.buybacks ?? 0} buybacks · {fmt(st?.dex.bought_burned ?? '0')} BEFEWER burned</div></div>
+    <div><div class="eyebrow"><a href="#/pool">Pool</a></div><div class="v num">{st?.dex.stage === 'open' ? `#${st?.dex.pool_id}` : (st?.dex.stage ?? '—')}</div><div class="faint small">{st?.dex.buybacks ?? 0} buybacks · {fmt(st?.dex.bought_burned ?? '0')} BEFEWER burned</div></div>
   </div>
 </section>
 

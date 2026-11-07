@@ -8,12 +8,14 @@
   import Rounds from './pages/Rounds.svelte'
   import Autopilot from './pages/Autopilot.svelte'
   import Me from './pages/Me.svelte'
+  import Pool from './pages/Pool.svelte'
   import How from './pages/How.svelte'
 
   const TABS = [
     { id: 'play', label: 'Play', icon: 'play' },
     { id: 'rounds', label: 'Rounds', icon: 'rounds' },
     { id: 'autopilot', label: 'Autopilot', icon: 'bot' },
+    { id: 'pool', label: 'Pool', icon: 'chart' },
     { id: 'me', label: 'Me', icon: 'user' },
     { id: 'how', label: 'How it works', short: 'How', icon: 'info' },
   ]
@@ -58,6 +60,7 @@
     </div>
   {:else if page === 'rounds'}<Rounds />
   {:else if page === 'autopilot'}<Autopilot />
+  {:else if page === 'pool'}<Pool />
   {:else if page === 'me'}<Me />
   {:else if page === 'how'}<How />
   {:else}<Play />{/if}
@@ -88,7 +91,7 @@
   .testnet { color: var(--brand); border-color: rgba(232, 182, 94, 0.35); background: rgba(232, 182, 94, 0.08) }
   .bal { color: var(--fg); text-decoration: none }
   main { max-width: 1120px; margin: 0 auto; padding: 20px 16px calc(var(--nav-h) + 40px + env(safe-area-inset-bottom)) }
-  .tabs-bottom { position: fixed; left: 0; right: 0; bottom: 0; z-index: 40; height: calc(var(--nav-h) + env(safe-area-inset-bottom)); padding-bottom: env(safe-area-inset-bottom); display: grid; grid-template-columns: repeat(5, 1fr); background: rgba(27, 25, 22, 0.92); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); border-top: 1px solid var(--line-soft) }
+  .tabs-bottom { position: fixed; left: 0; right: 0; bottom: 0; z-index: 40; height: calc(var(--nav-h) + env(safe-area-inset-bottom)); padding-bottom: env(safe-area-inset-bottom); display: grid; grid-template-columns: repeat(6, 1fr); background: rgba(27, 25, 22, 0.92); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); border-top: 1px solid var(--line-soft) }
   .tabs-bottom a { display: grid; place-items: center; align-content: center; gap: 3px; color: var(--fg-3); font-size: 11px; font-weight: 600; text-decoration: none }
   .tabs-bottom a.on { color: var(--brand) }
   @media (min-width: 860px) {

@@ -252,7 +252,7 @@
 
       {#if dex}
         <section class="card treasury" aria-labelledby="tr-h">
-          <div class="eyebrow" id="tr-h">Treasury</div>
+          <div class="eyebrow" id="tr-h">Treasury · <a href="#/pool">pool and buybacks</a></div>
           {#if dex.step < 5}
             <div class="pot"><b class="num">{fmtN(st.treasury)}</b> of {fmtN(st.graduate_at)} NEAR</div>
             <div class="bar" aria-label="{Math.round(toGraduate * 100)}% of the way to opening the pool"><span style="width:{toGraduate * 100}%"></span></div>
