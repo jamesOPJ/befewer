@@ -3,6 +3,7 @@
   import Icon from '../lib/Icon.svelte'
   import Equity from '../lib/Equity.svelte'
   import LowBalance from '../lib/LowBalance.svelte'
+  import OffPage from '../lib/OffPage.svelte'
   import { label } from '../questions'
   import { backtest, runsAtLeast, describe, chipsText, cleanPattern, PRESETS, PRESET_GROUPS, SLOT_SETS, type Rule, type Cond, type Pick, type Unit, type Backtest } from '../rules'
   import { tick } from 'svelte'
@@ -156,6 +157,8 @@
     </details>
   </div>
 </section>
+
+<OffPage />
 
 <section class="card block nowc">
   <div class="bh"><h2>Slots</h2><span class="faint small">round #{commitRound()}</span></div>

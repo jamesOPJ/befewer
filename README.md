@@ -40,7 +40,8 @@ All on https://befewer.com. Times are for the current parameters (a round every 
    and two ledgers checked on the page: treasury NEAR collected = what it went to, and BEFEWER issued =
    pool seed + mined + pot.
 6. **Autopilot tab.** Pick a strategy and tap "Run": it bets for you every round (on several "slots" at
-   once if you like) and replays the strategy over past rounds.
+   once if you like) and replays the strategy over past rounds. It runs only while the page is open; to keep
+   it running without a browser, run the same rules on your own computer (see "Autopilot from a terminal").
 7. **Me tab.** Your balance, results, slots, mined BEFEWER; "Withdraw" sends your NEAR to your testnet wallet.
 8. **Check it on chain** without installing anything:
 
@@ -99,6 +100,28 @@ The tests play rounds in a mocked NEAR VM and check, after most scenarios, that 
 storage + treasury inflows equal deposits and that token balances equal total supply. They cover settlement,
 voids and forfeits, streaks and mining shares, refining, slots, storage deposits, the pool opening and buybacks
 (with mocked cross-contract callbacks), and regression tests for the security findings below.
+
+### Autopilot from a terminal
+
+The page's Autopilot stops when the page closes (and slows down in a background tab, where it can reveal too
+late and leave the reveal reward to a keeper). `keeper/autopilot.mjs` runs the same strategies with your own
+account on your own computer. It seals each bet locally, reveals it itself when the window opens, and keeps
+sides and salts in `~/.befewer/<contract>/<account>.json`, so no side leaves your computer before the reveal.
+
+There is deliberately no server that runs strategies for players: to bet for you it would have to know your
+side before betting closes, and whoever runs it would see every Autopilot's side, which is what wins a
+minority game.
+
+```sh
+cd keeper && npm ci
+node autopilot.mjs --list                                        # the strategies and slot sets
+node autopilot.mjs --account you.testnet --strategy Echo --deposit 1   # key in ~/.near-credentials/testnet
+FEWER_PRIVATE_KEY=ed25519:... node autopilot.mjs --account g<hex>.befewer.testnet --rules '[...]'
+```
+
+The page's Autopilot tab ("Runs only while this page is open") gives the last line ready to paste: the slots
+that are switched on, their rules, and the account's key. Options: `--budget <NEAR>` (daily loss limit,
+default 0.8), `--rounds <n>`, `--deposit <NEAR>`. Turn the page's Autopilot off for the same account.
 
 ### Keeper (anyone can run one)
 
