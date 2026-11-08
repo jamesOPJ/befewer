@@ -9,7 +9,8 @@ import { decide, guard, normalizeRule, stakeFor, meFrom, PRESETS, SLOT_SETS, typ
 import * as W from './wallet'
 
 export type Side = 'A' | 'B'
-export type Result = { round: number; slot: number; side: Side; amount: bigint; fee: bigint; outcome: 'A' | 'B' | 'void'; revealed?: bigint }
+/** `mine`: the reveal reward this page earned by revealing the bet itself (0 when a keeper did). */
+export type Result = { round: number; slot: number; side: Side; amount: bigint; fee: bigint; outcome: 'A' | 'B' | 'void'; revealed?: bigint; mine?: bigint }
 export type Toast = { id: number; kind: 'ok' | 'err' | 'info'; text: string; action?: { label: string; run: () => void } }
 export type ApLog = { at: number; round: number; text: string; kind: 'bet' | 'skip' | 'err'; lane?: number }
 
@@ -145,8 +146,12 @@ export const GUEST_GAME_NEAR = toYocto(0.29)
 export const feeFor = (amount: bigint) => (amount * BigInt(game.params?.fee_bps ?? 0)) / 10000n
 /** A void bet's part of the round's record storage (split by stake over the revealed stake). */
 export const voidCost = (x: Result) => (x.outcome === 'void' && x.revealed && x.revealed > 0n ? (ROUND_RECORD_NEAR * (x.amount < x.revealed ? x.amount : x.revealed)) / x.revealed : 0n)
-/** Net result of a settled bet in NEAR yocto: win +stake-fee, loss -stake-fee, void -its record share. */
-export const netOf = (x: Result) => (x.outcome === 'void' ? -voidCost(x) : x.outcome === x.side ? x.amount - x.fee : -(x.amount + x.fee))
+/** What the revealer of a bet is paid: reveal_bounty_bps of its fee. */
+export const bountyOf = (x: Result) => (x.fee * BigInt(game.params?.reveal_bounty_bps ?? 0)) / 10000n
+/** Net result of a settled bet in NEAR yocto: win +stake-fee, loss -stake-fee, void -(its record
+ *  share + the revealer's reward, held back from the refund); plus the reward if this page revealed it. */
+export const netOf = (x: Result) =>
+  (x.outcome === 'void' ? -voidCost(x) - bountyOf(x) : x.outcome === x.side ? x.amount - x.fee : -(x.amount + x.fee)) + (x.mine ?? 0n)
 
 let toastId = 0
 export function toast(kind: Toast['kind'], text: string, ms = kind === 'err' ? 9000 : 4500, action?: Toast['action']) {
@@ -203,11 +208,11 @@ export async function refresh(full = false) {
         toast('ok', `You mined ${fmt(minedNow(game.me) - minedNow(before))} BEFEWER with a 3+ win streak. It stays unrefined in the game until you claim it on the Me page.`, 9000)
       game.ready = true
       const acct = game.session.accountId
+      selfReveal() // first: a keeper takes the reward if this page is slow
       await Promise.all([
         loadResults(),
         (provider as any).query({ request_type: 'view_account', finality: 'optimistic', account_id: acct }).then((a: any) => { game.walletNear = String(a.amount) }).catch(() => {}),
       ])
-      selfReveal()
     }
     game.ready = true
     game.error = ''
@@ -240,7 +245,7 @@ async function loadResults() {
     const pick = pk[e.key]
     const amount = BigInt(pick.amount)
     const fee = pick.fee != null ? BigInt(pick.fee!) : (amount * BigInt(game.params?.fee_bps ?? 0)) / 10000n
-    ;(by[e.slot] ??= []).push({ round: e.round, slot: e.slot, side: pick.side, amount, fee, outcome: rv.outcome, revealed: BigInt(rv.revealed_a) + BigInt(rv.revealed_b) })
+    ;(by[e.slot] ??= []).push({ round: e.round, slot: e.slot, side: pick.side, amount, fee, outcome: rv.outcome, revealed: BigInt(rv.revealed_a) + BigInt(rv.revealed_b), mine: pick.bounty ? BigInt(pick.bounty) : 0n })
   }
   const out = by[0] ?? []
   const prevNewest = Math.max(-1, ...Object.values(game.resultsBySlot).flat().map(x => x.round))
@@ -253,28 +258,74 @@ async function loadResults() {
 
 /** Reveal my own sealed bets as soon as the reveal opens: the reveal reward (most of the fee)
  *  comes back to me instead of going to a keeper. The keeper reveals whatever I miss. */
-const selfRevealed = new Set<string>()
-async function selfReveal() {
-  const r = revealRound()
-  if (r == null || !game.session || !game.me || game.busy) return
-  const pk = loadPicks(game.session.accountId)
+// This page reveals its own bets as soon as the window opens: a clock timer fires it (no waiting
+// for the next poll), since a keeper takes the reward 30-60 s in. A failed try goes again 5 s later,
+// up to 5 times; a bet someone else revealed meanwhile has a side in the player view and drops out.
+const selfRevealed = new Set<string>() // `${slot}:${round}` revealed by this page: never sent again
+const revealTries = new Map<string, { n: number; at: number }>()
+let revealing = false
+/** The round whose reveal window is open now and when it opened (ms), from the params and the clock. */
+function revealWindowNow(): { round: number; start: number } | null {
+  const p = game.params
+  if (!p) return null
+  const now = Date.now() + game.skew
+  const g = nsToMs(p.genesis_ns), c = nsToMs(p.commit_ns), rv = nsToMs(p.reveal_ns)
+  if (now < g + c) return null
+  const cr = Math.floor((now - g) / c)
+  const start = g + cr * c
+  return now - start < rv ? { round: cr - 1, start } : null
+}
+/** Every second: inside a reveal window (from 1.5 s after it opens, for block time), reveal mine. */
+function revealTimer() {
+  const w = revealWindowNow()
+  if (w && Date.now() + game.skew >= w.start + 1500) selfReveal(w.round)
+}
+async function selfReveal(r: number | null = revealRound()) {
+  const sess = game.session
+  if (r == null || !sess || !game.me || game.busy || revealing) return
+  const acct = sess.accountId
+  const pk = loadPicks(acct)
   const items = []
   for (const s of game.me.slots) {
+    const k = `${s.slot}:${r}`
     const o = s.open.find(x => Number(x.round) === r && !x.side)
     const p = o && pk[pickKey(s.slot, r)]
-    if (!p || selfRevealed.has(`${s.slot}:${r}`)) continue
-    selfRevealed.add(`${s.slot}:${r}`)
-    items.push({ round: String(r), slot: s.slot, account_id: game.session.accountId, side: p.side, salt: p.salt })
+    const t = revealTries.get(k)
+    if (!p || selfRevealed.has(k) || (t && (t.n >= 5 || Date.now() - t.at < 5000))) continue
+    items.push({ round: String(r), slot: s.slot, account_id: acct, side: p.side, salt: p.salt })
   }
-  // a few per call: guests can only attach 40 Tgas
-  for (let i = 0; i < items.length; i += 3) {
-    try {
-      await callContract(game.session, 'reveal_many', { items: items.slice(i, i + 3) }, 300)
-    } catch (e) {
-      console.warn('self reveal failed (the keeper will reveal):', e)
+  if (!items.length) return
+  revealing = true
+  try {
+    // a few per call: guests can only attach 40 Tgas
+    for (let i = 0; i < items.length; i += 3) {
+      const batch = items.slice(i, i + 3)
+      for (const it of batch) revealTries.set(`${it.slot}:${r}`, { n: (revealTries.get(`${it.slot}:${r}`)?.n ?? 0) + 1, at: Date.now() })
+      try {
+        const res = await callContract(sess, 'reveal_many', { items: batch }, 300)
+        // the contract's reveal events say which bets this call revealed (a keeper may have been
+        // first) and the reward it paid: kept with the pick, so the results count it
+        for (const e of revealEvents(res)) {
+          if (e.by !== acct || e.account_id !== acct || Number(e.round) !== r) continue
+          selfRevealed.add(`${e.slot}:${r}`)
+          const p = loadPicks(acct)[pickKey(e.slot, r)]
+          if (p) savePick(acct, r, { ...p, bounty: String(e.bounty ?? '0') }, Number(e.slot))
+        }
+      } catch (e) {
+        console.warn('self reveal failed (tried again in 5 s; a keeper reveals it otherwise):', e)
+      }
     }
+  } finally {
+    revealing = false
   }
 }
+/** The contract's `reveal` events in a transaction's logs. */
+const revealEvents = (res: any): any[] =>
+  (res?.receipts_outcome ?? [])
+    .flatMap((x: any) => x.outcome?.logs ?? [])
+    .filter((l: string) => l.startsWith('EVENT_JSON:') && l.includes('"event":"reveal"'))
+    .map((l: string) => { try { return JSON.parse(l.slice('EVENT_JSON:'.length)).data[0] } catch { return null } })
+    .filter(Boolean)
 
 function announce(list: Result[]) {
   const x = list[0]
@@ -284,7 +335,7 @@ function announce(list: Result[]) {
     toast(net >= 0n ? 'ok' : 'info', `Round ${x.round}: ${x.outcome === 'void' ? 'void, refunded but for the round record' : `${label(x.round, x.outcome)} was the smaller side`}. ${won} of your ${list.length} slots won · net ${net >= 0n ? '+' : '−'}${fmtN(net >= 0n ? net : -net)} NEAR.`)
     return
   }
-  if (x.outcome === 'void') toast('info', `Round ${x.round} was void: your ${fmtN(x.amount + x.fee - voidCost(x))} NEAR came back, fee included, less ${fmtN(voidCost(x), 5)} for the round's record.`)
+  if (x.outcome === 'void') toast('info', `Round ${x.round} was void: ${fmtN(x.amount + x.fee + netOf(x))} of your ${fmtN(x.amount + x.fee)} NEAR came back, fee included, less the round's record${x.mine ? '' : ' and the reveal reward'}.`)
   else if (x.outcome === x.side) toast('ok', `Round ${x.round}: ${label(x.round, x.side)} was the smaller side. You won +${fmtN(x.amount)} NEAR.`)
   else toast('info', `Round ${x.round}: ${label(x.round, x.outcome)} was the smaller side. You lost ${fmtN(x.amount)} NEAR.`)
 }
@@ -673,7 +724,7 @@ function apLog(round: number, kind: ApLog['kind'], text: string, lane?: number) 
   game.ap.log = [{ at: Date.now(), round, kind, text, lane }, ...game.ap.log].slice(0, 60)
 }
 const localDay = (ms: number) => new Date(ms).toLocaleDateString('en-CA')
-/** Today's result of every slot's settled bets (stake and fee; the reveal reward I may get back is ignored). */
+/** Today's result of every slot's settled bets (stake, fee, and the reward when this page revealed them). */
 export function todayNet(): bigint {
   if (!game.params) return 0n
   const today = localDay(Date.now())
@@ -759,6 +810,7 @@ export function start() {
     if (game.session?.kind !== 'wallet' && !W.hasPending()) { game.wallet.open = true; game.wallet.step = 'setup' }
   }).catch(() => {})
   setInterval(() => (game.now = Date.now() + game.skew), 250)
+  setInterval(revealTimer, 1000)
   setInterval(async () => {
     if (game.busy) return
     await refresh()

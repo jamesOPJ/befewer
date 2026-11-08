@@ -187,7 +187,8 @@ export function accountFor(s: Session): Account {
 
 /** My picks, so the page can show what I chose and reveal manually if the keeper is down. */
 const PICKS_KEY = `fewer.picks.${CONTRACT}`
-export type Pick = { side: 'A' | 'B'; salt: string; amount: string; fee?: string; drandRound: number }
+/** `bounty`: yocto this page earned by revealing the bet itself (absent when a keeper revealed it). */
+export type Pick = { side: 'A' | 'B'; salt: string; amount: string; fee?: string; drandRound: number; bounty?: string }
 export function loadPicks(accountId: string): Record<string, Pick> {
   try { return JSON.parse(localStorage.getItem(`${PICKS_KEY}.${accountId}`) || '{}') } catch { return {} }
 }
