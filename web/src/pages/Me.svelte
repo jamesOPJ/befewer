@@ -14,6 +14,16 @@
   const sideOf = (slot: number, r: string | number) => pk[pickKey(slot, r)]?.side
   const pk = $derived.by(() => { game.me; return picks() })
   let confirming = $state(false)
+  // the results list can get long: fold it, and remember the choice
+  const RESULTS_KEY = 'befewer.me.results'
+  let resultsOpen = $state((() => { try { return localStorage.getItem(RESULTS_KEY) !== '0' } catch { return true } })())
+  function toggleResults() {
+    resultsOpen = !resultsOpen
+    try { localStorage.setItem(RESULTS_KEY, resultsOpen ? '1' : '0') } catch {}
+  }
+  // only the latest bets are listed (this browser's own picks), so count and net cover exactly those
+  const shown = $derived(results.slice(0, 60))
+  const resultsNet = $derived(shown.reduce((t, x) => t + netOf(x), 0n))
 
   async function claim() {
     try { await claimBefewer() } catch (e: any) { toast('err', String(e.message || e)) }
@@ -111,6 +121,30 @@
     <div class="card st"><div class="eyebrow">Streak{multi() ? ' (best slot)' : ''}</div><div class="v num">{tot.now}<span class="faint small"> · best {tot.best}{multi() && tot.now > 0 ? ` · ${slotName(tot.nowSlot)}` : ''}</span></div></div>
   </section>
 
+  <div class="account">
+    <section class="card walletbox">
+      {#if game.session.kind === 'wallet'}
+        <div><h3>Wallet connected</h3><p class="small muted">Disconnecting only forgets the game key in this browser. To remove the key from your account, delete it in your wallet's key settings.</p></div>
+        <button class="btn small" onclick={disconnectWallet}>Disconnect</button>
+      {:else}
+        <div><h3>Play with your own wallet</h3><p class="small muted">Connect a NEAR testnet wallet, approve once, and bet from your own account without popups. This guest account is kept and comes back if you disconnect.</p></div>
+        <button class="btn small primary" onclick={openWallet}>Connect wallet</button>
+      {/if}
+    </section>
+
+    <section class="danger card">
+      <div>
+        <h3>Forget this device</h3>
+        <p class="small muted">Removes the testnet account's key from this browser. You lose access to its NEAR and BEFEWER. Testnet only.</p>
+      </div>
+      {#if confirming}
+        <div class="row"><button class="btn small" onclick={() => (confirming = false)}>Keep it</button><button class="btn small bad" onclick={() => { forgetDevice(); confirming = false; toast('info', 'Forgot the account on this device.') }}>Forget</button></div>
+      {:else}
+        <button class="btn small" onclick={() => (confirming = true)}>Forget…</button>
+      {/if}
+    </section>
+  </div>
+
   {#if me.slots.length > 1}
     <section>
       <h2 class="h2">Slots</h2>
@@ -146,10 +180,19 @@
   {/if}
 
   <section>
-    <h2 class="h2">Results</h2>
     {#if results.length}
-      <ul class="list">
-        {#each results.slice(0, 60) as x}
+      <button class="fold" onclick={toggleResults} aria-expanded={resultsOpen} aria-controls="me-results">
+        <span class="chev" class:open={resultsOpen}><Icon name="chevron" size={18} /></span>
+        <span class="h2">Results</span>
+        <span class="small muted">last {shown.length} bet{shown.length === 1 ? '' : 's'} · net <span class="num {resultsNet > 0n ? 'good' : resultsNet < 0n ? 'burn' : ''}">{resultsNet > 0n ? '+' : resultsNet < 0n ? '−' : ''}{fmtN(resultsNet < 0n ? -resultsNet : resultsNet)}</span> NEAR</span>
+        <span class="small faint hint">{resultsOpen ? 'Hide' : 'Show'}</span>
+      </button>
+    {:else}
+      <h2 class="h2">Results</h2>
+    {/if}
+    {#if results.length && resultsOpen}
+      <ul class="list" id="me-results">
+        {#each shown as x}
           {@const n = netOf(x)}
           <li class="card item">
             <span class="no num">#{x.round}</span>
@@ -161,32 +204,11 @@
           </li>
         {/each}
       </ul>
-    {:else}
+    {:else if !results.length}
       <p class="muted">No settled bets yet. Results appear here a few minutes after a round closes.</p>
     {/if}
   </section>
 
-  <section class="card walletbox">
-    {#if game.session.kind === 'wallet'}
-      <div><h3>Wallet connected</h3><p class="small muted">Disconnecting only forgets the game key in this browser. To remove the key from your account, delete it in your wallet's key settings.</p></div>
-      <button class="btn small" onclick={disconnectWallet}>Disconnect</button>
-    {:else}
-      <div><h3>Play with your own wallet</h3><p class="small muted">Connect a NEAR testnet wallet, approve once, and bet from your own account without popups. This guest account is kept and comes back if you disconnect.</p></div>
-      <button class="btn small primary" onclick={openWallet}>Connect wallet</button>
-    {/if}
-  </section>
-
-  <section class="danger card">
-    <div>
-      <h3>Forget this device</h3>
-      <p class="small muted">Removes the testnet account's key from this browser. You lose access to its NEAR and BEFEWER. Testnet only.</p>
-    </div>
-    {#if confirming}
-      <div class="row"><button class="btn small" onclick={() => (confirming = false)}>Keep it</button><button class="btn small bad" onclick={() => { forgetDevice(); confirming = false; toast('info', 'Forgot the account on this device.') }}>Forget</button></div>
-    {:else}
-      <button class="btn small" onclick={() => (confirming = true)}>Forget…</button>
-    {/if}
-  </section>
 {/if}
 
 <style>
@@ -237,5 +259,13 @@
   .danger h3 { font-size: 15px }
   .danger p { margin: 4px 0 0 }
   .row { display: flex; gap: 8px }
+  .account { display: grid; gap: 12px; margin-bottom: 22px }
+  @media (min-width: 860px) { .account { grid-template-columns: 1fr 1fr } }
+  .account section { margin: 0 }
+  .fold { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; width: 100%; margin: 0 0 10px; padding: 6px 0; background: none; border: 0; color: inherit; font: inherit; text-align: left; cursor: pointer }
+  .fold .h2 { margin: 0 }
+  .fold .hint { margin-left: auto }
+  .chev { display: inline-grid; color: var(--fg-3); transition: transform 0.15s }
+  .chev.open { transform: rotate(90deg) }
   .bad { border-color: var(--err-line); background: var(--err-bg); color: var(--err-fg) }
 </style>
