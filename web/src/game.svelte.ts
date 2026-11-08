@@ -328,6 +328,7 @@ export async function ensurePlayer() {
 
 // ---------- wallet login ----------
 export function openWallet() {
+  W.preload() // so that picking a wallet can open its window right away
   game.wallet.open = true
   game.wallet.error = ''
   game.wallet.step = game.wallet.accountId ? 'setup' : 'pick'

@@ -42,6 +42,11 @@ function getSelector() {
   })()
   return selector
 }
+/** Load the wallet modules ahead of the click: a wallet may open its window only while the click
+ *  still counts as the user's (browsers block popups after a slow load in between). */
+export function preload() {
+  getSelector().catch(() => {})
+}
 /** Whether a wallet was picked in this browser before (only then is the selector worth loading). */
 const usedWalletBefore = () => Object.keys(localStorage).some(k => k.startsWith('near-wallet-selector:selectedWalletId'))
 
