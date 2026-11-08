@@ -1,8 +1,9 @@
 // Wallet login. A NEAR wallet signs in, then approves ONE batch: it adds a function-call key
 // that this browser holds (limited to this game's betting methods, with a gas allowance) and
 // deposits NEAR into the game. After that, bets are signed locally with that key: no popups.
-// Redirect wallets (MyNearWallet) leave the page while approving, so the new key is saved as
-// "pending" first and becomes the session once it shows up on chain.
+// A wallet that leaves the page while approving still works: the new key is saved as "pending"
+// first and becomes the session once it shows up on chain.
+// (MyNearWallet closed on Oct 31, 2026, so it is no longer offered.)
 import type { WalletSelector } from '@near-wallet-selector/core'
 import { CONTRACT, NETWORK, provider, newKeyPair, type Session } from './chain'
 
@@ -16,7 +17,6 @@ const GAS_30T = '30000000000000'
 export const WALLETS = [
   { id: 'meteor-wallet', name: 'Meteor', about: 'browser extension or web wallet' },
   { id: 'intear-wallet', name: 'Intear', about: 'web wallet' },
-  { id: 'my-near-wallet', name: 'MyNearWallet', about: 'opens the wallet site and comes back' },
 ]
 
 /** Plain description of what the wallet is asked to sign (also what the e2e test wallet signs). */
@@ -33,13 +33,12 @@ const testWallet = (): TestWallet | null => (globalThis as any).__befewerWallet 
 let selector: Promise<WalletSelector> | null = null
 function getSelector() {
   selector ??= (async () => {
-    const [{ setupWalletSelector }, { setupMeteorWallet }, { setupIntearWallet }, { setupMyNearWallet }] = await Promise.all([
+    const [{ setupWalletSelector }, { setupMeteorWallet }, { setupIntearWallet }] = await Promise.all([
       import('@near-wallet-selector/core'),
       import('@near-wallet-selector/meteor-wallet'),
       import('@near-wallet-selector/intear-wallet'),
-      import('@near-wallet-selector/my-near-wallet'),
     ])
-    return setupWalletSelector({ network: NETWORK as 'testnet', modules: [setupMeteorWallet(), setupIntearWallet(), setupMyNearWallet()] })
+    return setupWalletSelector({ network: NETWORK as 'testnet', modules: [setupMeteorWallet(), setupIntearWallet()] })
   })()
   return selector
 }
