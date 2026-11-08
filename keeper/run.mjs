@@ -190,9 +190,12 @@ async function sendBatch(kind, calls, per = 8) {
   }
 }
 
-// Players' own pages reveal their bets first (they get the reveal reward); the keeper waits
-// this long into the reveal window (at most a third of it), then reveals whatever is still sealed.
-const SELF_REVEAL_GRACE_MS = 30_000
+// Players' own pages reveal their bets first (they get the reveal reward). A page in the background
+// (screen off, another tab in front) only wakes about once a minute, so the keeper waits over a
+// minute: 65 s into a 90 s window (never later than 25 s before it closes), plus up to 10 s of
+// jitter, then reveals whatever is still sealed, with 15+ s left for retries.
+const SELF_REVEAL_GRACE_MS = 65_000
+const KEEPER_MARGIN_MS = 25_000
 async function revealTick(st) {
   if (st.reveal_round == null) return
   const r = Number(st.reveal_round)
@@ -201,9 +204,10 @@ async function revealTick(st) {
   const revealStarts = revealEnds - windowMs
   // players' pages reveal their own bets first; then keepers, each a few random seconds apart so
   // the later one sees (for free) what the earlier one revealed instead of paying to lose a race
-  // (a transaction takes 2-3 s to land: spread over a third of the window, two keepers rarely overlap)
-  const jitter = (jitters[r] ??= Math.random() * (windowMs / 3))
-  const wait = revealStarts + Math.min(SELF_REVEAL_GRACE_MS, windowMs / 3) + jitter - Number(BigInt(st.now) / 1_000_000n)
+  // (a transaction takes 2-3 s to land: spread over 10 s, two keepers rarely overlap)
+  const jitter = (jitters[r] ??= Math.random() * Math.min(10_000, windowMs / 9))
+  const grace = Math.max(0, Math.min(SELF_REVEAL_GRACE_MS, windowMs - KEEPER_MARGIN_MS))
+  const wait = revealStarts + grace + jitter - Number(BigInt(st.now) / 1_000_000n)
   if (wait > 3000) return // the loop comes back every 3 s in a reveal window
   if (wait > 0) await sleep(wait)
   // timelocks already found not to open to their commitment are not opened again every tick
