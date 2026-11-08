@@ -40,6 +40,18 @@ const ns = x => Number(BigInt(x) / 1_000_000n)
 const near = x => (BigInt(Math.round(x * 1e6)) * NEAR) / 1_000_000n
 const sign = y => (y >= 0n ? '+' : '−') + fmtN(y < 0n ? -y : y)
 
+// near-api-js prints a whole error with its stack each time an RPC server fails and it moves on to
+// the next one (mostly rate limits): one line says the same. This script never prints a bare Error.
+const consoleError = console.error
+console.error = (...a) => {
+  const e = a[0]
+  if (a.length === 1 && e instanceof Error) {
+    const m = String(e.message).match(/"message":\s*"([^"]+)"/)?.[1] ?? String(e.message)
+    return log(`an RPC server failed (${m.slice(0, 80)}), using the next one`)
+  }
+  consoleError(...a)
+}
+
 const { values: opt } = parseArgs({
   options: {
     account: { type: 'string', default: process.env.FEWER_ACCOUNT },
@@ -291,7 +303,7 @@ async function betTick(st) {
       const slot = await laneSlot(i, me)
       me = await view(CONTRACT, 'get_player', { account_id: ACCT })
       const s = me.slots.find(x => x.slot === slot)
-      if (s?.open.some(o => Number(o.round) === r)) { log(`round ${r} · ${lane.name}: slot ${slot} already has a bet (the web page's Autopilot?)`); continue }
+      if (s?.open.some(o => Number(o.round) === r)) { log(`round ${r} · ${lane.name}: slot ${slot} already has a bet this round, placed elsewhere (on the web page?), so this one sits out`); continue }
       const mine = meFrom(results(slot, r))
       const d = decide(lane.rules, r, guard(lookup, r), mine)
       if ('skip' in d) { log(`round ${r} · ${lane.name}: ${d.rule == null ? 'no rule fit' : `rule ${d.rule + 1} says skip`}, sits out`); continue }
