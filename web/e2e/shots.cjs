@@ -1,7 +1,7 @@
 // Screenshots of every page at phone and desktop width + basic health (errors, overflow).
 // usage: node e2e/shots.cjs <url> <outdir> [pages=play,rounds,autopilot,me,how]
-const puppeteer = require('/root/dota/node_modules/puppeteer')
-const [URL = 'http://127.0.0.1:5043/', OUT = '/root/scratch/near-hack/shots/v2', PAGES = 'play,rounds,autopilot,pool,me,how'] = process.argv.slice(2)
+const puppeteer = require(process.env.PUPPETEER || 'puppeteer')
+const [URL = 'http://127.0.0.1:5043/', OUT = 'e2e-shots', PAGES = 'play,rounds,autopilot,pool,me,how'] = process.argv.slice(2)
 ;(async () => {
   require('fs').mkdirSync(OUT, { recursive: true })
   const b = await puppeteer.launch({ headless: 'new', args: ['--no-sandbox'] })

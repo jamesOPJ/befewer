@@ -1,9 +1,9 @@
 // usage: node e2e/header-widths.cjs <url>   (exit 1 if the page gets wider than the screen)
 // Header on iPhone widths with a playing account (balance pill + Connect wallet + Testnet).
-const puppeteer = require('/root/dota/node_modules/puppeteer')
+const puppeteer = require(process.env.PUPPETEER || 'puppeteer')
 const fs = require('fs')
 const URL = process.argv[2] || 'http://127.0.0.1:5043/'
-const key = JSON.parse(fs.readFileSync('/root/.near-credentials/testnet/npc-echo.befewer.testnet.json', 'utf8'))
+const key = JSON.parse(fs.readFileSync(require('os').homedir() + '/.near-credentials/testnet/npc-echo.befewer.testnet.json', 'utf8'))
 const UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1'
 ;(async () => {
   const b = await puppeteer.launch({ headless: 'new', args: ['--no-sandbox'] })

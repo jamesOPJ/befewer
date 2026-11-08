@@ -1,5 +1,5 @@
 // Every preset loads into the draft and replays; every condition kind renders its own controls.
-const puppeteer = require('/root/dota/node_modules/puppeteer')
+const puppeteer = require(process.env.PUPPETEER || 'puppeteer')
 const URL = (process.argv[2] || 'http://127.0.0.1:5043/') + '#/autopilot'
 ;(async () => {
   const b = await puppeteer.launch({ headless: 'new', args: ['--no-sandbox'] })

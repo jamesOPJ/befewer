@@ -1,6 +1,6 @@
 // The Pool page: pool state from Ref Finance, buybacks, and the two "adds up" checks.
 // usage: node e2e/pool-page.cjs <url> [width]
-const puppeteer = require('/root/dota/node_modules/puppeteer')
+const puppeteer = require(process.env.PUPPETEER || 'puppeteer')
 const URL = process.argv[2] || 'http://127.0.0.1:5044/'
 const W = Number(process.argv[3] || 390)
 ;(async () => {

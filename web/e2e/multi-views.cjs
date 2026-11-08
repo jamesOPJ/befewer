@@ -1,7 +1,7 @@
 // Two slots ("A and B") run for a couple of rounds; then every page must show both slots:
 // Play (sealed panel, last round card), Me (totals, waiting list, results), Rounds (my tag).
 // usage: node e2e/multi-views.cjs <url>
-const puppeteer = require('/root/dota/node_modules/puppeteer')
+const puppeteer = require(process.env.PUPPETEER || 'puppeteer')
 const URL = process.argv[2] || 'http://127.0.0.1:5044/'
 const sleep = ms => new Promise(r => setTimeout(r, ms))
 const txt = (p, s) => p.$eval(s, e => e.innerText.replace(/\s+/g, ' ')).catch(() => '(none)')

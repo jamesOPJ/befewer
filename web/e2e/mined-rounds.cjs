@@ -1,7 +1,7 @@
 // The Rounds page shows where BEFEWER was mined and by how many: a "BEFEWER mined" tile, a
 // "Mined BEFEWER" filter, a chip on each round that mined, and who mined it in the round detail.
 // usage: node e2e/mined-rounds.cjs <url> [width]
-const puppeteer = require('/root/dota/node_modules/puppeteer')
+const puppeteer = require(process.env.PUPPETEER || 'puppeteer')
 const URL = process.argv[2] || 'http://127.0.0.1:5044/'
 const W = Number(process.argv[3] || 390)
 const sleep = ms => new Promise(r => setTimeout(r, ms))

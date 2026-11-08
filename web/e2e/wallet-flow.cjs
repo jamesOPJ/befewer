@@ -1,7 +1,7 @@
 // Wallet login, end to end on testnet with a stand-in wallet (e2e/testwallet.mjs):
 // connect -> one approval (AddKey + deposit) -> bet signed by the browser's game key -> withdraw -> disconnect.
 // usage: node e2e/wallet-flow.cjs <url> <contract> <account with a key in ~/.near-credentials/testnet>
-const puppeteer = require('/root/dota/node_modules/puppeteer')
+const puppeteer = require(process.env.PUPPETEER || 'puppeteer')
 const [URL = 'http://127.0.0.1:5044/', CONTRACT = 'v6.befewer.testnet', ACCOUNT = 'walletqa.befewer.testnet'] = process.argv.slice(2)
 async function rpc(method, params) {
   const r = await fetch('https://near-testnet.drpc.org', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }) })

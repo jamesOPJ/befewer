@@ -4,8 +4,8 @@
 //  2. leave it ~0.01 free (too little even to move NEAR): the bet must fail with a message that
 //     says so, not "Exceeded 3 providers".
 // usage: node e2e/gas-topup.cjs <url>   (about 8 minutes: one bet per round)
-const puppeteer = require('/root/dota/node_modules/puppeteer')
-const { Account, JsonRpcProvider, KeyPairSigner, KeyPair } = require('/root/fewer/web/node_modules/near-api-js/lib/index.cjs')
+const puppeteer = require(process.env.PUPPETEER || 'puppeteer')
+const { Account, JsonRpcProvider, KeyPairSigner, KeyPair } = require('near-api-js')
 const URL = process.argv[2] || 'http://127.0.0.1:5044/'
 const sleep = ms => new Promise(r => setTimeout(r, ms))
 const rpc = new JsonRpcProvider({ url: 'https://test.rpc.fastnear.com' })

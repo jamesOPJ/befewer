@@ -1,6 +1,6 @@
 // Withdraw and come back: bet -> withdraw (two taps) -> the low-balance notice offers to move the
 // wallet's NEAR back -> one tap -> game balance restored. usage: node e2e/withdraw-flow.cjs <url>
-const puppeteer = require('/root/dota/node_modules/puppeteer')
+const puppeteer = require(process.env.PUPPETEER || 'puppeteer')
 const URL = process.argv[2] || 'http://127.0.0.1:5044/'
 const sleep = ms => new Promise(r => setTimeout(r, ms))
 const click = (p, re) => p.evaluate(src => { const r = new RegExp(src); const b = [...document.querySelectorAll('button')].find(x => r.test(x.textContent.trim())); if (!b) return false; b.click(); return true }, re.source)

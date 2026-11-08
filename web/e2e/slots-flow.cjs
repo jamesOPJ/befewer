@@ -1,7 +1,7 @@
 // Multi-slot autopilot on testnet: load "A and B" -> switch on -> both slots bet in one round
 // (slot 0 on A, slot 1 on B, slot 1 opened on chain) -> the page reveals both itself and gets
 // the reveal rewards. usage: node e2e/slots-flow.cjs <url> <contract>
-const puppeteer = require('/root/dota/node_modules/puppeteer')
+const puppeteer = require(process.env.PUPPETEER || 'puppeteer')
 const [URL = 'http://127.0.0.1:5044/', CONTRACT = 'v6.befewer.testnet'] = process.argv.slice(2)
 async function view(m, args) {
   const r = await fetch('https://near-testnet.drpc.org', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'query', params: { request_type: 'call_function', finality: 'optimistic', account_id: CONTRACT, method_name: m, args_base64: Buffer.from(JSON.stringify(args)).toString('base64') } }) })

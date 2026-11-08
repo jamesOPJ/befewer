@@ -1,5 +1,5 @@
 // Editing the draft must not change what the autopilot runs; "Put live" must.
-const puppeteer = require('/root/dota/node_modules/puppeteer')
+const puppeteer = require(process.env.PUPPETEER || 'puppeteer')
 const URL = (process.argv[2] || 'http://127.0.0.1:5043/') + '#/autopilot'
 ;(async () => {
   const b = await puppeteer.launch({ headless: 'new', args: ['--no-sandbox'], protocolTimeout: 15 * 60_000 })

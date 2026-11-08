@@ -1,7 +1,7 @@
 // No 25% cap: the "Max" stake is what the balance covers after the fee and storage, and the
 // contract takes it. First bet creates the guest; next round bet Max.
 // usage: node e2e/max-bet.cjs <url>   (about 4 minutes)
-const puppeteer = require('/root/dota/node_modules/puppeteer')
+const puppeteer = require(process.env.PUPPETEER || 'puppeteer')
 const URL = process.argv[2] || 'http://127.0.0.1:5044/'
 const near = y => (Number(BigInt(y) / 10n ** 20n) / 1e4).toFixed(4)
 async function waitRound(p, after = -1) {

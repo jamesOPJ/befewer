@@ -1,5 +1,5 @@
 // New app, phone size: pick an answer -> seal -> sealed panel; Me shows the bet; Autopilot bets by itself next round.
-const puppeteer = require('/root/dota/node_modules/puppeteer')
+const puppeteer = require(process.env.PUPPETEER || 'puppeteer')
 const URL = process.argv[2] || 'http://127.0.0.1:5043/'
 ;(async () => {
   const b = await puppeteer.launch({ headless: 'new', args: ['--no-sandbox'], protocolTimeout: 15 * 60_000 })
