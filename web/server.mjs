@@ -21,7 +21,7 @@ const PER_IP_PER_HOUR = 3
 const PER_DAY = 60
 // Pages that may call /api/guest besides this server's own host. claude.aifinode.xyz/p/5043/ is
 // the owner's password-gated preview proxy (it rewrites Host to 127.0.0.1:5043 but keeps Origin).
-const ORIGINS = (process.env.FEWER_ORIGINS || 'https://fewer.aifinode.xyz,https://claude.aifinode.xyz').split(',')
+const ORIGINS = (process.env.FEWER_ORIGINS || 'https://befewer.com,https://www.befewer.com,https://claude.aifinode.xyz').split(',')
 // No Origin is trusted for the rate limits: any program can send any Origin header, so an
 // exemption by Origin let anyone create guests without limit (and empty the faucet account).
 const DIST = process.env.FEWER_DIST || path.join(path.dirname(fileURLToPath(import.meta.url)), 'dist')
