@@ -300,7 +300,7 @@ async function dexTick() {
   if (d.busy) return
   let method = null
   if (d.step < 5 && (d.step > 0 || BigInt(s.treasury_spendable) >= BigInt(s.graduate_at))) method = 'graduate'
-  // buybacks are a daily DCA that waits until its share reaches 0.1 NEAR (buyback_now says what it would spend)
+  // buybacks: 1/365 of the treasury per day, spent once the share reaches 0.1 NEAR (next_buyback_at says when)
   else if (d.step === 5 && BigInt(s.now) >= BigInt(d.next_buyback_at) && BigInt(d.buyback_now ?? 0) >= near(0.1)) method = 'buyback'
   if (!method) return
   const res = await loadAccount(KEEPER).callFunctionRaw({ contractId: CONTRACT, methodName: method, args: {}, gas: 300_000_000_000_000n })

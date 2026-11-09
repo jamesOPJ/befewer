@@ -43,11 +43,16 @@
   const nextIn = $derived(dex ? Math.max(0, Number(B(dex.next_buyback_at) / 1_000_000n) - game.now) : 0)
   const mmss = (ms: number) => `${Math.floor(ms / 60000)}:${String(Math.floor((ms % 60000) / 1000)).padStart(2, '0')}`
   const everyMin = $derived(pr ? Math.round(Number(B(pr.buyback_every_ns) / 1_000_000_000n) / 60) : 0)
-  const hm = (ms: number) => (ms >= 3_600_000 ? `${Math.floor(ms / 3_600_000)} h ${Math.floor((ms % 3_600_000) / 60_000)} min` : mmss(ms))
+  const hm = (ms: number) =>
+    ms >= 48 * 3_600_000 ? `${(ms / 86_400_000).toFixed(1)} days`
+    : ms >= 3_600_000 ? `${Math.floor(ms / 3_600_000)} h ${Math.floor((ms % 3_600_000) / 60_000)} min` : mmss(ms)
+  // the buyback share builds up at 1/365 of the treasury per day since the last buyback; a buyback
+  // runs once it reaches 0.1 NEAR (next_buyback_at says when, at today's treasury; 0 = never)
   const buyNow = $derived(B(dex?.buyback_now))
-  // buybacks start once 1/365 of the treasury (plus any held wNEAR) reaches 0.1 NEAR
-  const needTreasury = $derived(((MIN_BUYBACK > B(dex?.held_wnear) ? MIN_BUYBACK - B(dex?.held_wnear) : 0n) * 365n))
-  const fillPct = $derived(needTreasury > 0n ? Math.min(100, (Number(B(st?.treasury_spendable)) / Number(needTreasury)) * 100) : 100)
+  const sharePct = $derived(Math.min(100, (Number(buyNow) / Number(MIN_BUYBACK)) * 100))
+  const neverBuys = $derived(B(dex?.next_buyback_at) === 0n)
+  const perDay = $derived(B(st?.treasury_spendable) / 365n)
+  const buyMax = $derived(B(pr?.buyback_max))
   // the treasury's recent pace, from the rounds on hand: NEAR per hour
   const pace = $derived.by(() => {
     game.history
@@ -118,11 +123,13 @@
           <li class:done={dex.step > i} class:now={dex.step === i && dex.busy}>{s}</li>
         {/each}
       </ol>
+    {:else if neverBuys}
+      <p class="fine">Buybacks spend 1/365 of the treasury per day, in buys of at least 0.1 NEAR. With less than 0.1 NEAR to spend, the next one waits for more fees.</p>
     {:else if buyNow < MIN_BUYBACK}
-      <div class="bar" aria-label="{Math.floor(fillPct)}% of the way to the first buyback"><span style="width:{fillPct}%"></span></div>
-      <p class="fine">{fmtN(B(st.treasury_spendable), 2)} of {fmtN(needTreasury, 1)} NEAR ({Math.floor(fillPct)}%). Buybacks start when 1/365 of the treasury reaches 0.1 NEAR{etaTo(needTreasury)}.</p>
+      <div class="bar" aria-label="{Math.floor(sharePct)}% of the next buyback built up"><span style="width:{sharePct}%"></span></div>
+      <p class="fine">Buybacks spend 1/365 of the treasury per day ({fmtN(perDay)} NEAR a day now), in buys of at least 0.1 NEAR. {fmtN(buyNow)} of the next 0.1 NEAR has built up since the last one ({Math.floor(sharePct)}%); at today's treasury it is due in {hm(nextIn)}.</p>
     {:else}
-      <p class="fine">Buying back: every {everyMin} minutes, 1/365 of it ({fmtN(buyNow)} NEAR now) buys BEFEWER from the pool, which is burned.</p>
+      <p class="fine">Buying back: 1/365 of the treasury per day ({fmtN(perDay)} NEAR a day now), in buys of at least 0.1 NEAR; {fmtN(buyNow)} NEAR has built up for the next one.</p>
     {/if}
     <p class="faint small">Collected so far: {fmtN(st.treasury_in, 2)} NEAR. <a href="#/pool" onclick={e => { e.preventDefault(); document.getElementById('books')?.scrollIntoView({ behavior: 'smooth' }) }}>Where it went</a></p>
   </section>
@@ -155,13 +162,14 @@
       <div><div class="eyebrow">Next</div>
         {#if !open}<div class="v">after the pool opens</div>
         {:else if dex.busy}<div class="v">in flight now</div>
-        {:else if buyNow < MIN_BUYBACK}<div class="v">when the treasury reaches {fmtN(needTreasury, 1)} NEAR</div><div class="faint small">see Treasury above</div>
-        {:else if nextIn > 0}<div class="v num">in {hm(nextIn)}</div><div class="faint small">{fmtN(buyNow)} NEAR (1/365 of the treasury)</div>
-        {:else}<div class="v num">due now</div><div class="faint small">{fmtN(buyNow)} NEAR (1/365 of the treasury)</div>{/if}
+        {:else if neverBuys}<div class="v">when the treasury holds 0.1 NEAR to spend</div>
+        {:else if buyNow < MIN_BUYBACK}<div class="v num">in {hm(nextIn)}</div><div class="faint small">0.1 NEAR, once that much has built up (at today's treasury)</div>
+        {:else if nextIn > 0}<div class="v num">in {hm(nextIn)}</div><div class="faint small">{fmtN(buyNow)} NEAR built up since the last one</div>
+        {:else}<div class="v num">due now</div><div class="faint small">{fmtN(buyNow)} NEAR built up since the last one</div>{/if}
       </div>
       <div><div class="eyebrow">Price limit</div><div class="v num">{open ? p4(Number(B(dex.buyback_ceiling)) / 1e24) : '—'} <span class="faint">NEAR per BEFEWER</span></div><div class="faint small">25% above the last buyback's price; 25% more after a refused one</div></div>
     </div>
-    <p class="fine">Every {everyMin} minutes anyone can make the contract spend 1/365 of the treasury's NEAR on BEFEWER from the pool and burn all of it, as long as that 1/365 is at least 0.1 NEAR (so gas stays small). It never pays more than the price limit, so pumping the price just before a buyback gets it refused: the NEAR waits for the next one. The keeper calls it when it is due.</p>
+    <p class="fine">The treasury spends 1/365 of its NEAR per day on BEFEWER from the pool and burns all of it. The share builds up from the last buyback and is spent once it reaches 0.1 NEAR (so gas stays small), at most every {everyMin} minutes and at most {fmtN(buyMax)} NEAR at a time. A big inflow is spread out: half of it is spent after about 8 months. Anyone can call it when it is due (the keeper does). It never pays more than the price limit, so pumping the price just before a buyback gets it refused: the NEAR waits for the next one.</p>
     {#if buys?.length}
       <table class="tab">
         <thead><tr><th>When</th><th class="r">NEAR used</th><th class="r">BEFEWER burned</th><th class="r">Price</th></tr></thead>

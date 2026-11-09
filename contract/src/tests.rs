@@ -1588,14 +1588,16 @@ fn fn_call_args(method: &str) -> Vec<String> {
         .collect()
 }
 
+const DAY: u64 = DAY_NS;
+
 #[test]
-fn buyback_spends_1_365th_of_the_treasury_and_burns_what_comes_back() {
+fn buyback_spends_1_365th_of_the_treasury_per_day_and_burns_what_comes_back() {
     let mut c = graduated(6 * N);
     donate(&mut c, 365 * N, now_g());
     let k = acc("keeper.testnet");
-    let t = now_g() + MIN;
+    let t = now_g() + DAY;
     ctx(&k, t);
-    assert_eq!(c.get_status().dex.buyback_now.0, N, "365 NEAR spendable: 1/365 is 1 NEAR");
+    assert_eq!(c.get_status().dex.buyback_now.0, N, "365 NEAR spendable, a day since the pool opened: 1 NEAR");
     let ceiling = c.get_status().dex.buyback_ceiling.0;
     assert_eq!(ceiling, ceiling_from(6 * N - GRADUATION_COST, T), "first ceiling: 125% of the opening price");
     let _ = c.buyback();
@@ -1603,7 +1605,7 @@ fn buyback_spends_1_365th_of_the_treasury_and_burns_what_comes_back() {
     let min_out = (U256::from(N) * U256::from(TOKEN) / U256::from(ceiling)).as_u128();
     assert!(fn_call_args("ft_transfer_call")[0].contains(&format!(r#"\"min_amount_out\":\"{}\""#, min_out)), "the swap pays at most the ceiling");
     callback(t, ok_json(U128(N)));
-    c.on_buyback(U128(0), U128(N));
+    c.on_buyback(U128(0), U128(N), Some(U64(0)));
     // the pool sends the bought BEFEWER to the contract: it is burned on arrival
     ctx_full(&dex(), t, 1, BIG, vec![]);
     c.ft_transfer(me(), U128(T / 10), None);
@@ -1622,24 +1624,84 @@ fn buyback_spends_1_365th_of_the_treasury_and_burns_what_comes_back() {
 #[should_panic(expected = "wait until it reaches 0.1 NEAR")]
 fn a_buyback_below_a_tenth_of_a_near_waits() {
     let mut c = graduated(6 * N);
-    donate(&mut c, 3 * N, now_g()); // 3 NEAR / 365 = 0.008 NEAR
-    ctx(&acc("keeper.testnet"), now_g() + 100 * MIN); // waiting longer does not change it
+    donate(&mut c, 3 * N, now_g()); // 3 NEAR at 1/365 a day: 0.1 NEAR after 12.2 days
+    ctx(&acc("keeper.testnet"), now_g() + 12 * DAY);
     let _ = c.buyback();
 }
 
 #[test]
-fn buybacks_start_once_the_treasury_holds_36_and_a_half_near() {
+fn a_small_treasury_buys_back_once_its_share_has_built_up() {
     let mut c = graduated(6 * N);
-    donate(&mut c, 36 * N, now_g());
+    donate(&mut c, 3 * N, now_g());
     let k = acc("keeper.testnet");
+    let due = now_g() + 365 * DAY / 30; // 0.1 NEAR * 365 days / 3 NEAR = 12.17 days (exactly)
     ctx(&k, now_g() + MIN);
-    assert!(c.get_status().dex.buyback_now.0 < MIN_BUYBACK, "36 / 365 = 0.0986 NEAR: not yet");
-    donate(&mut c, N, now_g() + MIN);
-    ctx(&k, now_g() + MIN);
-    let share = 37 * N / 365;
-    assert_eq!(c.get_status().dex.buyback_now.0, share, "37 / 365 = 0.101 NEAR");
+    assert_eq!(c.get_status().dex.next_buyback_at.0, due, "12.2 days after the pool opened");
+    ctx(&k, due - 1);
+    assert!(c.get_status().dex.buyback_now.0 < MIN_BUYBACK, "a nanosecond early: not yet");
+    ctx(&k, due);
+    let share = c.get_status().dex.buyback_now.0;
+    assert_eq!(share, MIN_BUYBACK);
     let _ = c.buyback();
-    assert_eq!(c.get_status().treasury.0, 37 * N - share);
+    assert_eq!(c.get_status().treasury.0, 3 * N - share);
+}
+
+#[test]
+fn the_share_starts_building_when_the_pool_opens() {
+    let mut c = graduated(6 * N);
+    donate(&mut c, 365 * N, now_g());
+    ctx(&acc("keeper.testnet"), now_g() + 10 * MIN);
+    // not since the contract was deployed (that would be the full buyback_max right away)
+    assert_eq!(c.get_status().dex.buyback_now.0, 365 * N * (10 * MIN) as u128 / (365 * DAY as u128));
+}
+
+#[test]
+fn a_big_inflow_is_spent_at_1_365th_a_day_not_per_buyback() {
+    let mut c = graduated(6 * N);
+    donate(&mut c, 3650 * N, now_g());
+    let k = acc("keeper.testnet");
+    // a keeper that checks every 10 minutes for a day and buys whenever it is due
+    let mut buys = 0;
+    let mut t = now_g();
+    while t < now_g() + DAY {
+        t += 10 * MIN;
+        ctx(&k, t);
+        let d = c.get_status().dex;
+        if t < d.next_buyback_at.0 || d.buyback_now.0 < MIN_BUYBACK {
+            continue;
+        }
+        let before = c.get_status().treasury.0;
+        let _ = c.buyback();
+        let fresh = before - c.get_status().treasury.0;
+        callback(t, ok_json(U128(fresh)));
+        c.on_buyback(U128(0), U128(fresh), Some(U64(0)));
+        buys += 1;
+    }
+    let spent = 3650 * N - c.get_status().treasury.0;
+    // 10 NEAR a day (3650 / 365), give or take the last unspent share; buying 1/365 per
+    // buyback every 10 minutes would have spent 144 NEAR (buyback_max is 1 NEAR in tests)
+    assert!(spent > 99 * N / 10 && spent <= 10 * N, "spent {} yoctoNEAR", spent);
+    assert_eq!(buys, 72, "0.07 NEAR builds up per 10 minutes: one 0.14 NEAR buy every 20 minutes");
+}
+
+#[test]
+fn a_long_wait_never_spends_more_than_the_treasury_or_buyback_max() {
+    let mut c = graduated(6 * N);
+    donate(&mut c, N / 2, now_g());
+    let k = acc("keeper.testnet");
+    ctx(&k, now_g() + 3 * 365 * DAY); // three years: 1.5x the treasury built up
+    assert_eq!(c.get_status().dex.buyback_now.0, N / 2, "at most the spendable treasury");
+    donate(&mut c, 3000 * N, now_g() + 3 * 365 * DAY);
+    ctx(&k, now_g() + 3 * 365 * DAY);
+    assert_eq!(c.get_status().dex.buyback_now.0, N, "at most buyback_max");
+}
+
+#[test]
+fn a_treasury_too_small_to_ever_buy_shows_no_next_buyback() {
+    let mut c = graduated(6 * N);
+    donate(&mut c, N / 20, now_g());
+    ctx(&acc("keeper.testnet"), now_g() + MIN);
+    assert_eq!(c.get_status().dex.next_buyback_at.0, 0);
 }
 
 #[test]
@@ -1648,11 +1710,11 @@ fn buybacks_are_rate_limited() {
     let mut c = graduated(6 * N);
     donate(&mut c, 365 * N, now_g());
     let k = acc("keeper.testnet");
-    ctx(&k, now_g() + MIN);
+    ctx(&k, now_g() + DAY);
     let _ = c.buyback();
-    callback(now_g() + MIN, ok_json(U128(N)));
-    c.on_buyback(U128(0), U128(N));
-    ctx(&k, now_g() + MIN + MIN / 2);
+    callback(now_g() + DAY, ok_json(U128(N)));
+    c.on_buyback(U128(0), U128(N), Some(U64(0)));
+    ctx(&k, now_g() + DAY + MIN / 2);
     let _ = c.buyback();
 }
 
@@ -1661,12 +1723,12 @@ fn a_refused_swap_keeps_the_wnear_and_raises_the_price_ceiling_by_a_quarter() {
     let mut c = graduated(6 * N);
     donate(&mut c, 365 * N, now_g());
     let k = acc("keeper.testnet");
-    let t1 = now_g() + MIN;
+    let t1 = now_g() + DAY;
     ctx(&k, t1);
     let ceil0 = c.get_status().dex.buyback_ceiling.0;
     let _ = c.buyback();
     callback(t1, ok_json(U128(0))); // the DEX refused (price above the ceiling): all came back as wNEAR
-    c.on_buyback(U128(0), U128(N));
+    c.on_buyback(U128(0), U128(N), Some(U64(0)));
     let s = c.get_status();
     assert_eq!((s.dex.held_wnear.0, s.dex.bought_near.0, s.treasury.0), (N, 0, 364 * N));
     assert_eq!(s.dex.buyback_ceiling.0, ceil0 * 5 / 4, "25% more next time");
@@ -1677,15 +1739,36 @@ fn a_refused_swap_keeps_the_wnear_and_raises_the_price_ceiling_by_a_quarter() {
     let _ = c.buyback();
     assert_eq!(c.get_status().treasury.0, 364 * N);
     callback(t2, PromiseResult::Failed); // and if the whole call fails
-    c.on_buyback(U128(N), U128(0));
+    c.on_buyback(U128(N), U128(0), Some(U64(t1)));
     let s = c.get_status();
     assert_eq!((s.dex.held_wnear.0, s.treasury.0), (N, 364 * N), "nothing is lost");
+    assert_eq!(s.dex.next_buyback_at.0, t1 + MIN, "not even the time the share was building up");
+}
+
+#[test]
+fn a_failed_buyback_keeps_the_share_built_up_so_far() {
+    let mut c = graduated(6 * N);
+    donate(&mut c, 365 * N, now_g());
+    let k = acc("keeper.testnet");
+    let t = now_g() + DAY;
+    ctx(&k, t);
+    let _ = c.buyback();
+    callback(t, PromiseResult::Failed);
+    c.on_buyback(U128(0), U128(N), Some(U64(0)));
+    let s = c.get_status();
+    assert_eq!((s.treasury.0, s.dex.buyback_now.0), (365 * N, N), "the NEAR and the day of share are both back");
+    // a callback sent before the upgrade (no `last`) still settles
+    ctx(&k, t);
+    let _ = c.buyback();
+    callback(t, PromiseResult::Failed);
+    c.on_buyback(U128(0), U128(N), None);
+    assert_eq!(c.get_status().treasury.0, 365 * N);
 }
 
 #[test]
 fn the_buyback_list_keeps_the_last_100_newest_first_and_marks_swaps_that_failed() {
     let mut c = graduated(6 * N);
-    donate(&mut c, 40_000 * N, now_g());
+    donate(&mut c, 600_000 * N, now_g()); // 1.14 NEAR builds up per minute: every buy is buyback_max
     let k = acc("keeper.testnet");
     for i in 1..=(BUYBACKS_KEPT as u64 + 2) {
         let t = now_g() + i * MIN;
@@ -1693,10 +1776,10 @@ fn the_buyback_list_keeps_the_last_100_newest_first_and_marks_swaps_that_failed(
         let _ = c.buyback();
         if i == BUYBACKS_KEPT as u64 + 2 {
             callback(t, PromiseResult::Failed); // the newest one does not go through
-            c.on_buyback(U128(0), U128(N));
+            c.on_buyback(U128(0), U128(N), Some(U64(t - MIN)));
         } else {
             callback(t, ok_json(U128(N))); // the pool took it all
-            c.on_buyback(U128(0), U128(N));
+            c.on_buyback(U128(0), U128(N), Some(U64(t - MIN)));
             ctx_full(&dex(), t, 1, BIG, vec![]);
             c.ft_transfer(me(), U128(T / 1000), None);
         }

@@ -12,7 +12,7 @@ NEAR **testnet** only.
 | Live demo | https://befewer.com (no wallet needed: a free testnet account is created on your first bet) |
 | Game + token contract | [`v6.befewer.testnet`](https://testnet.nearblocks.io/address/v6.befewer.testnet) (the BEFEWER NEP-141 token is the same account) |
 | Token/NEAR pool | Ref Finance testnet pool [#2911](https://testnet.ref.finance/pool/2911) on `ref-finance-101.testnet` |
-| Deployed code | sha256 `b6060e9920bef5e58a7b25447744aa2ea6b3524d998271851e6a077eb21d1d8b` = `contract/target/near/fewer.wasm` built from this repo |
+| Deployed code | sha256 `bac2340ec3321377010bfa66c2f08e254502614ed4f22933364e0d84c6fa56f7` = `contract/target/near/fewer.wasm` built from this repo |
 
 ## The problem
 
@@ -70,9 +70,11 @@ All on https://befewer.com. Times are for the current parameters (a round every 
   after about 5.7 years at the earliest; like ORE, burned BEFEWER can then be mined again.
 - **Treasury.** At 5 NEAR spendable, the contract opens a wNEAR/BEFEWER pool on Ref Finance (pool created and
   filled in one receipt with `min_amounts`, so nobody can set its price in between) and keeps the LP shares
-  for good: there is no method to remove liquidity. After that, at most every 10 minutes, a buyback spends 1/365
-  of the spendable treasury (only when that is at least 0.1 NEAR), paying at most 25% above the last buyback's
-  price, and burns what it buys.
+  for good: there is no method to remove liquidity. After that, buybacks spend 1/365 of the spendable treasury
+  per day: the share builds up from the last buyback and is spent once it reaches 0.1 NEAR (at most every
+  10 minutes, at most 0.5 NEAR at a time), paying at most 25% above the last buyback's price, and burns what it
+  buys. A big inflow is spread out (half of it is spent after about 253 days), and a small treasury still buys
+  now and then (12 NEAR: 0.1 NEAR about every 3 days).
 - **Slots.** One account can run any number of independent bettors ("slots") from one balance.
 - **Keepers.** Revealing, settling, opening the pool and buybacks are public methods. Anyone can run
   `keeper/run.mjs` with their own account and earn reveal rewards.
@@ -92,7 +94,7 @@ web/        Svelte 5 + Vite page and a small Node server (static files + the tes
 
 ```sh
 cd contract
-cargo test                                # 78 tests
+cargo test                                # 83 tests
 cargo near build non-reproducible-wasm    # -> target/near/fewer.wasm
 ```
 

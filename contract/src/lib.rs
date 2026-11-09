@@ -73,12 +73,15 @@ pub const TOKEN: u128 = 1_000_000_000_000_000_000;
 pub const STORAGE_FEE: u128 = NEAR / 100;
 /// NEAR the treasury never spends, on top of what the contract owes players and its storage.
 pub const SAFETY_RESERVE: u128 = NEAR;
-/// Smallest buyback worth sending.
-/// Each buyback spends 1/BUYBACK_PARTS of the spendable treasury (at most `buyback_max`), and
-/// only if that is at least MIN_BUYBACK: a smaller buy would mostly pay gas. So buybacks start
-/// once the treasury holds 36.5 NEAR, and run at most once per `buyback_every_ns`.
+/// Smallest buyback worth sending: a smaller buy would mostly pay gas.
 pub const MIN_BUYBACK: u128 = NEAR / 10;
-pub const BUYBACK_PARTS: u128 = 365;
+/// Buybacks spend the spendable treasury at 1/BUYBACK_DAYS of it per day, like a daily DCA: the
+/// share builds up from the last buyback (or the pool opening) and is spent once it reaches
+/// MIN_BUYBACK, at most once per `buyback_every_ns` and at most `buyback_max` at a time. A big
+/// inflow is spread out (half of it is spent after about 253 days), and even a small treasury
+/// buys back now and then (12 NEAR: 0.1 NEAR about every 3 days).
+pub const BUYBACK_DAYS: u128 = 365;
+pub const DAY_NS: u64 = 86_400_000_000_000;
 /// The most a buyback pays per BEFEWER: 25% above the last buyback's price, and 25% more after
 /// each one the pool refused. Someone pumping the price right before a buyback (to sell into
 /// it) gets the swap refused instead.
@@ -502,8 +505,11 @@ pub struct DexView {
     pub shares: U128,
     pub graduated_at: U64,
     pub held_wnear: U128,
+    /// When the next buyback can run (its share reaches 0.1 NEAR at today's treasury, and
+    /// `buyback_every_ns` has passed); 0 if the treasury is too small to ever reach 0.1 NEAR.
     pub next_buyback_at: U64,
-    /// What a buyback would spend right now (1/365 of the treasury + held wNEAR); it runs at >= 0.1 NEAR.
+    /// What a buyback would spend right now (held wNEAR + the share built up since the last
+    /// buyback, 1/365 of the treasury per day); it runs at >= 0.1 NEAR.
     pub buyback_now: U128,
     /// Most a buyback pays per BEFEWER, in yoctoNEAR per 1 BEFEWER (0 before the pool opens).
     pub buyback_ceiling: U128,
@@ -883,9 +889,44 @@ impl Contract {
 
     /// Treasury NEAR that can leave the contract without touching player funds, escrow, the
     /// NEAR held for bets' storage, storage itself, or the safety reserve.
-    /// One buyback's part of the treasury: 1/BUYBACK_PARTS of the spendable NEAR.
-    fn buyback_share(&self) -> u128 {
-        self.spendable() / BUYBACK_PARTS
+    /// When the buyback share started building up: the last buyback, or the pool opening.
+    fn buyback_since(&self) -> u64 {
+        self.dex.last_buyback_ns.max(self.dex.graduated_at_ns)
+    }
+
+    /// The buyback share built up by `now`: 1/BUYBACK_DAYS of the spendable NEAR per day since
+    /// `buyback_since`, never more than the spendable NEAR itself.
+    fn buyback_share(&self, now: u64) -> u128 {
+        let spendable = self.spendable();
+        let elapsed = now.saturating_sub(self.buyback_since());
+        let v = U256::from(spendable) * U256::from(elapsed) / (U256::from(BUYBACK_DAYS) * U256::from(DAY_NS));
+        if v > U256::from(spendable) { spendable } else { v.as_u128() }
+    }
+
+    /// What a buyback at `now` would swap: (held wNEAR, fresh NEAR from the treasury), the two
+    /// together at most `buyback_max`.
+    fn buyback_parts(&self, now: u64) -> (u128, u128) {
+        let held = self.dex.held_wnear;
+        (held, self.buyback_share(now).min(self.params.buyback_max.0.saturating_sub(held)))
+    }
+
+    /// The earliest time a buyback can run: `buyback_every_ns` after the last one, and once the
+    /// share (at today's treasury) has reached MIN_BUYBACK. 0 if it never would.
+    fn next_buyback_at(&self) -> u64 {
+        let earliest = self.dex.last_buyback_ns.saturating_add(self.params.buyback_every_ns.0);
+        let held = self.dex.held_wnear;
+        if held >= MIN_BUYBACK {
+            return earliest;
+        }
+        let spendable = self.spendable();
+        if held + spendable < MIN_BUYBACK {
+            return 0;
+        }
+        // the smallest elapsed time with spendable * elapsed / (BUYBACK_DAYS * DAY_NS) >= need
+        let need = U256::from(MIN_BUYBACK - held) * U256::from(BUYBACK_DAYS) * U256::from(DAY_NS);
+        let elapsed = (need + U256::from(spendable) - U256::from(1u8)) / U256::from(spendable);
+        let at = U256::from(self.buyback_since()) + elapsed;
+        if at > U256::from(u64::MAX) { 0 } else { at.as_u64().max(earliest) }
     }
 
     /// What a buyback may pay per BEFEWER now: the stored ceiling, else 125% of the newest priced
@@ -1566,8 +1607,9 @@ impl Contract {
         emit("graduate_result", json!({"step": step, "ok": ok, "now": self.dex.step}));
     }
 
-    /// Buy BEFEWER from the pool with 1/365 of the treasury (see MIN_BUYBACK) and burn it on
-    /// arrival. Anyone can call it once the pool is open, at most once per `buyback_every_ns`.
+    /// Buy BEFEWER from the pool with the treasury's buyback share (1/365 of it per day since
+    /// the last buyback, see BUYBACK_DAYS) and burn it on arrival. Anyone can call it once the
+    /// pool is open and the share is at least 0.1 NEAR, at most once per `buyback_every_ns`.
     /// The swap pays at most the price ceiling (see BUYBACK_CEILING_BPS); a refused swap keeps
     /// its NEAR as wNEAR for the next one.
     pub fn buyback(&mut self) -> Promise {
@@ -1577,10 +1619,12 @@ impl Contract {
         require!(now >= self.dex.last_buyback_ns + self.params.buyback_every_ns.0, "too soon since the last buyback");
         let me = env::current_account_id();
         let (dex, wnear) = (self.params.dex.clone(), self.params.wnear.clone());
-        let held = self.dex.held_wnear;
-        let fresh = self.buyback_share().min(self.params.buyback_max.0.saturating_sub(held));
+        let (held, fresh) = self.buyback_parts(now);
         let amount = held + fresh;
-        require!(amount >= MIN_BUYBACK, format!("1/365 of the treasury is {} yoctoNEAR; buybacks wait until it reaches 0.1 NEAR", amount));
+        require!(
+            amount >= MIN_BUYBACK,
+            format!("the buyback share is {} yoctoNEAR (1/365 of the treasury per day); buybacks wait until it reaches 0.1 NEAR", amount)
+        );
         let ceiling = self.buyback_ceiling();
         let min_out = if ceiling == 0 {
             1
@@ -1591,6 +1635,7 @@ impl Contract {
         self.treasury -= fresh;
         self.dex.held_wnear = 0;
         self.dex.busy = true;
+        let last = self.dex.last_buyback_ns;
         self.dex.last_buyback_ns = now;
         let msg = json!({"actions": [{"pool_id": self.dex.pool_id.expect("pool open"), "token_in": wnear,
                                       "token_out": me, "amount_in": U128(amount), "min_amount_out": U128(min_out)}]})
@@ -1612,19 +1657,23 @@ impl Contract {
             log.remove(0);
         }
         buybacks_write(&log);
-        p.then(Self::ext(me).with_static_gas(tgas(15)).on_buyback(U128(held), U128(fresh)))
+        p.then(Self::ext(me).with_static_gas(tgas(15)).on_buyback(U128(held), U128(fresh), Some(U64(last))))
     }
 
+    /// `last`: the previous buyback's time (absent in callbacks sent before it was added).
     #[private]
-    pub fn on_buyback(&mut self, held: U128, fresh: U128) {
+    pub fn on_buyback(&mut self, held: U128, fresh: U128, last: Option<U64>) {
         self.dex.busy = false;
         let res = promise_ok();
         let amount = held.0 + fresh.0;
         if res.is_none() {
             // The whole batch failed and reverted: near_deposit's NEAR came back as a refund
-            // and the held wNEAR never left.
+            // and the held wNEAR never left. The share keeps building from where it was.
             self.treasury += fresh.0;
             self.dex.held_wnear += held.0;
+            if let Some(last) = last {
+                self.dex.last_buyback_ns = last.0;
+            }
             emit("buyback_result", json!({"ok": false, "spent": "0"}));
             return;
         }
@@ -1730,9 +1779,10 @@ impl Contract {
                 shares: U128(d.shares),
                 graduated_at: U64(d.graduated_at_ns),
                 held_wnear: U128(d.held_wnear),
-                next_buyback_at: U64(if d.step == STEP_DONE { d.last_buyback_ns + self.params.buyback_every_ns.0 } else { 0 }),
+                next_buyback_at: U64(if d.step == STEP_DONE { self.next_buyback_at() } else { 0 }),
                 buyback_now: U128(if d.step == STEP_DONE {
-                    d.held_wnear + self.buyback_share().min(self.params.buyback_max.0.saturating_sub(d.held_wnear))
+                    let (held, fresh) = self.buyback_parts(env::block_timestamp());
+                    held + fresh
                 } else {
                     0
                 }),
