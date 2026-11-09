@@ -34,19 +34,31 @@ function loadRules(): { live: Rule[]; draft: Rule[] } {
 }
 
 /** A lane runs one rule set on one slot of the account (lane 0 = slot 0, the manual one).
- *  `slot` is null until the slot is opened on chain; `owner` is the account it belongs to. */
+ *  `slots` remembers, for each account, the slot this lane opened there (none until it first bets),
+ *  so switching to another account (wallet ↔ guest) and back finds the same slot, not a new one. */
 /** `on` false = this slot sits out; `strategy` = the preset it came from (or 'Custom rules'). */
-export type Lane = { name: string; slot: number | null; owner: string | null; live: Rule[]; draft: Rule[]; on?: boolean; strategy?: string }
+export type Lane = { name: string; slots: Record<string, number>; live: Rule[]; draft: Rule[]; on?: boolean; strategy?: string }
 const LANES_KEY = 'befewer.ap.lanes'
+/** A saved lane's slots per account. Saves from before 11-09 kept one `slot` + `owner` pair. */
+function savedSlots(l: any): Record<string, number> {
+  const out: Record<string, number> = {}
+  const ok = (s: unknown): s is number => Number.isInteger(s) && (s as number) > 0
+  if (l?.slots && typeof l.slots === 'object') {
+    for (const [a, s] of Object.entries(l.slots)) if (ok(s)) out[a] = s
+  } else if (typeof l?.owner === 'string' && ok(l.slot)) {
+    out[l.owner] = l.slot
+  }
+  return out
+}
 function loadLanes(): Lane[] {
   try {
     const saved = JSON.parse(localStorage.getItem(LANES_KEY) || 'null')
     if (Array.isArray(saved) && saved.length)
-      return saved.map((l: any, i: number) => ({ name: String(l.name ?? `Slot ${i}`), slot: i === 0 ? 0 : l.slot ?? null, owner: l.owner ?? null,
+      return saved.map((l: any, i: number) => ({ name: String(l.name ?? `Slot ${i}`), slots: i === 0 ? {} : savedSlots(l),
         live: (l.live ?? []).map(normalizeRule), draft: (l.draft ?? l.live ?? []).map(normalizeRule), on: l.on !== false, strategy: l.strategy ?? undefined }))
   } catch {}
   const r = loadRules() // the single rule set from before slots existed becomes lane 0
-  return [{ name: 'Main', slot: 0, owner: null, live: r.live, draft: r.draft }]
+  return [{ name: 'Main', slots: {}, live: r.live, draft: r.draft }]
 }
 const BUDGET_KEY = 'befewer.ap.budget'
 function loadBudget(): { on: boolean; near: number } {
@@ -99,9 +111,15 @@ export const picks = () => (game.session ? loadPicks(game.session.accountId) : {
 export const myOpen = (r: number) => game.me?.open.find(o => Number(o.round) === r)
 /** More than one slot in this account: views add up across slots and say which slot. */
 export const multi = () => (game.me?.slots.length ?? 0) > 1
+/** The slot lane `i` bets from in the account signed in now (lane 0: slot 0), or null before it has one there. */
+export function laneSlotId(i: number): number | null {
+  if (i === 0) return 0
+  const a = game.session?.accountId
+  return a ? game.ap.lanes[i]?.slots[a] ?? null : null
+}
 export const slotName = (slot: number) => {
-  const l = game.ap.lanes.find((x, i) => (i === 0 ? 0 : x.owner === game.session?.accountId ? x.slot : null) === slot)
-  return l && game.ap.lanes.length > 1 ? `${l.name} (slot ${slot})` : `slot ${slot}`
+  const i = game.ap.lanes.findIndex((_, k) => laneSlotId(k) === slot)
+  return i >= 0 && game.ap.lanes.length > 1 ? `${game.ap.lanes[i].name} (slot ${slot})` : `slot ${slot}`
 }
 /** Every slot's bet in round r, with the side from this browser's picks. */
 export function myBetsIn(r: number) {
@@ -591,7 +609,8 @@ export async function closeSlot(slot: number) {
   try {
     game.busy = `Closing slot ${slot}`
     await callContract(game.session, 'close_slot', { slot }, 60)
-    for (const l of game.ap.lanes) if (l.slot === slot && l.owner === game.session.accountId) { l.slot = null; l.owner = null }
+    const a = game.session.accountId
+    for (const l of game.ap.lanes) if (l.slots[a] === slot) delete l.slots[a]
     saveRules()
     toast('ok', `Slot ${slot} closed; its 0.002 NEAR is back in your balance.`)
   } finally {
@@ -671,7 +690,7 @@ export function setLaneOn(i: number, on: boolean) {
 export function laneNow(i: number): { kind: 'bet' | 'skip' | 'err' | 'wait' | 'off'; text: string; slot: number | null } {
   const l = game.ap.lanes[i]
   const r = commitRound()
-  const slot = i === 0 ? 0 : l.owner === game.session?.accountId ? l.slot : null
+  const slot = laneSlotId(i)
   if (slot != null && game.me) {
     const bet = game.me.slots.find(s => s.slot === slot)?.open.find(o => Number(o.round) === r)
     if (bet) {
@@ -692,7 +711,7 @@ export function discardDraft() {
 }
 /** Add a lane (its slot is opened on chain when it first bets: 0.002 NEAR, refunded on close). */
 export function addLane(name = `Slot ${game.ap.lanes.length}`, rules: Rule[] = []) {
-  game.ap.lanes.push({ name, slot: null, owner: null, live: structuredClone(rules), draft: structuredClone(rules) })
+  game.ap.lanes.push({ name, slots: {}, live: structuredClone(rules), draft: structuredClone(rules) })
   game.ap.sel = game.ap.lanes.length - 1
   saveRules()
 }
@@ -707,10 +726,13 @@ export function removeLane(i: number) {
 export function useSlotSet(i: number) {
   // (callers set `strategy` and `on`)
   const set = SLOT_SETS[i]
-  const keep = game.ap.lanes.slice(1).filter(l => l.slot != null && l.owner === game.session?.accountId)
+  // every account's extra slots carry over in order (its 1st extra slot to the new 2nd lane, ...), streaks and all
+  const per: Record<string, number[]> = {}
+  for (const l of game.ap.lanes.slice(1)) for (const [a, s] of Object.entries($state.snapshot(l.slots) as Record<string, number>)) (per[a] ??= []).push(s)
   game.ap.lanes = set.slots.map((x, k) => {
-    const old = k === 0 ? game.ap.lanes[0] : keep[k - 1]
-    return { name: x.name, slot: k === 0 ? 0 : old?.slot ?? null, owner: k === 0 ? null : old?.owner ?? null, live: structuredClone(x.rules), draft: structuredClone(x.rules) }
+    const slots: Record<string, number> = {}
+    if (k > 0) for (const [a, list] of Object.entries(per)) if (list[k - 1] != null) slots[a] = list[k - 1]
+    return { name: x.name, slots, live: structuredClone(x.rules), draft: structuredClone(x.rules) }
   })
   game.ap.sel = 0
   saveRules()
@@ -736,18 +758,20 @@ export function todayNet(): bigint {
 }
 export const budgetLeft = () => toYocto(game.ap.budget.near) + todayNet()
 
-/** The slot a lane bets from; opens it on chain the first time. */
-async function laneSlot(l: Lane): Promise<number> {
-  if (l === game.ap.lanes[0]) return 0
-  if (l.slot != null && l.owner === game.session!.accountId && game.me?.slots.some(s => s.slot === l.slot)) return l.slot
+/** The slot lane `i` bets from in this account; opens one on chain the first time it bets from this account. */
+async function laneSlot(i: number): Promise<number> {
+  if (i === 0) return 0
+  const l = game.ap.lanes[i]
+  const a = game.session!.accountId
+  const had = l.slots[a]
+  if (had != null && game.me?.slots.some(s => s.slot === had)) return had
   game.busy = 'Opening a slot for this lane'
   const res: any = await callContract(game.session!, 'open_slot', {}, 30)
-  const id = JSON.parse(atob(res.status.SuccessValue))
-  l.slot = Number(id)
-  l.owner = game.session!.accountId
+  const id = Number(JSON.parse(atob(res.status.SuccessValue)))
+  l.slots[a] = id
   saveRules()
   game.busy = ''
-  return l.slot
+  return id
 }
 
 /** Each poll: if the autopilot is on and this round is still open, every lane decides once. */
@@ -770,7 +794,7 @@ export async function autopilotTick() {
     const tag = game.ap.lanes.length > 1 ? `${l.name}: ` : ''
     try {
       if (!game.me) await ensurePlayer()
-      const slot = await laneSlot(l)
+      const slot = await laneSlot(i)
       if (game.me!.slots.find(s => s.slot === slot)?.open.some(o => Number(o.round) === r)) continue
       const mine = (game.resultsBySlot[slot] ?? []).map(x => ({ side: x.side, outcome: x.outcome, round: x.round }))
       const me = meFrom(mine)

@@ -7,7 +7,7 @@
   import { label } from '../questions'
   import { backtest, runsAtLeast, describe, cleanPattern, toStep, MAX_PCT, PRESETS, PRESET_GROUPS, SLOT_SETS, type Rule, type Cond, type Pick, type Unit, type Backtest } from '../rules'
   import { tick } from 'svelte'
-  import { game, commitRound, lookup, saveRules, setAutopilot, draftDirty, putDraftLive, discardDraft, toast, lane, addLane, removeLane, useSlotSet, todayNet, runPreset, runSlotSet, setLaneOn, laneNow, strategyOf, slotStats, toYocto, fmtN as fmtNear } from '../game.svelte'
+  import { game, commitRound, lookup, saveRules, setAutopilot, draftDirty, putDraftLive, discardDraft, toast, lane, addLane, removeLane, useSlotSet, todayNet, runPreset, runSlotSet, setLaneOn, laneNow, laneSlotId, strategyOf, slotStats, toYocto, fmtN as fmtNear } from '../game.svelte'
 
   const WINDOW = 60
   // replays count chips of 0.01 NEAR (in steps of 0.001) and pay the contract's fee on every bet
@@ -245,7 +245,7 @@
       <div class="bh"><h2>Edit rules</h2><span class="faint small">pick a slot · rules are checked top to bottom</span></div>
       <div class="lanes" role="tablist" aria-label="Slots">
         {#each game.ap.lanes as l, i}
-          <button role="tab" aria-selected={game.ap.sel === i} class:on={game.ap.sel === i} onclick={() => (game.ap.sel = i)}>{l.name}<span class="faint">{i === 0 ? ' · slot 0' : l.slot != null ? ` · slot ${l.slot}` : ' · new'}</span></button>
+          <button role="tab" aria-selected={game.ap.sel === i} class:on={game.ap.sel === i} onclick={() => (game.ap.sel = i)}>{l.name}<span class="faint">{laneSlotId(i) != null ? ` · slot ${laneSlotId(i)}` : ' · new'}</span></button>
         {/each}
         <button class="add" onclick={() => addLane()} aria-label="Add a slot"><Icon name="plus" size={14} /> Slot</button>
       </div>

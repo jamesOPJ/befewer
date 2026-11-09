@@ -2,7 +2,7 @@
   // Autopilot page: why it only runs while the page is open, why no server runs it for you,
   // and the terminal script that keeps it going without a browser.
   import Icon from './Icon.svelte'
-  import { game, toast } from '../game.svelte'
+  import { game, toast, laneSlotId } from '../game.svelte'
 
   const REPO = 'https://github.com/jamesOPJ/befewer'
   const KEY = 'befewer.ap.offpage'
@@ -14,11 +14,10 @@
 
   // the slots that are switched on, with the slot each one already uses (so its streak carries on)
   const lanes = $derived.by(() => {
-    const acct = game.session?.accountId
     return game.ap.lanes
       .map((l, i) => ({ l, i }))
       .filter(({ l }) => l.on !== false && l.live.length)
-      .map(({ l, i }) => ({ name: l.name, slot: i === 0 ? 0 : l.owner === acct ? l.slot : null, rules: $state.snapshot(l.live) }))
+      .map(({ l, i }) => ({ name: l.name, slot: laneSlotId(i), rules: $state.snapshot(l.live) }))
   })
   const q = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`
   const command = (key: string) => {
