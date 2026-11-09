@@ -10,3 +10,4 @@ keeper/logs/
 web/server.log
 web/dist/
 web/e2e-shots/
+web/.tally.*

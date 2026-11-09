@@ -149,7 +149,10 @@ npx vite build && PORT=5043 node server.mjs
 
 The page talks to NEAR testnet RPCs directly. The server's guest faucet signs with a funded testnet account
 (`befewer.testnet`, key read from `~/.near-credentials`); without that key, connect a testnet wallet
-(Meteor, Intear or MyNearWallet) instead. End-to-end checks in `web/e2e/` need puppeteer
+(Meteor, Intear or MyNearWallet) instead. The all-time tiles on the Rounds page come from `GET /api/totals`
+(read-only): the server reads every round once with `get_rounds`, keeps the counts in `web/.tally.<contract>.json`
+and then reads only newer rounds; they match the contract's own `rounds_settled`, `treasury_in` and `mined`. Without
+the server the page counts only the rounds it holds and says so. End-to-end checks in `web/e2e/` need puppeteer
 (`npm i -D puppeteer`), e.g. `node e2e/shots.cjs https://befewer.com/`.
 
 ## Security testing

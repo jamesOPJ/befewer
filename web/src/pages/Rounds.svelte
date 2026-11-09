@@ -35,15 +35,26 @@
   const mined = (x: RoundV) => BigInt(x.reward) > 0n
   const list = $derived(filter === 'mine' ? all.filter(x => mine[x.round]) : filter === 'mined' ? all.filter(mined) : all)
   const settled = $derived(all.filter(x => x.settled))
+  // All-time totals: the server counts every settled round up to `through` (this browser only holds
+  // the latest few hundred), and the rounds settled since then are added here as they come in.
+  type Totals = { through: number; rounds: number; A: number; B: number; void: number; treasury: string; mined: string; minedRounds: number; last: number | null }
+  let base = $state<Totals | null>(null)
+  const loadTotals = () => fetch('api/totals').then(r => (r.ok ? r.json() : Promise.reject())).then(t => (base = t)).catch(() => {})
+  $effect(() => { loadTotals(); const t = setInterval(loadTotals, 60_000); return () => clearInterval(t) })
   const sum = $derived.by(() => {
-    const s = { A: 0, B: 0, void: 0, treasury: 0n, mined: 0n, minedRounds: 0, last: null as number | null }
+    // the server's count must reach the oldest round held here, or rounds in between would be missed
+    const b = base && settled.length && base.through >= Number(settled[settled.length - 1].round) - 1 ? base : null
+    const s = { allTime: !!b, rounds: b?.rounds ?? 0, A: b?.A ?? 0, B: b?.B ?? 0, void: b?.void ?? 0, treasury: BigInt(b?.treasury ?? 0), mined: BigInt(b?.mined ?? 0), minedRounds: b?.minedRounds ?? 0, last: b?.last ?? null }
     for (const x of settled) {
+      if (b && Number(x.round) <= b.through) continue
+      s.rounds++
       if (x.outcome === 'A' || x.outcome === 'B' || x.outcome === 'void') s[x.outcome]++
       s.treasury += BigInt(x.to_treasury)
-      if (mined(x)) { s.mined += BigInt(x.reward); s.minedRounds++; s.last ??= Number(x.round) }
+      if (mined(x)) { s.mined += BigInt(x.reward); s.minedRounds++; s.last = Math.max(s.last ?? 0, Number(x.round)) }
     }
     return s
   })
+  const share = (n: number) => (sum.rounds ? `${Math.round((n / sum.rounds) * 100)}%` : '0%')
   // who mined a round: loaded when its row opens
   const minersCache = new Map<number, Promise<MinerV[]>>()
   const minersOf = (n: number) => {
@@ -64,18 +75,20 @@
 <header class="ph">
   <div>
     <h1>Rounds</h1>
-    <p class="muted">Every round so far. Bets on the smaller side won +100%; fees and the gap between the sides went to the treasury.</p>
+    <p class="muted">Bets on the smaller side won +100%; fees and the gap between the sides went to the treasury. A round is void when nobody bet against it or it tied: bets come back.</p>
   </div>
 </header>
 
+<p class="scope faint">{sum.allTime ? 'All time, since round #0' : `The latest ${sum.rounds} rounds only: the all-time count is not available right now`}</p>
 <section class="summary">
-  <div class="card tile"><div class="eyebrow">Settled</div><div class="big num">{settled.length}</div><div class="faint">rounds with bets</div></div>
-  <div class="card tile"><div class="eyebrow">A smaller</div><div class="big num"><span class="dot A"></span>{sum.A}</div><div class="faint">{settled.length ? Math.round((sum.A / settled.length) * 100) : 0}% of rounds</div></div>
-  <div class="card tile"><div class="eyebrow">B smaller</div><div class="big num"><span class="dot B"></span>{sum.B}</div><div class="faint">{settled.length ? Math.round((sum.B / settled.length) * 100) : 0}% of rounds</div></div>
-  <div class="card tile"><div class="eyebrow">To the treasury</div><div class="big num gold">{fmtN(sum.treasury, 2)}</div><div class="faint">NEAR · {sum.void} void</div></div>
+  <div class="card tile stile"><div class="eyebrow">Settled</div><div class="big num">{sum.rounds.toLocaleString('en-US')}</div><div class="faint">rounds with bets</div></div>
+  <div class="card tile"><div class="eyebrow">A smaller</div><div class="big num"><span class="dot A"></span>{sum.A.toLocaleString('en-US')}</div><div class="faint">{share(sum.A)} of rounds</div></div>
+  <div class="card tile"><div class="eyebrow">B smaller</div><div class="big num"><span class="dot B"></span>{sum.B.toLocaleString('en-US')}</div><div class="faint">{share(sum.B)} of rounds</div></div>
+  <div class="card tile"><div class="eyebrow">Void</div><div class="big num">{sum.void.toLocaleString('en-US')}</div><div class="faint">{share(sum.void)} of rounds · bets refunded</div></div>
+  <div class="card tile"><div class="eyebrow">To the treasury</div><div class="big num gold">{fmtN(sum.treasury, 2)}</div><div class="faint">NEAR from fees and gaps</div></div>
   <button class="card tile mtile" onclick={() => (filter = 'mined')} aria-label="Show the rounds that mined BEFEWER">
     <div class="eyebrow">BEFEWER mined</div><div class="big num"><Icon name="spark" size={20} />{fmt(sum.mined)}</div>
-    <div class="faint">{sum.minedRounds ? `in ${sum.minedRounds} round${sum.minedRounds === 1 ? '' : 's'} · last #${sum.last}` : 'nobody has won 3 in a row yet'}</div>
+    <div class="faint">1 per round · {sum.minedRounds ? `paid out in ${sum.minedRounds} round${sum.minedRounds === 1 ? '' : 's'} · last #${sum.last}` : 'nobody has won 3 in a row yet'}</div>
   </button>
 </section>
 
@@ -186,9 +199,11 @@
   .ph h1 { font-size: 30px; font-weight: 800 }
   .ph p { margin: 4px 0 0 }
   .summary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-bottom: 18px }
-  .mtile { grid-column: 1 / -1; text-align: left; color: var(--fg); font: inherit; cursor: pointer }
+  .mtile, .stile { grid-column: 1 / -1 }
+  .mtile { text-align: left; color: var(--fg); font: inherit; cursor: pointer }
+  .scope { margin: 0 0 8px; font-size: 13px }
   .mtile .big { color: var(--brand) }
-  @media (min-width: 860px) { .summary { grid-template-columns: repeat(5, minmax(0, 1fr)) } .mtile { grid-column: auto } }
+  @media (min-width: 860px) { .summary { grid-template-columns: repeat(6, minmax(0, 1fr)) } .mtile, .stile { grid-column: auto } }
   .mchip { font-size: 11.5px; font-weight: 700; color: var(--brand); display: inline-flex; align-items: center; gap: 3px; overflow-wrap: anywhere }
   .miners { margin-top: 14px; display: grid; gap: 6px; font-size: 14px }
   .how { margin: 0; font-size: 13px; line-height: 1.45 }
