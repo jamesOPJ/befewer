@@ -5,12 +5,12 @@
   import LowBalance from '../lib/LowBalance.svelte'
   import OffPage from '../lib/OffPage.svelte'
   import { label } from '../questions'
-  import { backtest, runsAtLeast, describe, chipsText, cleanPattern, PRESETS, PRESET_GROUPS, SLOT_SETS, type Rule, type Cond, type Pick, type Unit, type Backtest } from '../rules'
+  import { backtest, runsAtLeast, describe, cleanPattern, toStep, MAX_PCT, PRESETS, PRESET_GROUPS, SLOT_SETS, type Rule, type Cond, type Pick, type Unit, type Backtest } from '../rules'
   import { tick } from 'svelte'
   import { game, commitRound, lookup, saveRules, setAutopilot, draftDirty, putDraftLive, discardDraft, toast, lane, addLane, removeLane, useSlotSet, todayNet, runPreset, runSlotSet, setLaneOn, laneNow, strategyOf, slotStats, toYocto, fmtN as fmtNear } from '../game.svelte'
 
   const WINDOW = 60
-  // replays count chips of 0.01 NEAR and pay the contract's fee on every bet
+  // replays count chips of 0.01 NEAR (in steps of 0.001) and pay the contract's fee on every bet
   const fee = () => game.params?.fee_bps ?? 0
   const need = () => game.params?.streak_min ?? 3 // wins in a row before a win mines
   /** win runs by length: 1, 2, 3, 4, 5+ */
@@ -109,19 +109,25 @@
     commit()
   }
   function use(i: number) { game.ap.sel = target; lane().draft = structuredClone(PRESETS[i].rules); commit(); toast('info', `${PRESETS[i].name} opened in the editor for ${lane().name}. Press Save & run to use it.`) }
-  const fmtN = (v: number) => (v / 100).toLocaleString('en-US', { maximumFractionDigits: 2 })
-  const FIXED = [1, 2, 5, 10, 20, 50, 100]
-  const PCTS = [1, 2, 5, 10, 25, 50]
-  const BASES = [1, 2, 5, 10]
-  const CODE: Record<Unit, string> = { fixed: 'f', pct: 'p', martingale: 'm', paroli: 'r' }
-  const UNIT: Record<string, Unit> = { f: 'fixed', p: 'pct', m: 'martingale', r: 'paroli' }
-  function setStake(i: number, v: string) {
-    const [u, n] = v.split(':')
-    lane().draft[i].unit = UNIT[u]
-    lane().draft[i].amount = Number(n)
+  const fmtN = (v: number) => (v / 100).toLocaleString('en-US', { maximumFractionDigits: 3 })
+  // the stake: a typed amount (NEAR, or % for "of my balance") + a method from the list
+  const amtShown = (r: Rule) => (r.unit === 'pct' ? String(r.amount) : String(Math.round(r.amount * 10) / 1000))
+  function setAmount(i: number, el: HTMLInputElement) {
+    const r = lane().draft[i]
+    const v = Number(el.value)
+    const n = Number.isFinite(v) ? v : 0
+    // NEAR -> chips of 0.01 in steps of 0.001, at least the smallest bet; % -> whole 1..100
+    r.amount = r.unit === 'pct' ? Math.max(1, Math.min(MAX_PCT, Math.round(n))) : Math.max(1, toStep(n * 100))
+    el.value = amtShown(r) // show what was kept (e.g. 0 -> 0.01) even when the rule didn't change
     commit()
   }
-  const has = (r: Rule, unit: Unit, list: number[]) => r.unit !== unit || list.includes(r.amount)
+  function setUnit(i: number, u: Unit) {
+    const r = lane().draft[i]
+    // NEAR and % don't convert: switching between them starts from 0.1 NEAR / 5%
+    if ((u === 'pct') !== (r.unit === 'pct')) r.amount = u === 'pct' ? 5 : 10
+    r.unit = u
+    commit()
+  }
   const net = (b: { end: number; start: number }) => b.end - b.start
   const tone = (v: number) => (v > 0 ? 'good' : v < 0 ? 'burn' : '')
   const signed = (v: number) => (v > 0 ? '+' : v < 0 ? '−' : '±') + fmtN(Math.abs(v))
@@ -324,24 +330,15 @@
               {/if}
               {#if r.pick !== 'skip'}
                 <span class="w">with</span>
-                <select aria-label="Stake" value={`${CODE[r.unit]}:${r.amount}`} onchange={e => setStake(i, (e.currentTarget as HTMLSelectElement).value)}>
-                  <optgroup label="The same amount every time">
-                    {#each FIXED as n}<option value={`f:${n}`}>{chipsText(n)}</option>{/each}
-                    {#if !has(r, 'fixed', FIXED)}<option value={`f:${r.amount}`}>{chipsText(r.amount)}</option>{/if}
-                  </optgroup>
-                  <optgroup label="Share of my balance">
-                    {#each PCTS as n}<option value={`p:${n}`}>{n}% of balance</option>{/each}
-                    {#if !has(r, 'pct', PCTS)}<option value={`p:${r.amount}`}>{r.amount}% of balance</option>{/if}
-                  </optgroup>
-                  <optgroup label="Double after a loss (martingale)">
-                    {#each BASES as n}<option value={`m:${n}`}>{chipsText(n)}, doubled after each loss</option>{/each}
-                    {#if !has(r, 'martingale', BASES)}<option value={`m:${r.amount}`}>{chipsText(r.amount)}, doubled after each loss</option>{/if}
-                  </optgroup>
-                  <optgroup label="Double after a win (paroli)">
-                    {#each BASES as n}<option value={`r:${n}`}>{chipsText(n)}, doubled after each win</option>{/each}
-                    {#if !has(r, 'paroli', BASES)}<option value={`r:${r.amount}`}>{chipsText(r.amount)}, doubled after each win</option>{/if}
-                  </optgroup>
+                <span class="stakeset">
+                <input class="amt num" type="number" inputmode="decimal" aria-label="Stake amount" min={r.unit === 'pct' ? 1 : 0.01} max={r.unit === 'pct' ? MAX_PCT : undefined} step={r.unit === 'pct' ? 1 : 0.001} value={amtShown(r)} onchange={e => setAmount(i, e.currentTarget as HTMLInputElement)} />
+                <select aria-label="Stake method" value={r.unit} onchange={e => setUnit(i, (e.currentTarget as HTMLSelectElement).value as Unit)}>
+                  <option value="fixed">NEAR each time</option>
+                  <option value="pct">% of my balance</option>
+                  <option value="martingale">NEAR, ×2 after a loss</option>
+                  <option value="paroli">NEAR, ×2 after a win</option>
                 </select>
+                </span>
               {/if}
             </div>
             <div class="ops">
@@ -434,6 +431,9 @@
   .n { width: 24px; height: 24px; border-radius: 8px; display: grid; place-items: center; font-size: 12px; font-weight: 800; color: var(--brand); background: rgba(232, 182, 94, 0.1); margin-top: 6px }
   .sentence { display: flex; flex-wrap: wrap; gap: 6px 6px; align-items: center; font-size: 15px; line-height: 1.4 }
   .w { color: var(--fg-2) }
+  .stakeset { display: inline-flex; gap: 6px; align-items: center; max-width: 100%; min-width: 0 }
+  .stakeset select { min-width: 0; flex: 1 1 auto }
+  .amt { width: 84px; flex: none }
   .ops { display: flex; gap: 2px; align-self: start }
   .ic { width: 32px; height: 32px; display: grid; place-items: center; border-radius: 8px; border: 0; background: none; color: var(--fg-3); cursor: pointer }
   .ic:hover:not(:disabled) { background: var(--surface-2); color: var(--fg) }

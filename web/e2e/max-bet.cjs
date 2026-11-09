@@ -22,13 +22,15 @@ const outcome = p => p.waitForFunction(() => document.querySelector('.toast.err'
   await p.goto(URL, { waitUntil: 'networkidle2' })
   await p.waitForSelector('.answer.B', { timeout: 120_000 })
   await waitRound(p)
-  await p.tap('.answer.B'); await p.tap('.cta'); await outcome(p)
+  await p.tap('.answer.B'); await new Promise(r => setTimeout(r, 800)) // picking smooth-scrolls the Seal button into view; tap after it settles
+  await p.tap('.cta'); await outcome(p)
   if (await p.$('.toast.err')) throw new Error('first bet failed: ' + await p.$eval('.toast.err', e => e.innerText))
   const r0 = await p.evaluate(() => Number(window.befewer.game.status.commit_round))
   await waitRound(p, r0)
   await new Promise(r => setTimeout(r, 6000)) // let the page refresh the balance
   const before = await p.evaluate(() => window.befewer.game.me.balance)
   await p.tap('.answer.A')
+  await new Promise(r => setTimeout(r, 800)) // picking smooth-scrolls the Seal button into view; tap after it settles
   const max = await p.evaluate(() => { const b = [...document.querySelectorAll('.stake .seg button')].find(x => /^Max/.test(x.textContent)); b?.click(); return b?.textContent ?? null })
   console.log('game balance', near(before), '| max chip:', max, '| note:', await p.$eval('.stake', e => e.innerText.replace(/\s+/g, ' ')).catch(() => '-'))
   await p.tap('.cta'); await outcome(p)

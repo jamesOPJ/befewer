@@ -11,6 +11,7 @@ const URL = process.argv[2] || 'http://127.0.0.1:5043/'
   await p.waitForSelector('.answer.B')
   const ctaBefore = await p.$eval('.cta', e => e.textContent.trim())
   await p.tap('.answer.B')
+  await new Promise(r => setTimeout(r, 800)) // picking smooth-scrolls the Seal button into view; tap after it settles
   const ctaAfter = await p.$eval('.cta', e => e.textContent.trim())
   console.log('CTA before/after picking:', JSON.stringify(ctaBefore), '->', JSON.stringify(ctaAfter))
   await p.tap('.cta')

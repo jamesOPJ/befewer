@@ -37,8 +37,9 @@
   const newcomer = $derived(!game.session || !game.me || !game.me.registered)
   const balance = $derived(newcomer ? GUEST_GAME_NEAR : BigInt(game.me?.balance ?? '0'))
   const cap = $derived(game.params ? capFor(balance) : 0n)
-  // stakes are picked in NEAR, in steps of 0.01 (the smallest bet)
-  const capW = $derived(Math.floor(toNear(cap) * 100) / 100)
+  // stakes are picked in NEAR, in steps of 0.001 from the smallest bet (0.01) up, so two slots
+  // can bet 0.01 and 0.011: alone, that 0.001 is all a round costs besides the fees
+  const capW = $derived(Math.floor(toNear(cap) * 1000) / 1000)
   const minW = $derived(game.params ? toNear(game.params.min_stake) : 0.01)
 
   // crowd hints: what happened last time this question was asked + the recent smaller sides
@@ -50,7 +51,7 @@
   let stake = $state(0.01)
   $effect(() => { if (stake > capW && capW >= minW) stake = capW })
   const chips = $derived([0.01, 0.02, 0.05, 0.1, 0.25].filter(x => x < capW).slice(-3).concat(capW >= minW ? [capW] : []))
-  const stakeY = $derived(toYocto(Math.max(minW, Math.round((stake || 0) * 100) / 100)))
+  const stakeY = $derived(toYocto(Math.max(minW, Math.round((stake || 0) * 1000) / 1000)))
   const feeY = $derived(feeFor(stakeY))
 
   // mining: the streak this bet would complete if it wins, counted over finished rounds
@@ -163,7 +164,7 @@
               <button role="radio" aria-checked={stake === c} class:on={stake === c} onclick={() => (stake = c)}>{c === capW ? `Max ${c}` : c}</button>
             {/each}
           </div>
-          <label class="custom"><span class="sr">Custom stake</span><input type="number" min={minW} max={capW} step="0.01" bind:value={stake} inputmode="decimal" /> <span class="faint">NEAR</span></label>
+          <label class="custom"><span class="sr">Custom stake</span><input type="number" min={minW} max={capW} step="0.001" bind:value={stake} inputmode="decimal" /> <span class="faint">NEAR</span></label>
         </div>
       {/if}
 

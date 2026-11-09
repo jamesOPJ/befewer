@@ -1,6 +1,7 @@
 // Editing the draft must not change what the autopilot runs; "Put live" must.
 const puppeteer = require(process.env.PUPPETEER || 'puppeteer')
 const URL = (process.argv[2] || 'http://127.0.0.1:5043/') + '#/autopilot'
+const typeAmount = async (p, v) => { const el = await p.$('.rule input[aria-label="Stake amount"]'); await el.click({ clickCount: 3 }); await el.type(v); await p.keyboard.press('Tab'); await new Promise(r => setTimeout(r, 150)) }
 ;(async () => {
   const b = await puppeteer.launch({ headless: 'new', args: ['--no-sandbox'], protocolTimeout: 15 * 60_000 })
   const p = await b.newPage()
@@ -15,7 +16,7 @@ const URL = (process.argv[2] || 'http://127.0.0.1:5043/') + '#/autopilot'
   const live = () => p.$$eval('.live-rules li', els => els.map(e => e.textContent.trim()))
   console.log('migrated running rules:', await live(), '| dirty bar:', await p.$eval('.draftbar', e => e.className.includes('dirty')))
   // edit the draft: stake 2 -> 50
-  await p.select('.rule select[aria-label="Stake"]', 'f:50')
+  await typeAmount(p, '0.5')
   console.log('after editing draft -> running:', await live(), '| dirty:', await p.$eval('.draftbar', e => e.className.includes('dirty')))
   console.log('compare line:', (await p.$eval('.vs-live', e => e.innerText)).replace(/\s+/g, ' '))
   // the autopilot must bet with the RUNNING rules (2), not the draft (50)

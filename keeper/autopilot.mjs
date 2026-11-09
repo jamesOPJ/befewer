@@ -26,12 +26,11 @@ import { parseArgs } from 'node:util'
 import tlock from 'tlock-js'
 import { Account, KeyPairSigner } from 'near-api-js'
 import { provider, view, newSalt, commitHash, NEAR, fmtN, sleep, log } from './lib.mjs'
-import { decide, guard, meFrom, stakeFor, describe, normalizeRule, PRESETS, SLOT_SETS } from '../web/src/rules.ts'
+import { decide, guard, meFrom, stakeFor, chipsOf, yoctoOf, describe, normalizeRule, PRESETS, SLOT_SETS } from '../web/src/rules.ts'
 import { QUESTIONS, label } from '../web/src/questions.ts'
 
 const { timelockEncrypt, roundAt, roundTime, mainnetClient } = tlock
 const CONTRACT = process.env.FEWER_CONTRACT || 'v6.befewer.testnet'
-const CHIP = 10n ** 22n // 0.01 NEAR, the smallest bet and the strategies' unit
 const ROUND_RECORD = 291n * 10n ** 19n // a void round's record, split by stake (same as the page)
 const UPFRONT_PER_TGAS = 10n ** 21n // NEAR wants prepaid gas covered up front by the wallet
 const GAS_TOPUP = 5n * 10n ** 22n // 0.05 NEAR moved from the game to a wallet low on gas money
@@ -309,9 +308,9 @@ async function betTick(st) {
       if ('skip' in d) { log(`round ${r} · ${lane.name}: ${d.rule == null ? 'no rule fit' : `rule ${d.rule + 1} says skip`}, sits out`); continue }
       // this slot's settled winnings are booked by the bet itself, so they count
       const bal = BigInt(me.balance) + (s?.open ?? []).reduce((t, o) => t + BigInt(o.payout), 0n)
-      const chips = stakeFor(d.unit, d.amount, Number(bal / CHIP), mine, Number(capFor(bal) / CHIP))
+      const chips = stakeFor(d.unit, d.amount, chipsOf(bal), mine, chipsOf(capFor(bal)))
       if (chips < 1) { log(`round ${r} · ${lane.name}: balance ${fmtN(bal)} NEAR is too small to bet`); continue }
-      let amount = BigInt(chips) * CHIP
+      let amount = yoctoOf(chips)
       if (amount < BigInt(params.min_stake)) amount = BigInt(params.min_stake)
       const fee = (amount * BigInt(params.fee_bps)) / 10000n
       const salt = newSalt()

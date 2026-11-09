@@ -16,7 +16,8 @@ export type Cond =
   | { kind: 'mine'; result: 'won' | 'lost' | 'void' } // my most recent settled bet
 /** 'loop' = follow `pattern` (e.g. "AAB") by round number: round r bets pattern[r mod length]. */
 export type Pick = 'A' | 'B' | 'same' | 'other' | 'random' | 'loop' | 'skip'
-/** Amounts count chips of 0.01 NEAR (the smallest bet).
+/** Amounts count chips of 0.01 NEAR (the smallest bet), in steps of 0.1 chip = 0.001 NEAR, so
+ *  two slots can stake 0.01 and 0.011: the contract takes any amount from the smallest bet up.
  *  fixed = N chips every time (DCA); pct = share of balance; martingale = base, doubled after
  *  each loss in a row; paroli = base, doubled after each win, back to base after 3 wins. */
 export type Unit = 'fixed' | 'pct' | 'martingale' | 'paroli'
@@ -31,6 +32,12 @@ export const STORAGE_CHIPS = 1
 export const LOPSIDED = 0.3
 export const CLOSE = 0.4
 const MAX_DOUBLINGS = 6
+/** Round chips down to a whole step (0.001 NEAR). The epsilon absorbs float noise (1.1 * 10 = 11.000000000000002). */
+export const toStep = (chips: number) => Math.floor(chips * 10 + 1e-6) / 10
+const STEP_YOCTO = 10n ** 21n
+/** yocto -> chips, rounded down to a step; chips -> yocto. */
+export const chipsOf = (yocto: bigint) => Number(yocto / STEP_YOCTO) / 10
+export const yoctoOf = (chips: number) => BigInt(Math.round(chips * 10)) * STEP_YOCTO
 
 /** My own recent record: the last settled bet, the current run of wins or losses (voids don't
  *  break it) and the round of my most recent loss. */
@@ -70,18 +77,18 @@ export function normalizeRule(r: any): Rule {
 }
 
 /** The most a balance of `bal` chips can stake: stake + fee + storage must fit in it. */
-export const maxStake = (bal: number, feeBps = 500) => Math.max(0, Math.floor(((bal - STORAGE_CHIPS) * 10000) / (10000 + feeBps)))
+export const maxStake = (bal: number, feeBps = 500) => Math.max(0, toStep(((bal - STORAGE_CHIPS) * 10000) / (10000 + feeBps)))
 
 /** Chips a rule would stake with balance `bal` (in chips), at most `cap` (what the balance can
  *  pay; the live autopilot passes the exact figure). 0 = can't bet. */
 export function stakeFor(unit: Unit, amount: number, bal: number, me: Me = NOBODY, cap = maxStake(bal)): number {
   if (cap < 1) return 0
   let want: number
-  if (unit === 'pct') want = Math.floor((bal * Math.max(1, Math.min(MAX_PCT, amount))) / 100)
-  else if (unit === 'martingale') want = Math.floor(amount) * 2 ** Math.min(me.losses, MAX_DOUBLINGS)
-  else if (unit === 'paroli') want = Math.floor(amount) * 2 ** (me.wins % 3)
-  else want = Math.floor(amount)
-  return Math.max(1, Math.min(want, cap))
+  if (unit === 'pct') want = toStep((bal * Math.max(1, Math.min(MAX_PCT, amount))) / 100)
+  else if (unit === 'martingale') want = toStep(toStep(amount) * 2 ** Math.min(me.losses, MAX_DOUBLINGS))
+  else if (unit === 'paroli') want = toStep(toStep(amount) * 2 ** (me.wins % 3))
+  else want = toStep(amount)
+  return Math.max(1, Math.min(want, toStep(cap)))
 }
 
 export interface Lookup {
@@ -166,7 +173,7 @@ export function decide(rules: Rule[], r: number, L: Lookup, me: Me = NOBODY): De
     } else if (pick === 'A' || pick === 'B') side = pick
     else if (pick === 'random' || !m.side) side = coin(r, i)
     else side = pick === 'same' ? m.side : m.side === 'A' ? 'B' : 'A'
-    const amt = unit === 'pct' ? Math.max(1, Math.min(MAX_PCT, Math.round(amount))) : Math.max(1, Math.floor(amount))
+    const amt = unit === 'pct' ? Math.max(1, Math.min(MAX_PCT, Math.round(amount))) : Math.max(1, toStep(amount))
     return { side, unit, amount: amt, rule: i }
   }
   return { skip: true, rule: null }
@@ -267,8 +274,8 @@ export function describe(r: Rule, i = 1): string {
   const pick = { same: 'that same side', other: 'the other side', A: 'A', B: 'B', random: 'a random side' }[r.pick]
   return `${cond} → bet ${pick}, ${stakeText(r.unit, r.amount)}`
 }
-/** chips (0.01 NEAR each) -> "0.05 NEAR" */
-export const chipsText = (n: number) => `${(n / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} NEAR`
+/** chips (0.01 NEAR each) -> "0.05 NEAR", "0.011 NEAR" */
+export const chipsText = (n: number) => `${(n / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 3 })} NEAR`
 export function stakeText(unit: Unit, amount: number): string {
   if (unit === 'pct') return `${amount}% of balance`
   if (unit === 'martingale') return `${chipsText(amount)}, doubled after each loss`
@@ -286,8 +293,8 @@ export type SlotSet = { name: string; about: string; slots: { name: string; rule
 const loop = (pattern: string, rest = false, amount = 1): Rule => ({ cond: { kind: 'always' }, pick: 'loop', unit: 'fixed', amount, pattern, rest })
 const SEQ8 = ['AAA', 'AAB', 'ABA', 'ABB', 'BAA', 'BAB', 'BBA', 'BBB']
 export const SLOT_SETS: SlotSet[] = [
-  { name: 'A and B', about: 'Slot 0 always bets A, slot 1 always B, 0.01 NEAR each. One of them always rides the winning side, so you mine whenever a side wins 3+ in a row. Costs both fees every round.',
-    slots: [{ name: 'Always A', rules: [loop('A')] }, { name: 'Always B', rules: [loop('B')] }] },
+  { name: 'A and B', about: 'Slot 0 always bets 0.01 NEAR on A, slot 1 always 0.011 on B. One of them always rides the winning side, so you mine whenever a side wins 3+ in a row. The 0.001 gap means a round never ties on your bets alone: if nobody else plays, A is smaller and slot 0 wins every round. Costs both fees every round.',
+    slots: [{ name: 'Always A', rules: [loop('A')] }, { name: 'Always B', rules: [loop('B', false, 1.1)] }] },
   { name: 'All 8 three-round sequences', about: 'Eight slots follow AAA, AAB, … BBB, 0.01 NEAR each; after a loss a slot waits for the next 3-round cycle. Every cycle, exactly one slot wins three in a row.',
     slots: SEQ8.map(p => ({ name: p, rules: [loop(p, true)] })) },
 ]

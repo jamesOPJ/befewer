@@ -23,7 +23,7 @@
     hover = Math.max(1, Math.min(pts.length - 1, i))
   }
   const step = $derived(hover != null ? curve[hover - 1] : null)
-  const fmtN = (v: number) => (v / 100).toLocaleString('en-US', { maximumFractionDigits: 2 })
+  const fmtN = (v: number) => (v / 100).toLocaleString('en-US', { maximumFractionDigits: 3 })
 </script>
 
 <div class="eq" bind:clientWidth={w}>

@@ -31,6 +31,9 @@ const sleep = ms => new Promise(r => setTimeout(r, ms))
   const acc = await p.evaluate(() => JSON.parse(localStorage.getItem(Object.keys(localStorage).find(k => k.startsWith('fewer.session.')))).accountId)
   let me = await view('get_player', { account_id: acc })
   console.log('slots on chain:', JSON.stringify(me.slots.map(s => ({ slot: s.slot, open: s.open.map(o => ({ r: o.round, side: o.side, amt: o.amount })) }))))
+  // A and B stakes 0.01 and 0.011, so the two bets never tie when nobody else plays
+  const amt = n => me.slots.find(s => s.slot === n)?.open[0]?.amount
+  if (amt(0) !== String(10n ** 22n) || amt(1) !== String(11n * 10n ** 21n)) { console.error(`E2E FAILED: A and B must stake 0.01 and 0.011 NEAR, got ${amt(0)} and ${amt(1)}`); process.exitCode = 1 }
   // wait for the reveal window: the page reveals both bets itself (before the keeper's 30 s grace)
   const st = await view('get_status', {})
   const r = Number(me.slots[0].open[0]?.round)

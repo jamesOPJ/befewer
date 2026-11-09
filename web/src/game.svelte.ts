@@ -5,7 +5,7 @@ import {
 } from './chain'
 import * as H from './history'
 import { label } from './questions'
-import { decide, guard, normalizeRule, stakeFor, meFrom, PRESETS, SLOT_SETS, type Rule, type Lookup } from './rules'
+import { decide, guard, normalizeRule, stakeFor, meFrom, chipsOf, yoctoOf, PRESETS, SLOT_SETS, type Rule, type Lookup } from './rules'
 import * as W from './wallet'
 
 export type Side = 'A' | 'B'
@@ -779,13 +779,13 @@ export async function autopilotTick() {
         apLog(r, 'skip', tag + (d.rule == null ? 'No rule fit, so it skipped.' : `Rule ${d.rule + 1} says skip.`), i)
         continue
       }
-      // the autopilot counts in chips of 0.01 NEAR (the smallest bet); this slot's settled
+      // the autopilot counts in chips of 0.01 NEAR (the smallest bet), in steps of 0.001; this slot's settled
       // winnings are booked by the bet itself, so they count
       const pend = game.me!.slots.find(s => s.slot === slot)?.open.reduce((t, o) => t + BigInt(o.payout), 0n) ?? 0n
       const balY = BigInt(game.me!.balance) + pend
-      const chips = stakeFor(d.unit, d.amount, Number(balY / CHIP), me, Number(capFor(balY) / CHIP))
+      const chips = stakeFor(d.unit, d.amount, chipsOf(balY), me, chipsOf(capFor(balY)))
       if (chips < 1) { apLog(r, 'skip', `${tag}Balance too small to bet: ${fmtN(balY)} NEAR, and the smallest bet needs about ${fmtN(minToBet())} with its fee and storage.`, i); continue }
-      const placed = await placeBet(d.side, BigInt(chips) * CHIP, 'autopilot', slot)
+      const placed = await placeBet(d.side, yoctoOf(chips), 'autopilot', slot)
       apLog(placed.round, 'bet', `${tag}Rule ${d.rule + 1}: ${fmtN(placed.amount)} NEAR on ${label(placed.round, d.side)} (${d.side}).`, i)
     } catch (e: any) {
       apLog(r, 'err', tag + String(e.message || e), i)

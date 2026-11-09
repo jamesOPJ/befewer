@@ -1,7 +1,7 @@
 // node --test web/test/rules.test.ts   (Node 22+ strips the types)
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { decide, backtest, runsAtLeast, cleanPattern, SLOT_SETS, guard, coin, stakeFor, maxStake, normalizeRule, meFrom, NOBODY, PRESETS, type Lookup, type Outcome, type Rule } from '../src/rules.ts'
+import { decide, backtest, runsAtLeast, cleanPattern, SLOT_SETS, guard, coin, stakeFor, maxStake, normalizeRule, meFrom, NOBODY, PRESETS, chipsText, chipsOf, yoctoOf, type Lookup, type Outcome, type Rule } from '../src/rules.ts'
 
 const Q = 100 // questions in the list
 function history(outcomes: Record<number, Outcome>, splits: Record<number, number> = {}): Lookup {
@@ -63,13 +63,36 @@ test('stake is 1..100% of balance, at most what the balance pays with the fee an
   assert.equal((decide([{ cond: { kind: 'always' }, pick: 'A', unit: 'pct', amount: 150 }], 1, history({})) as any).amount, 100)
   assert.equal((decide([{ cond: { kind: 'always' }, pick: 'A', unit: 'pct', amount: 0 }], 1, history({})) as any).amount, 1)
   assert.equal(stakeFor('fixed', 10, 1000), 10)
-  assert.equal(maxStake(1000), 951, '(1000 - 1 chip of storage) / 1.05 for the 5% fee')
-  assert.equal(stakeFor('fixed', 2000, 1000), 951, 'a stake never exceeds what the balance can pay')
+  assert.equal(maxStake(1000), 951.4, '(1000 - 1 chip of storage) / 1.05 for the 5% fee, down to a 0.001 NEAR step')
+  assert.equal(stakeFor('fixed', 2000, 1000), 951.4, 'a stake never exceeds what the balance can pay')
   assert.equal(stakeFor('pct', 10, 1000), 100)
-  assert.equal(stakeFor('pct', 100, 1000), 951, 'all in = everything the balance can pay')
-  assert.equal(stakeFor('fixed', 10, 3), 1, '3 chips still pay the smallest bet')
+  assert.equal(stakeFor('pct', 100, 1000), 951.4, 'all in = everything the balance can pay')
+  assert.equal(stakeFor('fixed', 10, 3), 1.9, '3 chips pay a bet of (3 - 1) / 1.05, down to a step')
   assert.equal(stakeFor('fixed', 1, 2), 0, '2 chips do not cover a chip, its fee and the storage')
   assert.equal(stakeFor('fixed', 10, 1000, NOBODY, 3), 3, 'the live autopilot passes the exact cap')
+})
+
+test('stakes go in steps of 0.001 NEAR, so two slots can bet 0.01 and 0.011', () => {
+  assert.equal(stakeFor('fixed', 1.1, 1000), 1.1)
+  assert.equal(stakeFor('fixed', 1.15, 1000), 1.1, 'rounded down to a step')
+  assert.equal((decide([{ cond: { kind: 'always' }, pick: 'B', unit: 'fixed', amount: 1.1 }], 1, history({})) as any).amount, 1.1)
+  assert.equal(stakeFor('martingale', 1.1, 1000, { last: null, wins: 0, losses: 2 }), 4.4)
+  assert.equal(stakeFor('pct', 10, 12.3), 1.2)
+  assert.equal(chipsText(1.1), '0.011 NEAR')
+  assert.equal(chipsText(5), '0.05 NEAR')
+  assert.equal(yoctoOf(1.1), 11n * 10n ** 21n)
+  assert.equal(chipsOf(11n * 10n ** 21n + 999n), 1.1, 'yocto -> chips rounds down to a step')
+  assert.equal(yoctoOf(stakeFor('fixed', 1.1, chipsOf(10n ** 24n))), 11n * 10n ** 21n, '1 NEAR balance: the bet is exactly 0.011 NEAR')
+})
+
+test('A and B: alone, the two slots never tie, so slot 0 (the smaller bet, on A) wins every round', () => {
+  const set = SLOT_SETS.find(x => x.name === 'A and B')!
+  const [a, b] = set.slots.map(s => decide(s.rules, 7, history({})) as any)
+  assert.equal(a.side, 'A')
+  assert.equal(b.side, 'B')
+  const [ya, yb] = [a, b].map(d => yoctoOf(stakeFor(d.unit, d.amount, 1000)))
+  assert.equal(ya, 10n ** 22n, 'slot 0 bets the smallest bet, 0.01 NEAR')
+  assert.equal(yb - ya, 10n ** 21n, 'slot 1 bets 0.001 NEAR more, so A is the smaller side')
 })
 
 test('fixed stakes do not compound (DCA)', () => {
@@ -215,7 +238,7 @@ test('meFrom counts the current run and skips refunds', () => {
 test('martingale doubles after each loss and resets after a win; paroli rides 3 wins', () => {
   const m = (losses: number, bal = 1000) => stakeFor('martingale', 2, bal, { last: null, wins: 0, losses })
   assert.deepEqual([m(0), m(1), m(2), m(3)], [2, 4, 8, 16])
-  assert.equal(m(9, 100), 94, 'six doublings of 2 = 128, more than 100 chips can pay: capped at 94')
+  assert.equal(m(9, 100), 94.2, 'six doublings of 2 = 128, more than 100 chips can pay: capped at 94.2')
   const p = (wins: number) => stakeFor('paroli', 5, 1000, { last: null, wins, losses: 0 })
   assert.deepEqual([p(0), p(1), p(2), p(3)], [5, 10, 20, 5])
   // replay: always A, martingale from 2; outcomes B, B, A, B -> stakes 2, 4, 8, then back to 2 after the win
