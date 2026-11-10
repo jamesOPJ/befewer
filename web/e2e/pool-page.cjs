@@ -32,8 +32,9 @@ const W = Number(process.argv[3] || 390)
     if (Math.abs(left - held.nums[6]) > 0.0006) { console.error(`E2E FAILED: breakdown gives ${left}, table says ${held.nums[6]}`); process.exitCode = 1 }
   }
   // the card's headline is what can be spent; books − spendable = the part printed as held back, exactly as printed
-  const card = await p.$eval('.block', el => ({ eyebrow: el.querySelector('.eyebrow').innerText, head: el.querySelector('.price').innerText, line: el.querySelector('.price + .small')?.innerText ?? '' }))
+  const card = await p.$eval('.block', el => ({ eyebrow: el.querySelector('.eyebrow').innerText, head: el.querySelector('.price').innerText, line: el.querySelector('.price + .small')?.innerText ?? '', links: [...el.querySelectorAll('a')].map(a => a.innerText.trim()) }))
   console.log('card:', JSON.stringify(card))
+  if (card.links.length !== 1) { console.error(`E2E FAILED: the treasury card should have one link to the books, has ${JSON.stringify(card.links)}`); process.exitCode = 1 }
   const num = t => parseFloat(t.replace(/,/g, ''))   // '14.42 NEAR' -> 14.42
   const m = /([\d,.]+) in its books, ([\d,.]+) of that/.exec(card.line)
   if (!/can be spent/i.test(card.eyebrow)) { console.error('E2E FAILED: the headline must be the spendable treasury'); process.exitCode = 1 }

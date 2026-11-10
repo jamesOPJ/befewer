@@ -162,7 +162,7 @@
     {:else}
       <p class="fine">Buying back: 1/365 of the treasury's spendable NEAR per day ({c2(cents(st.treasury_spendable))} ÷ 365 = {fmtN(perDay)} NEAR a day now), in buys of at least 0.1 NEAR; {fmtN(buyNow)} NEAR has built up for the next one.</p>
     {/if}
-    <p class="faint small">Collected so far: {fmtN(st.treasury_in, 2)} NEAR. <a href="#/pool" onclick={e => { e.preventDefault(); document.getElementById('books')?.scrollIntoView({ behavior: 'smooth' }) }}>Where it went</a></p>
+    {#if B(st.treasury_spendable) >= B(st.treasury)}<p class="faint small"><a href="#/pool" onclick={e => { e.preventDefault(); document.getElementById('books')?.scrollIntoView({ behavior: 'smooth' }) }}>Where it went</a></p>{/if}
   </section>
 
   <!-- the pool -->
@@ -294,6 +294,7 @@
   .block { padding: 18px; margin-bottom: 16px }
   .block h2 { font-size: 18px; margin: 0 0 12px }
   .held { margin-top: 18px; scroll-margin-top: 80px }
+  #books { scroll-margin-top: 76px } /* clears the fixed top bar when 'why' scrolls here */
   .held summary { cursor: pointer; font-weight: 700; font-size: 14.5px; color: var(--fg) }
   .top { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-wrap: wrap }
   .price { font-size: 28px; font-weight: 800; margin: 4px 0 2px }
