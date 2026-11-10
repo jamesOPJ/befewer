@@ -15,15 +15,15 @@ const W = Number(process.argv[3] || 390)
   await new Promise(r => setTimeout(r, 6000))
   const blocks = await p.$$eval('.block', bs => bs.map(x => x.innerText.replace(/\s+/g, ' ')))
   blocks.forEach((t, i) => console.log(`[${i}]`, t.slice(0, 420)))
-  const checks = await p.$$eval('.check', cs => cs.map(c => ({ ok: !c.classList.contains('bad'), t: c.innerText })))
+  const checks = await p.$$eval('.check', cs => cs.map(c => ({ ok: !c.classList.contains('bad'), t: c.textContent })))
   console.log('checks:', JSON.stringify(checks))
   if (checks.length !== 3 || checks.some(c => !c.ok)) { console.error('E2E FAILED: the books must add up (3 checks)'); process.exitCode = 1 }
   // why only part of the treasury can be spent: account NEAR minus the five rows = what the contract says it can spend
   const held = await p.evaluate(() => {
     const h = document.getElementById('held'); if (!h) return null
-    const t = h.nextElementSibling.nextElementSibling
-    const nums = [...t.querySelectorAll('td.r')].map(td => Number(td.innerText.replace(/[^0-9.]/g, '')))
-    return { title: h.innerText, nums }
+    const t = h.querySelector('table')   // inside a closed <details>: textContent, not innerText
+    const nums = [...t.querySelectorAll('td.r')].map(td => Number(td.textContent.replace(/[^0-9.]/g, '')))
+    return { title: h.querySelector('summary').textContent, open: h.open, nums }
   })
   console.log('held:', JSON.stringify(held))
   if (!held || held.nums.length !== 7) { console.error('E2E FAILED: no spendable breakdown'); process.exitCode = 1 }
@@ -38,6 +38,10 @@ const W = Number(process.argv[3] || 390)
   const m = /([\d,.]+) in its books, ([\d,.]+) of that/.exec(card.line)
   if (!/can be spent/i.test(card.eyebrow)) { console.error('E2E FAILED: the headline must be the spendable treasury'); process.exitCode = 1 }
   if (m && Math.round((num(m[1]) - num(card.head) - num(m[2])) * 100) !== 0) { console.error('E2E FAILED: card numbers do not subtract'); process.exitCode = 1 }
+  // the card's "why" link opens the folded breakdown
+  await p.evaluate(() => [...document.querySelectorAll('.block a')].find(a => a.textContent.trim() === 'why')?.click())
+  await new Promise(r => setTimeout(r, 1000))
+  if (held && held.title.includes('Why') && !(await p.$eval('#held', d => d.open))) { console.error('E2E FAILED: "why" did not open the breakdown'); process.exitCode = 1 }
   if (/1\/365 of the treasury per day|1\/365 of its NEAR/.test(blocks.join(' '))) { console.error('E2E FAILED: 1/365 must say of the spendable NEAR'); process.exitCode = 1 }
   if (/1 BEFEWER = —/.test(blocks[0])) { console.error('E2E FAILED: no pool price'); process.exitCode = 1 }
   const width = await p.evaluate(() => document.documentElement.scrollWidth)

@@ -41,11 +41,11 @@
     if (!snap) return null
     const s = snap.st
     const rows = [
-      { k: "Players' game balances", v: B(s.balances_total), note: 'theirs, to withdraw any time' },
-      { k: 'Bets in rounds not settled yet', v: B(s.escrow), note: 'paid back or paid out when the round settles' },
-      { k: 'Storage deposits players paid', v: B(s.storage_held) + B(s.storage_fees), note: 'for their bets and slots; refunded to them later' },
-      { k: `Storage for ${Math.round(snap.bytes / 1000).toLocaleString('en-US')} kB of game data`, v: BigInt(snap.bytes) * BYTE_COST, note: "NEAR locks 0.01 NEAR per kB while the data exists (mostly round history); the bytes players' deposits pay for are counted again here, to be safe" },
-      { k: 'Safety reserve', v: SAFETY_RESERVE, note: 'never spent' },
+      { k: "Players' balances", v: B(s.balances_total) },
+      { k: 'Bets not settled yet', v: B(s.escrow) },
+      { k: "Players' storage deposits", v: B(s.storage_held) + B(s.storage_fees) },
+      { k: `Storage, ${Math.round(snap.bytes / 1000).toLocaleString('en-US')} kB of data`, v: BigInt(snap.bytes) * BYTE_COST },
+      { k: 'Reserve', v: SAFETY_RESERVE },
     ]
     const owed = rows.reduce((t, r) => t + r.v, 0n)
     const left = snap.amount > owed ? snap.amount - owed : 0n
@@ -115,11 +115,11 @@
 
   // treasury NEAR: everything collected = what it went to
   const nearRows = $derived(st && dex ? [
-    { k: 'Put into the pool', v: B(dex.near_amount), note: 'when it opened' },
-    { k: 'Pool setup', v: open || dex.step > 0 ? GRADUATION_COST : 0n, note: 'storage at wrap.near and Ref Finance (fixed in the contract)' },
+    { k: 'Put into the pool', v: B(dex.near_amount), note: '' },
+    { k: 'Pool setup', v: open || dex.step > 0 ? GRADUATION_COST : 0n, note: '' },
     { k: 'Spent on buybacks', v: B(dex.bought_near), note: '' },
-    { k: 'Waiting as wNEAR', v: B(dex.held_wnear), note: 'the pool did not take it yet; next buyback uses it first' },
-    { k: 'In the treasury now', v: B(st.treasury), note: `${fmtN(st.treasury_spendable)} can be spent now (why: below)` },
+    { k: 'Waiting as wNEAR', v: B(dex.held_wnear), note: 'next buyback uses it first', hideZero: true },
+    { k: 'In the treasury now', v: B(st.treasury), note: '' },
   ] : [])
   const nearLeft = $derived(st ? B(st.treasury_in) - nearRows.reduce((t, r) => t + r.v, 0n) : 0n)
 
@@ -144,7 +144,7 @@
   <section class="card block">
     <div class="eyebrow">Treasury · can be spent</div>
     <div class="price num gold">{c2(cents(st.treasury_spendable))} <span class="faint">NEAR</span></div>
-    {#if B(st.treasury_spendable) < B(st.treasury)}<div class="faint small">{c2(cents(st.treasury))} in its books, {c2(cents(st.treasury) - cents(st.treasury_spendable))} of that covers storage and the reserve · <a href="#/pool" onclick={e => { e.preventDefault(); document.getElementById('held')?.scrollIntoView({ behavior: 'smooth' }) }}>why</a></div>{/if}
+    {#if B(st.treasury_spendable) < B(st.treasury)}<div class="faint small">{c2(cents(st.treasury))} in its books, {c2(cents(st.treasury) - cents(st.treasury_spendable))} of that covers storage and the reserve · <a href="#/pool" onclick={e => { e.preventDefault(); const d = document.getElementById('held') as HTMLDetailsElement | null; if (d) { d.open = true; d.scrollIntoView({ behavior: 'smooth' }) } }}>why</a></div>{/if}
     {#if !open}
       <div class="bar" aria-label="{Math.floor(gradPct)}% of the way to opening the pool"><span style="width:{gradPct}%"></span></div>
       <p class="fine">{c2(cents(st.treasury_spendable))} of {fmtN(pr.graduate_at)} NEAR ({Math.floor(gradPct)}%). At {fmtN(pr.graduate_at)} NEAR the contract opens a BEFEWER/NEAR pool on Ref Finance with all of it, plus as many new BEFEWER as have been mined; anyone can push it through the 5 steps{etaTo(B(pr.graduate_at))}.</p>
@@ -226,31 +226,32 @@
   <!-- treasury NEAR -->
   <section class="card block" id="books">
     <h2>Where the treasury's NEAR went</h2>
-    <p class="fine">It collects {100 - (pr.reveal_bounty_bps ?? 0) / 100}% of every bet's fee (the other {(pr.reveal_bounty_bps ?? 0) / 100}% pays whoever reveals the bet: the player's own page or a keeper), the bigger side's extra stake, and bets that were never opened. Players' balances are never part of it.</p>
+    <p class="fine">From {100 - (pr.reveal_bounty_bps ?? 0) / 100}% of each bet's fee, the bigger side's extra stake and bets never opened. Players' balances are separate.</p>
     <table class="tab books">
       <tbody>
         <tr class="sum"><td>Collected so far</td><td class="r num">{fmtN(st.treasury_in)}</td></tr>
-        {#each nearRows as r}
+        {#each nearRows.filter(r => !r.hideZero || r.v > 0n) as r}
           <tr><td>{r.k}{#if r.note}<span class="faint sub">{r.note}</span>{/if}</td><td class="r num">{fmtN(r.v)}</td></tr>
         {/each}
       </tbody>
     </table>
-    <p class="check small" class:bad={nearLeft !== 0n}>{nearLeft === 0n ? '✓ The rows add up to what was collected.' : `${fmtN(nearLeft)} NEAR is not explained by the rows above.`}</p>
+    <p class="check small" class:bad={nearLeft !== 0n}>{nearLeft === 0n ? '✓ Adds up.' : `${fmtN(nearLeft)} NEAR is not explained by the rows above.`}</p>
 
     {#if held && snap}
-      <h3 id="held">{held.gap > 0n ? `Why only ${fmtN(held.spend, 2)} of the ${fmtN(held.treasury, 2)} can be spent` : 'All of the treasury can be spent'}</h3>
-      <p class="fine">The contract's account holds more NEAR than the treasury, but first it sets aside what it owes players and what NEAR locks for its storage. The treasury spends what is left, never more than its own {fmtN(held.treasury, 2)}.</p>
-      <table class="tab books">
-        <tbody>
-          <tr class="sum"><td>NEAR in the contract's account</td><td class="r num">{fmtN(snap.amount)}</td></tr>
-          {#each held.rows as r}
-            <tr><td>{r.k}<span class="faint sub">{r.note}</span></td><td class="r num">−{fmtN(r.v)}</td></tr>
-          {/each}
-          <tr class="sum"><td>Left to spend<span class="faint sub">{held.left > held.treasury ? `more than the treasury, so all ${fmtN(held.treasury)} of it can be spent` : 'buybacks spend 1/365 of this a day'}</span></td><td class="r num">{fmtN(held.spend)}</td></tr>
-        </tbody>
-      </table>
-      {#if held.gap > 0n}<p class="fine">So {fmtN(held.gap, 2)} NEAR of the treasury cannot be spent: the storage and the reserve need more NEAR than the contract started with, and the treasury covers the rest (round history is paid from it).</p>{/if}
-      <p class="check small" class:bad={!held.ok}>{held.ok ? "✓ Same as the contract's own figure for what the treasury can spend." : `The contract says ${fmtN(snap.st.treasury_spendable)} can be spent, not ${fmtN(held.spend)}: reload in a few seconds.`}</p>
+      <details class="held" id="held">
+        <summary>{held.gap > 0n ? `Only ${fmtN(held.spend, 2)} of it can be spent. Why?` : 'All of it can be spent.'}</summary>
+        <table class="tab books">
+          <tbody>
+            <tr class="sum"><td>The contract's NEAR</td><td class="r num">{fmtN(snap.amount)}</td></tr>
+            {#each held.rows as r}
+              <tr><td>{r.k}</td><td class="r num">−{fmtN(r.v)}</td></tr>
+            {/each}
+            <tr class="sum"><td>Can be spent</td><td class="r num">{fmtN(held.spend)}</td></tr>
+          </tbody>
+        </table>
+        {#if held.gap > 0n}<p class="fine">NEAR locks 0.01 per kB of data, and the treasury pays for the round history: that and the reserve tie up {fmtN(held.gap, 2)} of its NEAR.</p>{/if}
+        <p class="check small" class:bad={!held.ok}>{held.ok ? '✓ Matches the contract.' : `The contract says ${fmtN(snap.st.treasury_spendable)}: reload in a few seconds.`}</p>
+      </details>
     {/if}
   </section>
 
@@ -286,7 +287,8 @@
   .ph p { margin: 4px 0 0 }
   .block { padding: 18px; margin-bottom: 16px }
   .block h2 { font-size: 18px; margin: 0 0 12px }
-  .block h3 { font-size: 15.5px; margin: 26px 0 0; scroll-margin-top: 80px }
+  .held { margin-top: 18px; scroll-margin-top: 80px }
+  .held summary { cursor: pointer; font-weight: 700; font-size: 14.5px; color: var(--fg) }
   .top { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-wrap: wrap }
   .price { font-size: 28px; font-weight: 800; margin: 4px 0 2px }
   .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px 18px; margin-top: 14px }
