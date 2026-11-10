@@ -32,6 +32,9 @@
   let snap = $state<{ amount: bigint; bytes: number; st: any } | null>(null)
   // Why only part of the treasury can be spent: the contract's spendable() takes from its account
   // everything it owes or must keep, and spends the rest, never more than the treasury.
+  // the treasury card rounds to cents first, so its three numbers subtract exactly as printed
+  const cents = (x: string | bigint) => (B(x) + 5n * 10n ** 21n) / 10n ** 22n
+  const c2 = (c: bigint) => (Number(c) / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
   const SAFETY_RESERVE = NEAR // the contract's SAFETY_RESERVE
   const BYTE_COST = 10n ** 19n // NEAR locks this much per byte of contract data (0.01 NEAR per kB)
   const held = $derived.by(() => {
@@ -139,12 +142,12 @@
 {:else}
   <!-- the treasury: the one place the site shows its NEAR -->
   <section class="card block">
-    <div class="eyebrow">Treasury</div>
-    <div class="price num gold">{fmtN(st.treasury, 2)} <span class="faint">NEAR</span></div>
-    {#if B(st.treasury_spendable) < B(st.treasury)}<div class="faint small">{fmtN(st.treasury_spendable, 2)} of it can be spent now · <a href="#/pool" onclick={e => { e.preventDefault(); document.getElementById('held')?.scrollIntoView({ behavior: 'smooth' }) }}>why not all of it</a></div>{/if}
+    <div class="eyebrow">Treasury · can be spent</div>
+    <div class="price num gold">{c2(cents(st.treasury_spendable))} <span class="faint">NEAR</span></div>
+    {#if B(st.treasury_spendable) < B(st.treasury)}<div class="faint small">{c2(cents(st.treasury))} in its books, {c2(cents(st.treasury) - cents(st.treasury_spendable))} of that covers storage and the reserve · <a href="#/pool" onclick={e => { e.preventDefault(); document.getElementById('held')?.scrollIntoView({ behavior: 'smooth' }) }}>why</a></div>{/if}
     {#if !open}
       <div class="bar" aria-label="{Math.floor(gradPct)}% of the way to opening the pool"><span style="width:{gradPct}%"></span></div>
-      <p class="fine">{fmtN(st.treasury_spendable, 2)} of {fmtN(pr.graduate_at)} NEAR ({Math.floor(gradPct)}%). At {fmtN(pr.graduate_at)} NEAR the contract opens a BEFEWER/NEAR pool on Ref Finance with all of it, plus as many new BEFEWER as have been mined; anyone can push it through the 5 steps{etaTo(B(pr.graduate_at))}.</p>
+      <p class="fine">{c2(cents(st.treasury_spendable))} of {fmtN(pr.graduate_at)} NEAR ({Math.floor(gradPct)}%). At {fmtN(pr.graduate_at)} NEAR the contract opens a BEFEWER/NEAR pool on Ref Finance with all of it, plus as many new BEFEWER as have been mined; anyone can push it through the 5 steps{etaTo(B(pr.graduate_at))}.</p>
       <ol class="steps">
         {#each ['Wrap the NEAR', 'Register at Ref Finance', 'Send the NEAR', 'Send the BEFEWER', 'Create the pool and add all the liquidity, in one go'] as s, i}
           <li class:done={dex.step > i} class:now={dex.step === i && dex.busy}>{s}</li>
@@ -154,9 +157,9 @@
       <p class="fine">Buybacks spend 1/365 of the treasury's spendable NEAR per day, in buys of at least 0.1 NEAR. With less than 0.1 NEAR to spend, the next one waits for more fees.</p>
     {:else if buyNow < MIN_BUYBACK}
       <div class="bar" aria-label="{Math.floor(sharePct)}% of the next buyback built up"><span style="width:{sharePct}%"></span></div>
-      <p class="fine">Buybacks spend 1/365 of the treasury's spendable NEAR per day ({fmtN(st.treasury_spendable, 2)} ÷ 365 = {fmtN(perDay)} NEAR a day now), in buys of at least 0.1 NEAR. {fmtN(buyNow)} of the next 0.1 NEAR has built up since the last one ({Math.floor(sharePct)}%); at today's treasury it is due in {hm(nextIn)}.</p>
+      <p class="fine">Buybacks spend 1/365 of the treasury's spendable NEAR per day ({c2(cents(st.treasury_spendable))} ÷ 365 = {fmtN(perDay)} NEAR a day now), in buys of at least 0.1 NEAR. {fmtN(buyNow)} of the next 0.1 NEAR has built up since the last one ({Math.floor(sharePct)}%); at today's treasury it is due in {hm(nextIn)}.</p>
     {:else}
-      <p class="fine">Buying back: 1/365 of the treasury's spendable NEAR per day ({fmtN(st.treasury_spendable, 2)} ÷ 365 = {fmtN(perDay)} NEAR a day now), in buys of at least 0.1 NEAR; {fmtN(buyNow)} NEAR has built up for the next one.</p>
+      <p class="fine">Buying back: 1/365 of the treasury's spendable NEAR per day ({c2(cents(st.treasury_spendable))} ÷ 365 = {fmtN(perDay)} NEAR a day now), in buys of at least 0.1 NEAR; {fmtN(buyNow)} NEAR has built up for the next one.</p>
     {/if}
     <p class="faint small">Collected so far: {fmtN(st.treasury_in, 2)} NEAR. <a href="#/pool" onclick={e => { e.preventDefault(); document.getElementById('books')?.scrollIntoView({ behavior: 'smooth' }) }}>Where it went</a></p>
   </section>

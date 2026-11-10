@@ -31,6 +31,13 @@ const W = Number(process.argv[3] || 390)
     const left = held.nums[0] - held.nums.slice(1, 6).reduce((a, b) => a + b, 0)
     if (Math.abs(left - held.nums[6]) > 0.0006) { console.error(`E2E FAILED: breakdown gives ${left}, table says ${held.nums[6]}`); process.exitCode = 1 }
   }
+  // the card's headline is what can be spent; books − spendable = the part printed as held back, exactly as printed
+  const card = await p.$eval('.block', el => ({ eyebrow: el.querySelector('.eyebrow').innerText, head: el.querySelector('.price').innerText, line: el.querySelector('.price + .small')?.innerText ?? '' }))
+  console.log('card:', JSON.stringify(card))
+  const num = t => parseFloat(t.replace(/,/g, ''))   // '14.42 NEAR' -> 14.42
+  const m = /([\d,.]+) in its books, ([\d,.]+) of that/.exec(card.line)
+  if (!/can be spent/i.test(card.eyebrow)) { console.error('E2E FAILED: the headline must be the spendable treasury'); process.exitCode = 1 }
+  if (m && Math.round((num(m[1]) - num(card.head) - num(m[2])) * 100) !== 0) { console.error('E2E FAILED: card numbers do not subtract'); process.exitCode = 1 }
   if (/1\/365 of the treasury per day|1\/365 of its NEAR/.test(blocks.join(' '))) { console.error('E2E FAILED: 1/365 must say of the spendable NEAR'); process.exitCode = 1 }
   if (/1 BEFEWER = —/.test(blocks[0])) { console.error('E2E FAILED: no pool price'); process.exitCode = 1 }
   const width = await p.evaluate(() => document.documentElement.scrollWidth)
