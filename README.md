@@ -12,7 +12,7 @@ NEAR **testnet** only.
 | Live demo | https://befewer.com (no wallet needed: a free testnet account is created on your first bet) |
 | Game + token contract | [`v6.befewer.testnet`](https://testnet.nearblocks.io/address/v6.befewer.testnet) (the BEFEWER NEP-141 token is the same account) |
 | Token/NEAR pool | Ref Finance testnet pool [#2911](https://testnet.ref.finance/pool/2911) on `ref-finance-101.testnet` |
-| Deployed code | sha256 `bac2340ec3321377010bfa66c2f08e254502614ed4f22933364e0d84c6fa56f7` = `contract/target/near/fewer.wasm` built from this repo |
+| Deployed code | sha256 `2d9879f22adb6cb512c4bffb2e33bda7a14ee1642a49c8fd523fc3ffe2d72aa8` = `contract/target/near/fewer.wasm` built from this repo |
 
 ## The problem
 
