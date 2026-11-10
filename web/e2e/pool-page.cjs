@@ -17,7 +17,21 @@ const W = Number(process.argv[3] || 390)
   blocks.forEach((t, i) => console.log(`[${i}]`, t.slice(0, 420)))
   const checks = await p.$$eval('.check', cs => cs.map(c => ({ ok: !c.classList.contains('bad'), t: c.innerText })))
   console.log('checks:', JSON.stringify(checks))
-  if (checks.length !== 2 || checks.some(c => !c.ok)) { console.error('E2E FAILED: the books must add up'); process.exitCode = 1 }
+  if (checks.length !== 3 || checks.some(c => !c.ok)) { console.error('E2E FAILED: the books must add up (3 checks)'); process.exitCode = 1 }
+  // why only part of the treasury can be spent: account NEAR minus the five rows = what the contract says it can spend
+  const held = await p.evaluate(() => {
+    const h = document.getElementById('held'); if (!h) return null
+    const t = h.nextElementSibling.nextElementSibling
+    const nums = [...t.querySelectorAll('td.r')].map(td => Number(td.innerText.replace(/[^0-9.]/g, '')))
+    return { title: h.innerText, nums }
+  })
+  console.log('held:', JSON.stringify(held))
+  if (!held || held.nums.length !== 7) { console.error('E2E FAILED: no spendable breakdown'); process.exitCode = 1 }
+  else {
+    const left = held.nums[0] - held.nums.slice(1, 6).reduce((a, b) => a + b, 0)
+    if (Math.abs(left - held.nums[6]) > 0.0006) { console.error(`E2E FAILED: breakdown gives ${left}, table says ${held.nums[6]}`); process.exitCode = 1 }
+  }
+  if (/1\/365 of the treasury per day|1\/365 of its NEAR/.test(blocks.join(' '))) { console.error('E2E FAILED: 1/365 must say of the spendable NEAR'); process.exitCode = 1 }
   if (/1 BEFEWER = —/.test(blocks[0])) { console.error('E2E FAILED: no pool price'); process.exitCode = 1 }
   const width = await p.evaluate(() => document.documentElement.scrollWidth)
   console.log(`page width ${width}/${W}`, width > W ? 'TOO WIDE' : 'ok'); if (width > W) process.exitCode = 1

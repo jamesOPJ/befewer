@@ -4,7 +4,7 @@
   import { onMount } from 'svelte'
   import Icon from '../lib/Icon.svelte'
   import { game, fmt, fmtN } from '../game.svelte'
-  import { view, viewOn, CONTRACT, GRADUATION_COST, MIN_BUYBACK, type BuybackV, type RefPool, type RoundV } from '../chain'
+  import { view, viewOn, provider, CONTRACT, NEAR, GRADUATION_COST, MIN_BUYBACK, type BuybackV, type RefPool, type RoundV } from '../chain'
   import * as H from '../history'
 
   const st = $derived(game.status)
@@ -22,7 +22,34 @@
       buys = await view<BuybackV[]>('get_buybacks')
       loadErr = ''
     } catch (e: any) { loadErr = String(e.message || e) }
+    try {
+      // the contract's account and its status read at the same block, so the deductions add up exactly
+      const acc: any = await (provider as any).query({ request_type: 'view_account', finality: 'final', account_id: CONTRACT })
+      const s: any = await provider.callFunction({ contractId: CONTRACT, method: 'get_status', args: {}, blockQuery: { blockId: acc.block_hash } } as any)
+      snap = { amount: BigInt(acc.amount), bytes: Number(acc.storage_usage), st: s }
+    } catch { /* the breakdown waits for the next try */ }
   }
+  let snap = $state<{ amount: bigint; bytes: number; st: any } | null>(null)
+  // Why only part of the treasury can be spent: the contract's spendable() takes from its account
+  // everything it owes or must keep, and spends the rest, never more than the treasury.
+  const SAFETY_RESERVE = NEAR // the contract's SAFETY_RESERVE
+  const BYTE_COST = 10n ** 19n // NEAR locks this much per byte of contract data (0.01 NEAR per kB)
+  const held = $derived.by(() => {
+    if (!snap) return null
+    const s = snap.st
+    const rows = [
+      { k: "Players' game balances", v: B(s.balances_total), note: 'theirs, to withdraw any time' },
+      { k: 'Bets in rounds not settled yet', v: B(s.escrow), note: 'paid back or paid out when the round settles' },
+      { k: 'Storage deposits players paid', v: B(s.storage_held) + B(s.storage_fees), note: 'for their bets and slots; refunded to them later' },
+      { k: `Storage for ${Math.round(snap.bytes / 1000).toLocaleString('en-US')} kB of game data`, v: BigInt(snap.bytes) * BYTE_COST, note: "NEAR locks 0.01 NEAR per kB while the data exists (mostly round history); the bytes players' deposits pay for are counted again here, to be safe" },
+      { k: 'Safety reserve', v: SAFETY_RESERVE, note: 'never spent' },
+    ]
+    const owed = rows.reduce((t, r) => t + r.v, 0n)
+    const left = snap.amount > owed ? snap.amount - owed : 0n
+    const treasury = B(s.treasury)
+    const spend = left < treasury ? left : treasury
+    return { rows, left, spend, treasury, gap: treasury - spend, ok: spend === B(s.treasury_spendable) }
+  })
   onMount(() => { load(); const t = setInterval(load, 15_000); return () => clearInterval(t) })
   $effect(() => { if (open && dex?.pool_id != null && !pool) load() })
 
@@ -89,7 +116,7 @@
     { k: 'Pool setup', v: open || dex.step > 0 ? GRADUATION_COST : 0n, note: 'storage at wrap.near and Ref Finance (fixed in the contract)' },
     { k: 'Spent on buybacks', v: B(dex.bought_near), note: '' },
     { k: 'Waiting as wNEAR', v: B(dex.held_wnear), note: 'the pool did not take it yet; next buyback uses it first' },
-    { k: 'In the treasury now', v: B(st.treasury), note: `${fmtN(st.treasury_spendable)} can be spent now` },
+    { k: 'In the treasury now', v: B(st.treasury), note: `${fmtN(st.treasury_spendable)} can be spent now (why: below)` },
   ] : [])
   const nearLeft = $derived(st ? B(st.treasury_in) - nearRows.reduce((t, r) => t + r.v, 0n) : 0n)
 
@@ -114,7 +141,7 @@
   <section class="card block">
     <div class="eyebrow">Treasury</div>
     <div class="price num gold">{fmtN(st.treasury, 2)} <span class="faint">NEAR</span></div>
-    {#if B(st.treasury_spendable) < B(st.treasury)}<div class="faint small">{fmtN(st.treasury_spendable, 2)} of it can be spent now</div>{/if}
+    {#if B(st.treasury_spendable) < B(st.treasury)}<div class="faint small">{fmtN(st.treasury_spendable, 2)} of it can be spent now · <a href="#/pool" onclick={e => { e.preventDefault(); document.getElementById('held')?.scrollIntoView({ behavior: 'smooth' }) }}>why not all of it</a></div>{/if}
     {#if !open}
       <div class="bar" aria-label="{Math.floor(gradPct)}% of the way to opening the pool"><span style="width:{gradPct}%"></span></div>
       <p class="fine">{fmtN(st.treasury_spendable, 2)} of {fmtN(pr.graduate_at)} NEAR ({Math.floor(gradPct)}%). At {fmtN(pr.graduate_at)} NEAR the contract opens a BEFEWER/NEAR pool on Ref Finance with all of it, plus as many new BEFEWER as have been mined; anyone can push it through the 5 steps{etaTo(B(pr.graduate_at))}.</p>
@@ -124,12 +151,12 @@
         {/each}
       </ol>
     {:else if neverBuys}
-      <p class="fine">Buybacks spend 1/365 of the treasury per day, in buys of at least 0.1 NEAR. With less than 0.1 NEAR to spend, the next one waits for more fees.</p>
+      <p class="fine">Buybacks spend 1/365 of the treasury's spendable NEAR per day, in buys of at least 0.1 NEAR. With less than 0.1 NEAR to spend, the next one waits for more fees.</p>
     {:else if buyNow < MIN_BUYBACK}
       <div class="bar" aria-label="{Math.floor(sharePct)}% of the next buyback built up"><span style="width:{sharePct}%"></span></div>
-      <p class="fine">Buybacks spend 1/365 of the treasury per day ({fmtN(perDay)} NEAR a day now), in buys of at least 0.1 NEAR. {fmtN(buyNow)} of the next 0.1 NEAR has built up since the last one ({Math.floor(sharePct)}%); at today's treasury it is due in {hm(nextIn)}.</p>
+      <p class="fine">Buybacks spend 1/365 of the treasury's spendable NEAR per day ({fmtN(st.treasury_spendable, 2)} ÷ 365 = {fmtN(perDay)} NEAR a day now), in buys of at least 0.1 NEAR. {fmtN(buyNow)} of the next 0.1 NEAR has built up since the last one ({Math.floor(sharePct)}%); at today's treasury it is due in {hm(nextIn)}.</p>
     {:else}
-      <p class="fine">Buying back: 1/365 of the treasury per day ({fmtN(perDay)} NEAR a day now), in buys of at least 0.1 NEAR; {fmtN(buyNow)} NEAR has built up for the next one.</p>
+      <p class="fine">Buying back: 1/365 of the treasury's spendable NEAR per day ({fmtN(st.treasury_spendable, 2)} ÷ 365 = {fmtN(perDay)} NEAR a day now), in buys of at least 0.1 NEAR; {fmtN(buyNow)} NEAR has built up for the next one.</p>
     {/if}
     <p class="faint small">Collected so far: {fmtN(st.treasury_in, 2)} NEAR. <a href="#/pool" onclick={e => { e.preventDefault(); document.getElementById('books')?.scrollIntoView({ behavior: 'smooth' }) }}>Where it went</a></p>
   </section>
@@ -169,7 +196,7 @@
       </div>
       <div><div class="eyebrow">Price limit</div><div class="v num">{open ? p4(Number(B(dex.buyback_ceiling)) / 1e24) : '—'} <span class="faint">NEAR per BEFEWER</span></div><div class="faint small">25% above the last buyback's price; 25% more after a refused one</div></div>
     </div>
-    <p class="fine">The treasury spends 1/365 of its NEAR per day on BEFEWER from the pool and burns all of it. The share builds up from the last buyback and is spent once it reaches 0.1 NEAR (so gas stays small), at most every {everyMin} minutes and at most {fmtN(buyMax)} NEAR at a time. A big inflow is spread out: half of it is spent after about 8 months. Anyone can call it when it is due (the keeper does). It never pays more than the price limit, so pumping the price just before a buyback gets it refused: the NEAR waits for the next one.</p>
+    <p class="fine">The treasury spends 1/365 of its spendable NEAR per day on BEFEWER from the pool and burns all of it. The share builds up from the last buyback and is spent once it reaches 0.1 NEAR (so gas stays small), at most every {everyMin} minutes and at most {fmtN(buyMax)} NEAR at a time. A big inflow is spread out: half of it is spent after about 8 months. Anyone can call it when it is due (the keeper does). It never pays more than the price limit, so pumping the price just before a buyback gets it refused: the NEAR waits for the next one.</p>
     {#if buys?.length}
       <table class="tab">
         <thead><tr><th>When</th><th class="r">NEAR used</th><th class="r">BEFEWER burned</th><th class="r">Price</th></tr></thead>
@@ -206,6 +233,22 @@
       </tbody>
     </table>
     <p class="check small" class:bad={nearLeft !== 0n}>{nearLeft === 0n ? '✓ The rows add up to what was collected.' : `${fmtN(nearLeft)} NEAR is not explained by the rows above.`}</p>
+
+    {#if held && snap}
+      <h3 id="held">{held.gap > 0n ? `Why only ${fmtN(held.spend, 2)} of the ${fmtN(held.treasury, 2)} can be spent` : 'All of the treasury can be spent'}</h3>
+      <p class="fine">The contract's account holds more NEAR than the treasury, but first it sets aside what it owes players and what NEAR locks for its storage. The treasury spends what is left, never more than its own {fmtN(held.treasury, 2)}.</p>
+      <table class="tab books">
+        <tbody>
+          <tr class="sum"><td>NEAR in the contract's account</td><td class="r num">{fmtN(snap.amount)}</td></tr>
+          {#each held.rows as r}
+            <tr><td>{r.k}<span class="faint sub">{r.note}</span></td><td class="r num">−{fmtN(r.v)}</td></tr>
+          {/each}
+          <tr class="sum"><td>Left to spend<span class="faint sub">{held.left > held.treasury ? `more than the treasury, so all ${fmtN(held.treasury)} of it can be spent` : 'buybacks spend 1/365 of this a day'}</span></td><td class="r num">{fmtN(held.spend)}</td></tr>
+        </tbody>
+      </table>
+      {#if held.gap > 0n}<p class="fine">So {fmtN(held.gap, 2)} NEAR of the treasury cannot be spent: the storage and the reserve need more NEAR than the contract started with, and the treasury covers the rest (round history is paid from it).</p>{/if}
+      <p class="check small" class:bad={!held.ok}>{held.ok ? "✓ Same as the contract's own figure for what the treasury can spend." : `The contract says ${fmtN(snap.st.treasury_spendable)} can be spent, not ${fmtN(held.spend)}: reload in a few seconds.`}</p>
+    {/if}
   </section>
 
   <!-- BEFEWER -->
@@ -240,6 +283,7 @@
   .ph p { margin: 4px 0 0 }
   .block { padding: 18px; margin-bottom: 16px }
   .block h2 { font-size: 18px; margin: 0 0 12px }
+  .block h3 { font-size: 15.5px; margin: 26px 0 0; scroll-margin-top: 80px }
   .top { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-wrap: wrap }
   .price { font-size: 28px; font-weight: 800; margin: 4px 0 2px }
   .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px 18px; margin-top: 14px }
