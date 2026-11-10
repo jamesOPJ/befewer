@@ -30,3 +30,37 @@ test('stillSealed drops bets revealed (or booked) since the first read', () => {
   assert.deepEqual(keep.map(x => `${x.account_id}:${x.slot}`), ['a:0', 'b:0'])
   assert.equal(dropped, 2)
 })
+
+// ---- the worker pool: every open() settles, whatever happens to a worker ----
+import { createOpener } from '../opener.mjs'
+const flaky = new URL('./fixtures/flaky-worker.mjs', import.meta.url)
+const settled = (p, ms) => Promise.race([p.then(v => ['ok', v], e => ['err', e.message]), new Promise(r => setTimeout(() => r(['never']), ms))])
+
+test('a worker that dies fails only its own jobs and is replaced', async () => {
+  const o = createOpener(2, { script: flaky, timeoutMs: 5_000 })
+  try {
+    // slot 0 gets "die", slot 1 gets "b": the second must still answer
+    const [a, b] = await Promise.all([settled(o.open('die'), 3000), settled(o.open('b'), 3000)])
+    assert.equal(a[0], 'err', 'the job on the dead worker is rejected (it used to wait forever)')
+    assert.deepEqual(b, ['ok', 'ok:b'])
+    // both slots work again afterwards (the dead one was replaced)
+    const again = await Promise.all([settled(o.open('c'), 3000), settled(o.open('d'), 3000)])
+    assert.deepEqual(again, [['ok', 'ok:c'], ['ok', 'ok:d']])
+  } finally { await o.close() }
+})
+
+test('a worker that throws is replaced too', async () => {
+  const o = createOpener(1, { script: flaky, timeoutMs: 5_000 })
+  try {
+    assert.equal((await settled(o.open('throw'), 3000))[0], 'err')
+    assert.deepEqual(await settled(o.open('e'), 3000), ['ok', 'ok:e'])
+  } finally { await o.close() }
+})
+
+test('a job that never answers times out, and the stuck worker is replaced', async () => {
+  const o = createOpener(1, { script: flaky, timeoutMs: 1500 }) // (a fresh worker thread takes a few 100 ms to start)
+  try {
+    assert.deepEqual(await settled(o.open('hang'), 5000), ['err', 'timelock not opened in time'])
+    assert.deepEqual(await settled(o.open('f'), 5000), ['ok', 'ok:f'])
+  } finally { await o.close() }
+})

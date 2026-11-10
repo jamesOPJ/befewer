@@ -200,7 +200,7 @@ export function savePick(accountId: string, round: number, p: Pick, slot = 0) {
   localStorage.setItem(`${PICKS_KEY}.${accountId}`, JSON.stringify(all))
 }
 /** NEAR the contract holds for a bet's storage (same formula as the contract; returned when booked). */
-export const storageFor = (accountId: string, sealedLen: number) => BigInt(2 * accountId.length + sealedLen + 260) * 10n ** 19n
+export const storageFor = (accountId: string, sealedLen: number) => BigInt(3 * accountId.length + sealedLen + 380) * 10n ** 19n
 
 /** Guest wallets hold 0.05 NEAR, and NEAR only accepts a transaction if the wallet could pay for
  *  all its prepaid gas at 1e9 yocto per gas (100 Tgas needs 0.1 NEAR up front; unused gas is

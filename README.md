@@ -75,6 +75,11 @@ All on https://befewer.com. Times are for the current parameters (a round every 
   10 minutes, at most 0.5 NEAR at a time), paying at most 25% above the last buyback's price, and burns what it
   buys. A big inflow is spread out (half of it is spent after about 253 days), and a small treasury still buys
   now and then (12 NEAR: 0.1 NEAR about every 3 days).
+- **Storage.** Every bet holds a little NEAR for the bytes it stores (about 0.01 NEAR with a timelock),
+  returned when the bet is booked. A bet that mines keeps its line in the round's miner list on chain for
+  good and pays for it out of that deposit: (account id length + 28) bytes, about 0.0005 NEAR. If the
+  contract's NEAR ever stopped covering its storage on top of what it owes players, new bets are refused
+  (reveals, bookings and withdrawals go on) until someone donates.
 - **Slots.** One account can run any number of independent bettors ("slots") from one balance.
 - **Keepers.** Revealing, settling, opening the pool and buybacks are public methods. Anyone can run
   `keeper/run.mjs` with their own account and earn reveal rewards.
@@ -94,7 +99,7 @@ web/        Svelte 5 + Vite page and a small Node server (static files + the tes
 
 ```sh
 cd contract
-cargo test                                # 83 tests
+cargo test                                # 89 tests
 cargo near build non-reproducible-wasm    # -> target/near/fewer.wasm
 ```
 
@@ -131,12 +136,13 @@ default 0.8), `--rounds <n>`, `--deposit <NEAR>`. Turn the page's Autopilot off 
 cd keeper && npm ci
 # the account's key must be in ~/.near-credentials/testnet/<account>.json (near-cli login writes it there)
 FEWER_KEEPER_ONLY=1 FEWER_KEEPER_ACCOUNT=you.testnet node run.mjs
-node --test test/opener.test.mjs          # 3 tests
+node --test test/opener.test.mjs test/schedule.test.mjs   # 11 tests
 ```
 
 It registers itself with a 0.02 NEAR game deposit (reveal rewards are paid into a game balance), opens timelocks
 on worker threads (each drand round's beacon fetched and verified once; accounts served round-robin so one
-account cannot crowd others out), and re-reads the round before paying for a reveal.
+account cannot crowd others out), and re-reads the round before paying for a reveal. Every timelock job
+settles within 8 s; a worker thread that dies or hangs is replaced.
 
 ### Web
 
@@ -167,7 +173,40 @@ Done during the hackathon on an isolated copy of the contract (`v6t.befewer.test
   treasury; the guest faucet's rate limits could be bypassed with a forged Origin header. Each contract fix has
   a test that fails without it; the keeper and faucet fixes were checked with measurements and end-to-end runs
   (see the commit messages).
-- Accepted: when nobody else plays, one account betting both sides can mine the round's emission cheaply.
+- Second review (Nov 9, three independent white-box passes over the contract, the keeper and the page). No
+  way was found to take out more NEAR than was put in. Fixed:
+  - Storage nobody paid for. Each mining bet's line in the round's miner list stays on chain for good and was
+    free: 100 small bets from a 64-character account added 9 kB (0.09 NEAR) a round at the contract's expense,
+    4.6 times what the round paid the treasury; kept up for a day it would have used up the contract's own NEAR
+    and then locked players' NEAR as storage stake. Now the bet pays for its line, the bet's storage deposit
+    covers every byte it adds, and betting pauses before player funds could be touched (see **Storage**).
+  - A round's list of bets was one record rewritten by every commit, so a round stuffed with thousands of bets
+    made everyone's commit cost more gas than a guest account can attach. It is kept in pages of 64 now.
+  - The page, the terminal Autopilot and the demo bots sealed a bet to the reveal time an RPC server reported.
+    A dishonest RPC server could report an early time, open the timelock before betting closed and bet the
+    minority. The time now comes from the launch parameters in this repository (`keeper/schedule.mjs`), checked
+    against the device's clock; the RPC's answer is not used.
+  - The keeper stopped for good if one of its timelock worker threads died (its jobs never finished). It also
+    retried timelocks that cannot open, and bets the contract refuses, on every tick.
+  - The demo bots picked sides with `Math.random()`, whose stream can be reconstructed from their public stakes
+    and timing; requests from the server's own machine skipped the faucet's daily limit; `new` accepted a
+    `min_stake` so small that a lone bet in a void round could not pay for the round's record.
+- Accepted:
+  - When nobody else plays, one account betting both sides can mine the round's emission cheaply.
+  - The reveal cannot be forced: a bet without a (valid) timelock is revealed only if its owner chooses to.
+    Someone holding several bets in a round can decide which to reveal after seeing the others, for example
+    revealing just enough to tie the round (void: revealed bets are refunded, streaks are kept). The bets left
+    sealed are forfeited, so this always costs more than losing the round honestly; it can deny the minority
+    its win but cannot take NEAR.
+  - The refining fee is shared among "the other holders", which includes the claimant's own mined BEFEWER that
+    is not booked yet, or held in a second account. Splitting holdings recovers part of one's own fee.
+  - Each round's record (291 bytes) is paid from the contract's own NEAR when the round brings the treasury
+    less than that (very small rounds). It is bounded by one record per round.
+  - A reveal reward on the smallest bet (0.0004 NEAR) can be less than the gas a keeper pays to reveal it alone.
+  - If a pool-opening or buyback callback ever ran out of gas, that step would stay "in flight" (there is no
+    admin to reset it). The callbacks are given 15 Tgas and use a fraction of it.
+  - Guest accounts keep their key in the browser's localStorage, and the Autopilot's terminal command contains
+    the key. Fine for throwaway testnet accounts; a mainnet version would use wallet keys only.
 
 ## Made during the hackathon
 

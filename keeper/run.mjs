@@ -13,9 +13,11 @@
 // the account with a 0.02 NEAR game deposit if needed (reveal rewards are paid into a game
 // balance), then reveals, settles, opens the pool and runs buybacks whenever they are due.
 import fs from 'node:fs'
+import crypto from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import tlock from 'tlock-js'
 import { createOpener, orderForOpening, stillSealed } from './opener.mjs'
+import { revealStartMs } from './schedule.mjs'
 import { actions } from 'near-api-js'
 import { loadAccount, hasKey, newKeyFor, view, call, provider, newSalt, commitHash, NEAR, fmt, fmtN, sleep, log } from './lib.mjs'
 
@@ -27,10 +29,16 @@ const KEEPER_ONLY = process.env.FEWER_KEEPER_ONLY === '1'
 const drand = mainnetClient() // drand quicknet (3 s rounds), the chain tlock uses
 const drandInfo = await drand.chain().info()
 const opener = createOpener(4) // opens timelocks on worker threads (see opener.mjs)
-const junk = new Set() // "round:account:slot" of timelocks that opened to something not matching their commitment
+const junk = new Set() // "round:account:slot" of bets not worth trying again: the timelock opened to something that
+// does not match the commitment, did not open twice, or the contract did not take the reveal
+const misses = new Map() // "round:account:slot" -> times its timelock failed to open
 const jitters = {} // round -> extra random wait before this keeper reveals (see revealTick)
 
-const coin = () => (Math.random() < 0.5 ? 'A' : 'B')
+// The NPCs' choices come from the system's random source, not Math.random(): its stream can be
+// reconstructed from enough outputs, and the NPCs' stakes and timing are public on chain, so
+// their sides could be predicted before betting closes.
+const rnd = () => crypto.randomInt(0x1_0000_0000) / 0x1_0000_0000
+const coin = () => (crypto.randomInt(2) === 0 ? 'A' : 'B')
 const other = s => (s === 'A' ? 'B' : 'A')
 // Personalities. pick(h) gets the last settled round's outcome. Stakes are in NEAR.
 export const NPCS = [
@@ -51,9 +59,18 @@ const STATE_DIR = new URL('./state/', import.meta.url)
 fs.mkdirSync(STATE_DIR, { recursive: true })
 const STATE_FILE = fileURLToPath(new URL(`./state/${CONTRACT}.json`, import.meta.url))
 const state = fs.existsSync(STATE_FILE) ? JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')) : { plans: {}, salts: {}, gas: [] }
+// the file holds the NPCs' sides and salts before they are revealed: readable by this user only
 const save = () => {
-  fs.writeFileSync(STATE_FILE + '.tmp', JSON.stringify(state))
+  fs.writeFileSync(STATE_FILE + '.tmp', JSON.stringify(state), { mode: 0o600 })
   fs.renameSync(STATE_FILE + '.tmp', STATE_FILE)
+}
+/** Forget plans and salts of rounds long finished (the file is rewritten on every save). */
+function prune(r) {
+  const old = k => Number(k.slice(k.lastIndexOf(':') + 1)) < r - 50
+  let n = 0
+  for (const k of Object.keys(state.plans)) if (old(k)) { delete state.plans[k]; n++ }
+  for (const k of Object.keys(state.salts)) if (old(k)) { delete state.salts[k]; n++ }
+  return n
 }
 
 function burnt(res) {
@@ -112,14 +129,16 @@ async function topUp(n, p) {
 
 async function npcTick(st) {
   const r = Number(st.commit_round)
-  const start = Number(BigInt(st.commit_ends_at) / 1_000_000n) - Number(BigInt((await params()).commit_ns) / 1_000_000n)
-  const end = Number(BigInt(st.commit_ends_at) / 1_000_000n)
+  // when betting closes: from the pinned launch parameters, never from the RPC's clock (schedule.mjs)
+  const end = revealStartMs(CONTRACT, r, await params())
+  const start = end - Number(BigInt((await params()).commit_ns) / 1_000_000n)
+  if (!state.pruned || state.pruned < r - 50) { prune(r); state.pruned = r }
   for (const n of NPCS) {
     const key = `${n.id}:${r}`
     if (!state.plans[key]) {
       // decide once per round: whether to play and when (spread across the window)
-      const playing = Math.random() < n.play
-      state.plans[key] = { playing, at: start + (0.1 + 0.7 * Math.random()) * (end - start), done: false }
+      const playing = rnd() < n.play
+      state.plans[key] = { playing, at: start + (0.1 + 0.7 * rnd()) * (end - start), done: false }
       save()
     }
     const plan = state.plans[key]
@@ -138,7 +157,7 @@ async function npcTick(st) {
         log(n.id, f ? `claim_befewer FAILED ${f}` : `claimed ${fmt(BigInt(p.unrefined) * 9n / 10n + BigInt(p.refined))} BEFEWER to its wallet`)
       }
       const bal = BigInt(p.balance)
-      let amount = near(n.stake[0] + Math.random() * (n.stake[1] - n.stake[0]))
+      let amount = near(n.stake[0] + rnd() * (n.stake[1] - n.stake[0]))
       const cap = (bal * BigInt(pr.max_stake_bps)) / 10000n
       if (amount > cap) amount = cap
       if (amount + (amount * BigInt(pr.fee_bps)) / 10000n > bal) amount = (bal * 10000n) / (10000n + BigInt(pr.fee_bps))
@@ -167,13 +186,22 @@ async function params() {
   return (paramsCache ??= await view(CONTRACT, 'get_params'))
 }
 
+// What an RPC server answers is not trusted to be sane: the contract takes at most 1024 bytes of
+// timelock per bet and a page of 100, so anything else is dropped, and the paging stops at
+// MAX_COMMITS (a server answering full pages forever would otherwise keep the keeper here).
+const MAX_SEALED = 1024
+const MAX_COMMITS = 20_000
 async function allCommits(r) {
   const out = []
-  for (let from = 0; ; from += 100) {
+  for (let from = 0; from < MAX_COMMITS; from += 100) {
     const page = await view(CONTRACT, 'get_round_commits', { round: String(r), from_index: from, limit: 100 })
-    out.push(...page)
-    if (page.length < 100) return out
+    if (!Array.isArray(page)) break
+    for (const c of page.slice(0, 100)) {
+      if (c && typeof c.account_id === 'string' && Number.isInteger(c.slot) && typeof c.hash === 'string' && (c.sealed == null || (typeof c.sealed === 'string' && c.sealed.length <= MAX_SEALED))) out.push(c)
+    }
+    if (page.length < 100) break
   }
+  return out
 }
 
 async function sendBatch(kind, calls, per = 8) {
@@ -212,6 +240,7 @@ async function revealTick(st) {
   if (wait > 0) await sleep(wait)
   // timelocks already found not to open to their commitment are not opened again every tick
   for (const k of junk) if (Number(k.split(':')[0]) < r - 2) junk.delete(k)
+  for (const k of misses.keys()) if (Number(k.split(':')[0]) < r - 2) misses.delete(k)
   const pending = (await allCommits(r)).filter(c => !c.side && !junk.has(`${r}:${c.account_id}:${c.slot}`))
   const items = []
   const fallback = c => state.salts[`${c.account_id}:${c.slot}:${r}`] // our own NPCs' bets
@@ -228,13 +257,22 @@ async function revealTick(st) {
   let lastSend = Date.now(), done = 0
   for (let i = 0; i < queue.length && Date.now() < deadline; i += 16) {
     await Promise.all(queue.slice(i, i + 16).map(async c => {
-      let side, salt
+      let side, salt, transient = false
       try {
         const pt = await opener.open(c.sealed)
         ;[side, salt] = [pt.slice(0, 1), pt.slice(2)]
-      } catch {}
+      } catch (e) {
+        transient = /in time|worker|fetch|network|timeout/i.test(String(e?.message ?? e)) // drand slow or a worker replaced: not the bet's fault
+      }
       if (!side && fallback(c)) ({ side, salt } = fallback(c))
-      side ? add(c, side, salt) : skipped.unopened++
+      if (side) return add(c, side, salt)
+      skipped.unopened++
+      // a timelock that failed twice (garbage, another drand chain, a later round) is not tried
+      // again on every 3 s tick; once more is allowed in case drand was just slow
+      if (transient) return
+      const k = `${r}:${c.account_id}:${c.slot}`
+      misses.set(k, (misses.get(k) ?? 0) + 1)
+      if (misses.get(k) >= 2) junk.add(k)
     }))
     done = Math.min(queue.length, i + 16)
     if (items.length >= 30 || Date.now() - lastSend > 5000) { await sendReveals(r, items.splice(0)); lastSend = Date.now() }
@@ -260,9 +298,16 @@ async function sendReveals(r, items) {
     try { done = JSON.parse(Buffer.from(res.status.SuccessValue, 'base64').toString()) } catch {}
     if (done < chunk.length) items.unshift(...chunk.slice(done))
     // count the bets THIS keeper revealed (and so earned the reward for): the reveal events say who
-    const mine = (res.receipts_outcome || []).flatMap(o => o.outcome.logs)
+    const events = (res.receipts_outcome || []).flatMap(o => o.outcome.logs)
       .filter(l => l.includes('"event":"reveal"')).map(l => { try { return JSON.parse(l.replace(/^EVENT_JSON:/, '')).data[0] } catch { return null } })
-      .filter(d => d && d.by === KEEPER).length
+      .filter(Boolean)
+    const mine = events.filter(d => d.by === KEEPER).length
+    // a bet the contract looked at but did not reveal (e.g. a salt shorter than it accepts, which
+    // still matches the hash here) would be sent again on every tick, paying gas each time
+    if (!f) {
+      const revealed = new Set(events.map(d => `${d.account_id}:${d.slot}`))
+      for (const x of chunk.slice(0, done)) if (!revealed.has(`${x.account_id}:${x.slot}`)) junk.add(`${r}:${x.account_id}:${x.slot}`)
+    }
     log('keeper', f ? `reveal_many FAILED ${f}` : `revealed ${mine} of ${chunk.length} in one call` + (mine < done ? ` (${done - mine} already revealed by someone else or not revealable)` : ''))
     if (f || done === 0) break
   }

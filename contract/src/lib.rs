@@ -200,6 +200,37 @@ fn reprice_from_last() {
     }
 }
 
+/// The (account, slot) of every bet in a round, in commit order, for keepers: kept in pages of
+/// ROUND_PAGE entries in raw storage, so a commit rewrites one small page however many bets the
+/// round has. (Rounds that started before this was added keep their single list in
+/// `round_players` until they are booked.)
+const ROUND_PAGE_PREFIX: &[u8] = b"__rp";
+pub const ROUND_PAGE: u32 = 64;
+fn round_page_key(r: u64, page: u32) -> Vec<u8> {
+    let mut k = ROUND_PAGE_PREFIX.to_vec();
+    k.extend_from_slice(&r.to_le_bytes());
+    k.extend_from_slice(&page.to_le_bytes());
+    k
+}
+fn round_page_read(r: u64, page: u32) -> Vec<(AccountId, u32)> {
+    env::storage_read(&round_page_key(r, page)).map(|v| near_sdk::borsh::from_slice(&v).expect("round page")).unwrap_or_default()
+}
+
+/// NEAR a mining bet pays for its line in its round's miner list, which stays on chain for
+/// good: the entry (account id, slot, streak, shares). Kept out of the bet's storage deposit
+/// when the bet is booked, only if the bet mined and is on the list; it stays in the contract
+/// as plain NEAR, which is what the line's bytes lock up. (Without it, a hundred small bets
+/// from a long account id could add 9 kB a round at the contract's expense.)
+pub fn miner_line_cost(account_id: &AccountId) -> u128 {
+    (account_id.as_str().len() as u128 + 28) * env::storage_byte_cost().as_yoctonear()
+}
+
+/// Total NEAR mining bets have paid for their lines (raw storage, like the lists themselves).
+const MINER_LINES_KEY: &[u8] = b"__lf";
+fn miner_lines_paid() -> u128 {
+    env::storage_read(MINER_LINES_KEY).and_then(|v| v.try_into().ok()).map(u128::from_le_bytes).unwrap_or(0)
+}
+
 fn miners_read(r: u64, side: u8) -> Option<MinerList> {
     env::storage_read(&miners_key(r, side)).map(|v| near_sdk::borsh::from_slice(&v).expect("miner list"))
 }
@@ -538,6 +569,9 @@ pub struct StatusView {
     pub storage_held: U128,
     /// One-time 0.01 NEAR fees paid by first deposits, plus slot fees (kept for storage).
     pub storage_fees: U128,
+    /// NEAR mining bets paid for their lines in the rounds' miner lists (it stays in the
+    /// contract, covering the storage those lines use).
+    pub miner_lines: U128,
     /// Reveal rewards paid so far, and the share of the fee they take.
     pub bounties_paid: U128,
     pub reveal_bounty_bps: u16,
@@ -686,10 +720,11 @@ pub fn commit_preimage(account_id: &AccountId, slot: u32, round: u64, side: &str
 }
 
 /// NEAR held from the player for one bet's storage: the commit (keyed by the account id, with
-/// the ciphertext) and its entry in the round's list, plus per-record overhead. Slightly more
-/// than the bytes used; all of it comes back when the bet is booked.
+/// the ciphertext), its entry in the round's list and, once revealed, its line in the miner
+/// list, plus per-record overhead. More than the bytes used; it comes back when the bet is
+/// booked (minus `miner_line_cost` if the bet mined: that line stays on chain).
 pub fn commit_storage(account_id: &AccountId, sealed_len: usize) -> u128 {
-    let bytes = 2 * account_id.as_str().len() + sealed_len + 260;
+    let bytes = 3 * account_id.as_str().len() + sealed_len + 380;
     bytes as u128 * env::storage_byte_cost().as_yoctonear()
 }
 
@@ -749,6 +784,10 @@ impl Contract {
             "max_stake_bps must be in (0, 10000]"
         );
         require!(params.min_stake.0 >= SHARE_UNIT, "min_stake must be at least 0.001 NEAR");
+        require!(
+            params.min_stake.0 > ROUND_RECORD_BYTES * env::storage_byte_cost().as_yoctonear(),
+            "min_stake must be more than a round record's storage (0.00291 NEAR): a lone bet in a void round pays for it"
+        );
         require!(params.fee_bps <= 2_000, "fee_bps must be at most 2000 (20%)");
         require!(params.streak_min >= 1, "streak_min must be >= 1");
         require!(params.reward_per_round.0 > 0, "reward_per_round must be > 0");
@@ -951,6 +990,20 @@ impl Contract {
         self.params.max_supply.0.saturating_sub(self.issued - self.total_burned)
     }
 
+    /// Refuse new bets if the contract's NEAR, after paying for its storage, no longer covers
+    /// what it owes players. Storage that nobody paid for can only eat the game's own NEAR
+    /// (treasury and reserve); if that ever ran out, betting stops here, before player funds
+    /// could get locked up as storage stake. Deposits, reveals, bookings and withdrawals go on.
+    fn assert_solvent(&self) {
+        let balance = env::account_balance().as_yoctonear();
+        let storage = env::storage_usage() as u128 * env::storage_byte_cost().as_yoctonear();
+        let owed = self.balances_total + self.escrow + self.storage_held + self.storage_fees;
+        require!(
+            balance.saturating_sub(storage) >= owed,
+            "betting is paused: the contract's NEAR no longer covers its storage on top of player funds (anyone can `donate` to resume)"
+        );
+    }
+
     fn spendable(&self) -> u128 {
         let balance = env::account_balance().as_yoctonear();
         let storage = env::storage_usage() as u128 * env::storage_byte_cost().as_yoctonear();
@@ -1013,6 +1066,7 @@ impl Contract {
         require!(round.0 == r, format!("round {} is not taking commits (current: {})", round.0, r));
         self.settle_due();
         self.internal_book(&who, slot);
+        self.assert_solvent();
         let amount = amount.0;
         let hash = parse_hash(&hash);
         if let Some(s) = &sealed {
@@ -1047,7 +1101,14 @@ impl Contract {
         self.storage_held += storage;
         let has_sealed = sealed.is_some();
         self.commits.insert(key, Commit { hash, amount, fee, bounty: 0, storage, side: SIDE_NONE, shares: 0, streak_if_win: 0, sealed });
-        self.round_players.entry(r).or_default().push((who.clone(), slot));
+        if let Some(list) = self.round_players.get_mut(&r) {
+            list.push((who.clone(), slot)); // a round that started before the paged list
+        } else {
+            let page = self.rounds.get(&r).map(|x| x.commits).unwrap_or(0) / ROUND_PAGE;
+            let mut entries = round_page_read(r, page);
+            entries.push((who.clone(), slot));
+            env::storage_write(&round_page_key(r, page), &near_sdk::borsh::to_vec(&entries).expect("round page"));
+        }
         s.open_rounds.push(r);
         self.slots.insert((who.clone(), slot), s);
         let round = self.rounds.entry(r).or_default();
@@ -1325,10 +1386,19 @@ impl Contract {
                 s.streak = 0;
                 ("loss", 0)
             };
+            // a bet that mined keeps its line in the round's miner list on chain: it pays for it
+            let line = if mined > 0 && miners_read(r, round.outcome).map(|m| m.list.iter().any(|x| &x.0 == who && x.1 == slot)).unwrap_or(false) {
+                miner_line_cost(who).min(c.storage)
+            } else {
+                0
+            };
+            if line > 0 {
+                env::storage_write(MINER_LINES_KEY, &(miner_lines_paid() + line).to_le_bytes());
+            }
             self.escrow -= payout;
             self.storage_held -= c.storage;
-            *self.balances.entry(who.clone()).or_insert(0) += payout + c.storage;
-            self.balances_total += payout + c.storage;
+            *self.balances.entry(who.clone()).or_insert(0) += payout + c.storage - line;
+            self.balances_total += payout + c.storage - line;
             if mined > 0 {
                 // already in unrefined_total since the round settled: book it to the account,
                 // with the refined BEFEWER its share collected since then
@@ -1357,11 +1427,14 @@ impl Contract {
                     self.dust_to_pot += dust;
                 }
                 self.round_players.remove(&r);
+                for page in 0..=(rr.commits - 1) / ROUND_PAGE {
+                    env::storage_remove(&round_page_key(r, page));
+                }
             }
             emit(
                 "claim",
                 json!({"account_id": who, "slot": slot, "round": U64(r), "result": result, "payout": U128(payout),
-                       "storage": U128(c.storage), "mined": U128(mined), "streak": s.streak}),
+                       "storage": U128(c.storage - line), "mined": U128(mined), "streak": s.streak}),
             );
             s.open_rounds.remove(0);
             done += 1;
@@ -1747,6 +1820,7 @@ impl Contract {
             escrow: U128(self.escrow),
             storage_held: U128(self.storage_held),
             storage_fees: U128(self.storage_fees),
+            miner_lines: U128(miner_lines_paid()),
             bounties_paid: U128(self.bounties_paid),
             reveal_bounty_bps: self.params.reveal_bounty_bps,
             unsettled: self.unsettled.len() as u32,
@@ -1879,10 +1953,28 @@ impl Contract {
     /// Commits of a round in commit order, for keepers: who, how much, revealed side (if
     /// any) and the timelock ciphertext (only while unrevealed). Empty once fully claimed.
     pub fn get_round_commits(&self, round: U64, from_index: u32, limit: u32) -> Vec<RoundCommitView> {
-        let Some(list) = self.round_players.get(&round.0) else { return vec![] };
+        let limit = limit.min(100);
+        let list: Vec<(AccountId, u32)> = match self.round_players.get(&round.0) {
+            Some(list) => list.iter().skip(from_index as usize).take(limit as usize).cloned().collect(),
+            None => {
+                let commits = self.rounds.get(&round.0).map(|x| x.commits).unwrap_or(0);
+                let end = commits.min(from_index.saturating_add(limit));
+                let mut out = vec![];
+                let mut i = from_index;
+                while i < end {
+                    let page = round_page_read(round.0, i / ROUND_PAGE);
+                    let at = (i % ROUND_PAGE) as usize;
+                    if at >= page.len() {
+                        break; // fully booked: the pages are gone
+                    }
+                    let n = (page.len() - at).min((end - i) as usize);
+                    out.extend_from_slice(&page[at..at + n]);
+                    i += n as u32;
+                }
+                out
+            }
+        };
         list.iter()
-            .skip(from_index as usize)
-            .take(limit.min(100) as usize)
             .filter_map(|(a, s)| {
                 self.commits.get(&(round.0, a.clone(), *s)).map(|c| RoundCommitView {
                     account_id: a.clone(),
@@ -1916,7 +2008,12 @@ impl Contract {
                 since = self.refine_index - x.reward_index;
             }
             result = Some(res.to_string());
-            payout = pay + c.storage;
+            let line = if mined > 0 && miners_read(r, x.outcome).map(|m| m.list.iter().any(|e| &e.0 == who && e.1 == slot)).unwrap_or(false) {
+                miner_line_cost(who).min(c.storage)
+            } else {
+                0
+            };
+            payout = pay + c.storage - line;
         }
         let refined = if mined > 0 && since > 0 { (U256::from(mined) * U256::from(since) / U256::from(REFINE_SCALE)).as_u128() } else { 0 };
         Some((

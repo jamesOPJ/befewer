@@ -38,24 +38,51 @@ export function orderForOpening(commits, expectedRound, slack = 3) {
   return [...fair(ok), ...fair(odd)]
 }
 
-/** A pool of worker threads that open timelocks: open(sealed) -> "A:salt" text. */
-export function createOpener(workers = 4) {
-  const pool = Array.from({ length: workers }, () => new Worker(new URL('./opener-worker.mjs', import.meta.url)))
-  const waiting = new Map()
-  let next = 0, id = 0
-  for (const w of pool) {
-    w.on('message', m => { const p = waiting.get(m.id); waiting.delete(m.id); m.err ? p.reject(new Error(m.err)) : p.resolve(m.pt) })
-    w.on('error', e => { for (const [k, p] of waiting) { waiting.delete(k); p.reject(e) } })
+/** A pool of worker threads that open timelocks: open(sealed) -> "A:salt" text.
+ *  Every open() settles: with the text, with the worker's error, or after `timeoutMs` (drand not
+ *  answering, a worker stuck). A worker that dies or times out is replaced, and only the jobs it
+ *  held fail. (Before, a dead worker stayed in the pool: its jobs never settled, and the keeper's
+ *  loop waited on them forever.) */
+export function createOpener(workers = 4, { timeoutMs = 8_000, script = new URL('./opener-worker.mjs', import.meta.url) } = {}) {
+  const waiting = new Map() // job id -> { resolve, reject, slot, timer }
+  const pool = []
+  let next = 0, id = 0, closed = false
+  const settle = (n, fn) => {
+    const p = waiting.get(n)
+    if (!p) return
+    waiting.delete(n)
+    clearTimeout(p.timer)
+    fn(p)
   }
+  const failSlot = (slot, err) => { for (const [n, p] of waiting) if (p.slot === slot) settle(n, q => q.reject(err)) }
+  const spawn = slot => {
+    const w = new Worker(script)
+    pool[slot] = w
+    w.on('message', m => settle(m.id, p => (m.err ? p.reject(new Error(m.err)) : p.resolve(m.pt))))
+    const gone = err => {
+      if (pool[slot] !== w) return // already replaced
+      failSlot(slot, err)
+      if (!closed) spawn(slot)
+    }
+    w.on('error', e => gone(e instanceof Error ? e : new Error(String(e))))
+    w.on('exit', code => gone(new Error(`timelock worker exited (${code})`)))
+  }
+  for (let i = 0; i < workers; i++) spawn(i)
   return {
     open(sealed) {
       return new Promise((resolve, reject) => {
-        const n = ++id
-        waiting.set(n, { resolve, reject })
-        pool[next++ % pool.length].postMessage({ id: n, sealed })
+        const n = ++id, slot = next++ % workers
+        const timer = setTimeout(() => {
+          // the worker may be stuck on this job: replace it (its other jobs fail and can be retried)
+          const w = pool[slot]
+          settle(n, p => p.reject(new Error('timelock not opened in time')))
+          if (pool[slot] === w && !closed) { failSlot(slot, new Error('timelock worker restarted')); spawn(slot); w.terminate().catch(() => {}) }
+        }, timeoutMs)
+        waiting.set(n, { resolve, reject, slot, timer })
+        pool[slot].postMessage({ id: n, sealed })
       })
     },
-    close: () => Promise.all(pool.map(w => w.terminate())),
+    close: () => { closed = true; return Promise.all(pool.map(w => w.terminate())) },
   }
 }
 

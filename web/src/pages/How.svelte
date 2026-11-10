@@ -94,7 +94,7 @@
       </dl>
     </div>
   </div>
-  <p class="muted small">Where the NEAR goes: the Dogs bets (2 NEAR) are paid 4 NEAR, their own 2 plus 2 of the 3 on Cats. The extra 1 NEAR on Cats goes to the treasury. Of each fee, {bountyPct}% went to whoever revealed the bet (the player's page or a keeper) and {treasuryPct}% to the treasury. Every bet also holds a little NEAR for its storage, returned with the result in all four cases.</p>
+  <p class="muted small">Where the NEAR goes: the Dogs bets (2 NEAR) are paid 4 NEAR, their own 2 plus 2 of the 3 on Cats. The extra 1 NEAR on Cats goes to the treasury. Of each fee, {bountyPct}% went to whoever revealed the bet (the player's page or a keeper) and {treasuryPct}% to the treasury. Every bet also holds a little NEAR for its storage, returned with the result in all four cases. A win that mines BEFEWER leaves about 0.0005 NEAR of it behind: its line in the round's list of miners stays on chain for good.</p>
 </section>
 
 <section class="card block">

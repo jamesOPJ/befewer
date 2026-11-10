@@ -18,7 +18,7 @@ const CONTRACT = process.env.FEWER_CONTRACT || 'v6.befewer.testnet'
 const GUEST_NEAR = NEAR / 20n // 0.05 testnet NEAR in the wallet, for gas
 const GUEST_PLAY = (NEAR * 3n) / 10n // 0.3 testnet NEAR in the game balance (0.01 of it pays the storage fee)
 const PER_IP_PER_HOUR = 3
-const PER_DAY = 60
+const PER_DAY = Number(process.env.FEWER_GUESTS_PER_DAY || 60)
 // Pages that may call /api/guest besides this server's own host. claude.aifinode.xyz/p/5043/ is
 // the owner's password-gated preview proxy (it rewrites Host to 127.0.0.1:5043 but keeps Origin).
 const ORIGINS = (process.env.FEWER_ORIGINS || 'https://befewer.com,https://www.befewer.com,https://claude.aifinode.xyz').split(',')
@@ -41,13 +41,16 @@ function file(p) {
 
 const hits = new Map() // ip -> [timestamps]
 let day = { date: '', n: 0 }
-function allowed(ip) {
+/** `local`: a request from this machine (tests, an SSH tunnel). It skips the per-network limit
+ *  but not the daily one: nothing gets guests without a limit, so the faucet account cannot be
+ *  emptied through this endpoint by anything that can reach the port. */
+function allowed(ip, local = false) {
   const now = Date.now()
   const today = new Date().toISOString().slice(0, 10)
   if (day.date !== today) day = { date: today, n: 0 }
   const list = (hits.get(ip) || []).filter(t => now - t < 3600_000)
   hits.set(ip, list)
-  if (list.length >= PER_IP_PER_HOUR) return 'Too many guest accounts from your network this hour. Try again later.'
+  if (!local && list.length >= PER_IP_PER_HOUR) return 'Too many guest accounts from your network this hour. Try again later.'
   if (day.n >= PER_DAY) return 'The guest faucet is out for today. Try again tomorrow.'
   return null
 }
@@ -156,9 +159,10 @@ http.createServer(async (req, res) => {
     let pk
     try { pk = JSON.parse(body).publicKey } catch { return reject(res, req, 400, 'bad json') }
     if (typeof pk !== 'string' || !/^ed25519:[1-9A-HJ-NP-Za-km-z]{43,44}$/.test(pk)) return reject(res, req, 400, 'publicKey must be ed25519:<base58>')
-    // loopback without a Cloudflare header = someone on this machine or an SSH tunnel: not rate limited
+    // loopback without a Cloudflare header = someone on this machine or an SSH tunnel: no
+    // per-network limit, but the daily limit still applies
     const local = !req.headers['cf-connecting-ip'] && /^(::ffff:)?127\.0\.0\.1$|^::1$/.test(req.socket.remoteAddress || '')
-    const why = local ? null : allowed(ip)
+    const why = allowed(ip, local)
     if (why) return reject(res, req, 429, why)
     try {
       const accountId = await createGuest(pk)

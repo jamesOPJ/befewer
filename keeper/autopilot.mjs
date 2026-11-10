@@ -26,6 +26,7 @@ import { parseArgs } from 'node:util'
 import tlock from 'tlock-js'
 import { Account, KeyPairSigner } from 'near-api-js'
 import { provider, view, newSalt, commitHash, NEAR, fmtN, sleep, log } from './lib.mjs'
+import { revealStartMs } from './schedule.mjs'
 import { decide, guard, meFrom, stakeFor, chipsOf, yoctoOf, describe, normalizeRule, PRESETS, SLOT_SETS } from '../web/src/rules.ts'
 import { QUESTIONS, label } from '../web/src/questions.ts'
 
@@ -266,7 +267,7 @@ async function laneSlot(i, me) {
   return state.slots[name]
 }
 function capFor(bal) {
-  const storage = BigInt(2 * ACCT.length + 700 + 260) * 10n ** 19n
+  const storage = BigInt(3 * ACCT.length + 700 + 380) * 10n ** 19n // the contract's commit_storage
   const byBps = (bal * BigInt(params.max_stake_bps)) / 10000n
   const afford = bal > storage ? ((bal - storage) * 10000n) / (10000n + BigInt(params.fee_bps)) : 0n
   return byBps < afford ? byBps : afford
@@ -282,7 +283,8 @@ async function forgetIfNotOnChain(r) {
 }
 async function betTick(st) {
   const r = Number(st.commit_round)
-  const revealStart = ns(st.commit_ends_at)
+  // when betting closes: from the pinned launch parameters, never from the RPC's clock (schedule.mjs)
+  const revealStart = revealStartMs(CONTRACT, r, params, now())
   if (revealStart - now() < 25_000) return
   const prev = rounds.get(r - 1)
   if (prev && !prev.settled) return

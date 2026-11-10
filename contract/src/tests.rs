@@ -168,9 +168,9 @@ fn check_invariants(c: &Contract, players: &[AccountId], donated: u128) {
     let deposited = players.len() as u128 * START;
     let slot_fees = s.storage_fees.0 - players.len() as u128 * STORAGE_FEE;
     assert_eq!(
-        s.balances_total.0 + s.escrow.0 + s.storage_held.0 + slot_fees + s.treasury_in.0 - donated,
+        s.balances_total.0 + s.escrow.0 + s.storage_held.0 + slot_fees + s.miner_lines.0 + s.treasury_in.0 - donated,
         deposited,
-        "NEAR conserved: balances + escrow + storage held + slot fees + round inflows = deposits"
+        "NEAR conserved: balances + escrow + storage held + slot fees + miner lines + round inflows = deposits"
     );
     let holders: u128 = players.iter().map(|p| tokens(c, p)).sum::<u128>() + tokens(c, &me()) + tokens(c, &dex());
     assert_eq!(holders, s.total_supply.0, "token balances add up to total supply");
@@ -2011,4 +2011,199 @@ fn a_round_without_a_complete_list_shows_no_miner_count() {
     assert_eq!((v.miners, v.mining_players), (0, 0), "but who mined was not fully recorded");
     assert!(c.get_round_miners(U64(2)).is_empty());
     check_invariants(&c, &[a, b, cc], 0);
+}
+
+// ---------- storage that nobody paid for (Nov 9 audit) ----------
+
+/// NEAR the chain would lock for everything the contract stores right now: every record's key
+/// and value plus 40 bytes each. (`env::storage_usage()` is no use across test contexts, and
+/// the maps keep their writes in memory until flushed.)
+fn chain_storage_cost(c: &mut Contract) -> u128 {
+    c.balances.flush();
+    c.rounds.flush();
+    c.commits.flush();
+    c.round_players.flush();
+    c.players.flush();
+    c.slots.flush();
+    let storage = near_sdk::mock::with_mocked_blockchain(|b| b.take_storage());
+    let bytes: usize = storage.iter().map(|(k, v)| k.len() + v.len() + 40).sum();
+    let mut b = VMContextBuilder::new();
+    b.current_account_id(me()).account_balance(NearToken::from_yoctonear(BIG));
+    near_sdk::env::set_blockchain_interface(near_sdk::MockedBlockchain::new(
+        b.build(),
+        near_sdk::test_vm_config(),
+        near_sdk::RuntimeFeesConfig::test(),
+        vec![],
+        storage,
+        Default::default(),
+        None,
+    ));
+    bytes as u128 * env::storage_byte_cost().as_yoctonear()
+}
+
+/// Round r: slots `mine` of `a` bet 0.01 on A, `a`'s slot 0 bets `big` on B; all revealed by `a`
+/// and booked once the round is over.
+fn hedge_round(c: &mut Contract, a: &AccountId, mine: &[u32], r: u64, big: u128) {
+    for s in mine {
+        commit_s(c, a, *s, r, "A", N / 100);
+    }
+    commit_s(c, a, 0, r, "B", big);
+    for s in mine {
+        reveal_s(c, a, a, *s, r, "A");
+    }
+    reveal_s(c, a, a, 0, r, "B");
+    ctx(a, t_after(r));
+    for s in mine.iter().chain([0u32].iter()) {
+        c.claim(Some(a.clone()), Some(*s));
+    }
+}
+
+#[test]
+fn mining_bets_pay_for_their_lines_in_the_miner_list() {
+    // the audit's attack: one long account id, many small bets on the minority side that all
+    // mine. Each adds a line to the round's miner list, which stays on chain for good; before
+    // the fix nobody paid for those lines, so they came out of the contract's own NEAR
+    let mut c = setup();
+    let a = acc(&"a".repeat(64));
+    join(&mut c, &a);
+    let mine: Vec<u32> = (0..40).map(|_| new_slot(&mut c, &a)).collect();
+    hedge_round(&mut c, &a, &mine, 0, N);
+    hedge_round(&mut c, &a, &mine, 1, N);
+    let before = chain_storage_cost(&mut c);
+    let balance_before = bal(&c, &a);
+    hedge_round(&mut c, &a, &mine, 2, N);
+    let grown = chain_storage_cost(&mut c) - before;
+    ctx(&a, t_after(2));
+    let s = c.get_status();
+    assert_eq!(c.get_round(U64(2)).miners, 40, "all 40 bets mined");
+    assert_eq!(s.miner_lines.0, 40 * miner_line_cost(&a), "each paid for its line");
+    // what stays on chain besides the lines: the round's record and the list's header
+    // (and, once, the 60-byte counter of what the lines paid)
+    let fixed = (ROUND_RECORD_BYTES + 81 + 60) * env::storage_byte_cost().as_yoctonear();
+    assert_eq!(grown, s.miner_lines.0 + fixed, "to the byte");
+    assert!(grown > fixed && grown <= s.miner_lines.0 + fixed, "storage that stays ({grown}) is paid for ({} + {fixed})", s.miner_lines.0);
+    // and the player got everything else back: 40 wins of 0.01, the 1 NEAR lost, the fees net
+    // of the reveal rewards, minus the lines
+    let n = 40u128;
+    assert_eq!(bal(&c, &a), balance_before + n * (N / 100) - N - n * cost(N / 100) - cost(N) - s.miner_lines.0);
+    check_invariants(&c, &[a], 0);
+}
+
+#[test]
+fn a_win_that_does_not_mine_gets_its_whole_storage_deposit_back() {
+    let mut c = setup();
+    let (a, b) = (acc("alice.testnet"), acc("bob.testnet"));
+    join(&mut c, &a);
+    join(&mut c, &b);
+    commit(&mut c, &a, 0, "A", N);
+    commit(&mut c, &b, 0, "B", 2 * N);
+    reveal(&mut c, &a, 0, "A");
+    reveal(&mut c, &b, 0, "B");
+    ctx(&a, t_after(0));
+    c.claim(None, None);
+    assert_eq!(bal(&c, &a), START + N - cost(N), "a streak of 1 does not mine: nothing kept");
+    assert_eq!(c.get_status().miner_lines.0, 0);
+}
+
+#[test]
+fn a_big_round_keeps_its_bets_in_small_pages() {
+    // before: one list per round, rewritten whole by every commit (gas grew with the round)
+    let mut c = setup();
+    let a = acc("alice.testnet");
+    join(&mut c, &a);
+    let slots: Vec<u32> = std::iter::once(0).chain((0..149).map(|_| new_slot(&mut c, &a))).collect();
+    let before = chain_storage_cost(&mut c);
+    for s in &slots {
+        commit_s(&mut c, &a, *s, 0, "A", N / 100);
+    }
+    let page = |i: u32| env::storage_read(&round_page_key(0, i)).map(|v| near_sdk::borsh::from_slice::<Vec<(AccountId, u32)>>(&v).unwrap().len());
+    assert_eq!((page(0), page(1), page(2), page(3)), (Some(64), Some(64), Some(22), None));
+    assert!(c.round_players.get(&0).is_none(), "the old single list is not used");
+    // the keeper's view pages through all of them, in commit order
+    let mut seen = vec![];
+    for from in [0u32, 100] {
+        let got = c.get_round_commits(U64(0), from, 100);
+        seen.extend(got.iter().map(|x| x.slot));
+    }
+    assert_eq!(seen, slots);
+    assert_eq!(c.get_round_commits(U64(0), 60, 10).iter().map(|x| x.slot).collect::<Vec<_>>(), slots[60..70].to_vec(), "across a page boundary");
+    assert!(c.get_round_commits(U64(0), 150, 100).is_empty());
+    // the storage deposits cover every byte the commits added
+    let used = chain_storage_cost(&mut c) - before;
+    ctx(&a, t_commit(0));
+    assert!(used > 0 && used <= c.get_status().storage_held.0, "commits use {used}, deposits hold {}", c.get_status().storage_held.0);
+    // one-sided: void. Once every bet is booked the pages are gone
+    for s in &slots {
+        reveal_s(&mut c, &a, &a, *s, 0, "A");
+    }
+    for s in &slots {
+        ctx(&a, t_after(0)); // a fresh context each time: the logs of 150 claims do not fit in one
+        c.claim(None, Some(*s));
+    }
+    assert_eq!((page(0), page(1), page(2)), (None, None, None));
+    assert!(c.get_round_commits(U64(0), 0, 100).is_empty());
+    check_invariants(&c, &[a], 0);
+}
+
+#[test]
+fn a_round_that_started_with_the_old_single_list_finishes_with_it() {
+    // the live contract was upgraded in place: rounds open at that moment have their bets in
+    // `round_players`
+    let mut c = setup();
+    let (a, b) = (acc("alice.testnet"), acc("bob.testnet"));
+    join(&mut c, &a);
+    join(&mut c, &b);
+    commit(&mut c, &a, 0, "A", N);
+    // put alice's bet where the old code kept it
+    c.round_players.insert(0, round_page_read(0, 0));
+    env::storage_remove(&round_page_key(0, 0));
+    commit(&mut c, &b, 0, "B", 2 * N);
+    assert!(!env::storage_has_key(&round_page_key(0, 0)));
+    let got: Vec<String> = c.get_round_commits(U64(0), 0, 100).iter().map(|x| x.account_id.to_string()).collect();
+    assert_eq!(got, vec![a.to_string(), b.to_string()]);
+    reveal(&mut c, &a, 0, "A");
+    reveal(&mut c, &b, 0, "B");
+    ctx(&a, t_after(0));
+    c.claim(Some(a.clone()), None);
+    c.claim(Some(b.clone()), None);
+    assert!(c.round_players.get(&0).is_none());
+    assert_eq!(bal(&c, &a), START + N - cost(N));
+    check_invariants(&c, &[a, b], 0);
+}
+
+#[test]
+fn betting_stops_before_player_funds_could_be_locked_as_storage() {
+    let mut c = setup();
+    let a = acc("alice.testnet");
+    join(&mut c, &a);
+    // the contract's NEAR covers its storage and what it owes players, to the yocto: fine
+    ctx(&a, t_commit(0));
+    let s = c.get_status();
+    let storage = env::storage_usage() as u128 * env::storage_byte_cost().as_yoctonear();
+    let owed = s.balances_total.0 + s.escrow.0 + s.storage_held.0 + s.storage_fees.0;
+    ctx_full(&a, t_commit(0), 0, storage + owed, vec![]);
+    let h = hash_hex(&a, 0, "A", &salt(&a, 0));
+    c.commit(U64(0), None, U128(N), h, None);
+    // one yocto short (storage nobody paid for ate into it): no new bets...
+    ctx_full(&a, t_commit(1), 0, storage + owed - 1, vec![]);
+    let h = hash_hex(&a, 1, "A", &salt(&a, 1));
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| c.commit(U64(1), None, U128(N), h, None)));
+    assert!(r.is_err(), "betting is paused");
+    // ...but reveals, bookings and withdrawals still work
+    ctx_full(&a, t_reveal(0), 0, storage + owed - 1, vec![]);
+    c.reveal(U64(0), None, "A".into(), salt(&a, 0), None);
+    ctx_full(&a, t_after(0), 0, storage + owed - 1, vec![]);
+    let _ = c.withdraw(None, None);
+    assert_eq!(bal(&c, &a), 0);
+}
+
+#[test]
+#[should_panic(expected = "min_stake must be more than a round record's storage")]
+fn min_stake_must_cover_a_void_rounds_record() {
+    // a lone revealed bet in a void round pays the whole record (0.00291 NEAR) out of its
+    // refund: with a smaller stake the refund would go below zero and the slot could never
+    // be booked again
+    let mut p = params();
+    p.min_stake = U128(N / 500);
+    setup_with(p);
 }

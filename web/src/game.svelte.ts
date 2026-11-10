@@ -4,6 +4,8 @@ import {
   loadPicks, savePick, pickKey, storageFor, callContract, setOnTopUp, provider, type Status, type Params, type RoundV, type PlayerV, type Session,
 } from './chain'
 import * as H from './history'
+// @ts-ignore plain JS module shared with the keeper scripts
+import { revealStartMs } from '../../keeper/schedule.mjs'
 import { label } from './questions'
 import { decide, guard, normalizeRule, stakeFor, meFrom, chipsOf, yoctoOf, PRESETS, SLOT_SETS, type Rule, type Lookup } from './rules'
 import * as W from './wallet'
@@ -586,7 +588,9 @@ export async function placeBet(side: Side, want: bigint, by: 'you' | 'autopilot'
     const st = await view<Status>('get_status')
     game.status = st
     const r = Number(st.commit_round)
-    const revealStart = nsToMs(st.commit_ends_at)
+    // when betting closes (= when the timelock may open): computed from the launch parameters
+    // pinned in this build, never taken from the RPC server's answer (see keeper/schedule.mjs)
+    const revealStart = revealStartMs(CONTRACT, r, game.params, Date.now() + game.skew)
     if (revealStart - (Date.now() + game.skew) < 8000) throw new Error('This round is closing. Wait a few seconds for the next one.')
     game.busy = 'Sealing your answer with drand'
     const salt = randomSalt()
