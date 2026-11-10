@@ -38,10 +38,20 @@ const W = Number(process.argv[3] || 390)
   const m = /([\d,.]+) in its books, ([\d,.]+) of that/.exec(card.line)
   if (!/can be spent/i.test(card.eyebrow)) { console.error('E2E FAILED: the headline must be the spendable treasury'); process.exitCode = 1 }
   if (m && Math.round((num(m[1]) - num(card.head) - num(m[2])) * 100) !== 0) { console.error('E2E FAILED: card numbers do not subtract'); process.exitCode = 1 }
-  // the card's "why" link opens the folded breakdown
-  await p.evaluate(() => [...document.querySelectorAll('.block a')].find(a => a.textContent.trim() === 'why')?.click())
-  await new Promise(r => setTimeout(r, 1000))
-  if (held && held.title.includes('Why') && !(await p.$eval('#held', d => d.open))) { console.error('E2E FAILED: "why" did not open the breakdown'); process.exitCode = 1 }
+  // the books are one chain: collected - spending = the books; the books - locked = can be spent = the card's headline
+  const chain = await p.$eval('#books > table', t => [...t.querySelectorAll('tr')].map(tr => [tr.cells[0].childNodes[0].textContent.trim(), Number(tr.cells[1].textContent.replace(/[^0-9.]/g, ''))]))
+  console.log('chain:', JSON.stringify(chain))
+  const fail = m => { console.error('E2E FAILED: ' + m); process.exitCode = 1 }
+  const iBooks = chain.findIndex(r => r[0] === "In the treasury's books"), iSpend = chain.findIndex(r => r[0] === 'Can be spent')
+  if (iBooks < 0) fail('no "In the treasury\'s books" row')
+  else if (Math.abs(chain[0][1] - chain.slice(1, iBooks).reduce((a, r) => a + r[1], 0) - chain[iBooks][1]) > 0.0006) fail('collected - spending != books')
+  if (/in its books/.test(card.line)) {
+    if (iSpend !== iBooks + 2) fail('the books must end: books, locked, can be spent')
+    else {
+      if (Math.abs(chain[iBooks][1] - chain[iBooks + 1][1] - chain[iSpend][1]) > 0.0002) fail('books - locked != can be spent')
+      if (Math.abs(chain[iSpend][1] - parseFloat(card.head)) > 0.02) fail(`can be spent ${chain[iSpend][1]} vs headline ${card.head}`)
+    }
+  }
   if (/1\/365 of the treasury per day|1\/365 of its NEAR/.test(blocks.join(' '))) { console.error('E2E FAILED: 1/365 must say of the spendable NEAR'); process.exitCode = 1 }
   if (/1 BEFEWER = —/.test(blocks[0])) { console.error('E2E FAILED: no pool price'); process.exitCode = 1 }
   const width = await p.evaluate(() => document.documentElement.scrollWidth)

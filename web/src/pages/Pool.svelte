@@ -51,7 +51,7 @@
     const left = snap.amount > owed ? snap.amount - owed : 0n
     const treasury = B(s.treasury)
     const spend = left < treasury ? left : treasury
-    return { rows, left, spend, treasury, gap: treasury - spend, ok: spend === B(s.treasury_spendable) }
+    return { rows, left, spend, treasury, gap: treasury - spend, locked: rows[3].v + rows[4].v, ok: spend === B(s.treasury_spendable) }
   })
   onMount(() => { load(); const t = setInterval(load, 15_000); return () => clearInterval(t) })
   $effect(() => { if (open && dex?.pool_id != null && !pool) load() })
@@ -114,14 +114,15 @@
   const earlier = $derived(Math.max(0, (dex?.buybacks ?? 0) - listed))
 
   // treasury NEAR: everything collected = what it went to
-  const nearRows = $derived(st && dex ? [
+  const spentRows = $derived(st && dex ? [
     { k: 'Put into the pool', v: B(dex.near_amount), note: '' },
     { k: 'Pool setup', v: open || dex.step > 0 ? GRADUATION_COST : 0n, note: '' },
     { k: 'Spent on buybacks', v: B(dex.bought_near), note: '' },
     { k: 'Waiting as wNEAR', v: B(dex.held_wnear), note: 'next buyback uses it first', hideZero: true },
-    { k: 'In the treasury now', v: B(st.treasury), note: '' },
   ] : [])
-  const nearLeft = $derived(st ? B(st.treasury_in) - nearRows.reduce((t, r) => t + r.v, 0n) : 0n)
+  const nearLeft = $derived(st ? B(st.treasury_in) - spentRows.reduce((t, r) => t + r.v, 0n) - B(st.treasury) : 0n)
+  // the books do not count the NEAR the contract must keep locked (storage, reserve) beyond its own
+  const lockedGap = $derived(st ? B(st.treasury) - B(st.treasury_spendable) : 0n)
 
   // BEFEWER, the contract's own identities (its tests check them after every step):
   // emitted + what flowed back to the pot (rounding dust, refining fees nobody held) = mined + pot
@@ -144,7 +145,7 @@
   <section class="card block">
     <div class="eyebrow">Treasury · can be spent</div>
     <div class="price num gold">{c2(cents(st.treasury_spendable))} <span class="faint">NEAR</span></div>
-    {#if B(st.treasury_spendable) < B(st.treasury)}<div class="faint small">{c2(cents(st.treasury))} in its books, {c2(cents(st.treasury) - cents(st.treasury_spendable))} of that covers storage and the reserve · <a href="#/pool" onclick={e => { e.preventDefault(); const d = document.getElementById('held') as HTMLDetailsElement | null; if (d) { d.open = true; d.scrollIntoView({ behavior: 'smooth' }) } }}>why</a></div>{/if}
+    {#if B(st.treasury_spendable) < B(st.treasury)}<div class="faint small">{c2(cents(st.treasury))} in its books, {c2(cents(st.treasury) - cents(st.treasury_spendable))} of that covers storage and the reserve · <a href="#/pool" onclick={e => { e.preventDefault(); document.getElementById('books')?.scrollIntoView({ behavior: 'smooth' }) }}>why</a></div>{/if}
     {#if !open}
       <div class="bar" aria-label="{Math.floor(gradPct)}% of the way to opening the pool"><span style="width:{gradPct}%"></span></div>
       <p class="fine">{c2(cents(st.treasury_spendable))} of {fmtN(pr.graduate_at)} NEAR ({Math.floor(gradPct)}%). At {fmtN(pr.graduate_at)} NEAR the contract opens a BEFEWER/NEAR pool on Ref Finance with all of it, plus as many new BEFEWER as have been mined; anyone can push it through the 5 steps{etaTo(B(pr.graduate_at))}.</p>
@@ -230,26 +231,31 @@
     <table class="tab books">
       <tbody>
         <tr class="sum"><td>Collected so far</td><td class="r num">{fmtN(st.treasury_in)}</td></tr>
-        {#each nearRows.filter(r => !r.hideZero || r.v > 0n) as r}
-          <tr><td>{r.k}{#if r.note}<span class="faint sub">{r.note}</span>{/if}</td><td class="r num">{fmtN(r.v)}</td></tr>
+        {#each spentRows.filter(r => !r.hideZero || r.v > 0n) as r}
+          <tr><td>{r.k}{#if r.note}<span class="faint sub">{r.note}</span>{/if}</td><td class="r num">−{fmtN(r.v)}</td></tr>
         {/each}
+        <tr class="sum"><td>In the treasury's books</td><td class="r num">{fmtN(st.treasury)}</td></tr>
+        {#if lockedGap > 0n}
+          <tr><td>Locked for storage and the reserve<span class="faint sub">the part the contract's own NEAR does not cover</span></td><td class="r num">−{fmtN(lockedGap)}</td></tr>
+          <tr class="sum"><td>Can be spent</td><td class="r num gold">{fmtN(st.treasury_spendable)}</td></tr>
+        {/if}
       </tbody>
     </table>
     <p class="check small" class:bad={nearLeft !== 0n}>{nearLeft === 0n ? '✓ Adds up.' : `${fmtN(nearLeft)} NEAR is not explained by the rows above.`}</p>
 
     {#if held && snap}
       <details class="held" id="held">
-        <summary>{held.gap > 0n ? `Only ${fmtN(held.spend, 2)} of it can be spent. Why?` : 'All of it can be spent.'}</summary>
+        <summary>Check: count it from the contract's wallet</summary>
         <table class="tab books">
           <tbody>
-            <tr class="sum"><td>The contract's NEAR</td><td class="r num">{fmtN(snap.amount)}</td></tr>
+            <tr class="sum"><td>NEAR in the contract's wallet</td><td class="r num">{fmtN(snap.amount)}</td></tr>
             {#each held.rows as r}
               <tr><td>{r.k}</td><td class="r num">−{fmtN(r.v)}</td></tr>
             {/each}
             <tr class="sum"><td>Can be spent</td><td class="r num">{fmtN(held.spend)}</td></tr>
           </tbody>
         </table>
-        {#if held.gap > 0n}<p class="fine">NEAR locks 0.01 per kB of data, and the treasury pays for the round history: that and the reserve tie up {fmtN(held.gap, 2)} of its NEAR.</p>{/if}
+        {#if held.gap > 0n}<p class="fine">Storage and reserve lock {fmtN(held.locked, 2)}: the contract's own NEAR covers {fmtN(held.locked - held.gap, 2)}, the treasury the other {fmtN(held.gap, 2)}.</p>{/if}
         <p class="check small" class:bad={!held.ok}>{held.ok ? '✓ Matches the contract.' : `The contract says ${fmtN(snap.st.treasury_spendable)}: reload in a few seconds.`}</p>
       </details>
     {/if}
