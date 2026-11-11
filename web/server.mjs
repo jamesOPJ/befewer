@@ -182,6 +182,10 @@ http.createServer(async (req, res) => {
   }
   const p = url.pathname === '/' ? '/index.html' : decodeURIComponent(url.pathname)
   const f = file(p) || file('/index.html')
+  if (!f) {
+    res.writeHead(503, { 'content-type': 'text/plain; charset=utf-8' })
+    return res.end('web/dist is missing: run `npx vite build` in web/ first\n')
+  }
   const gz = f.gz && /\bgzip\b/.test(req.headers['accept-encoding'] || '')
   res.writeHead(200, {
     'content-type': f.type,

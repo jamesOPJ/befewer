@@ -85,7 +85,19 @@
 </script>
 
 <LowBalance />
-<p class="sov"><b>$BEFEWER is hard money on NEAR</b>: capped at {fmt(game.params?.max_supply ?? '0')}, no premine, backed by the game's revenue. This game is how it is mined. <a href="#/how">Why it holds value</a></p>
+{#if newcomer}
+  <section class="hero" aria-label="What this is">
+    <p class="hero-h">Bet on the answer <span class="gold">fewer</span> people pick.</p>
+    <ol class="steps">
+      <li><span class="n">1</span><span>Pick one of two answers.</span></li>
+      <li><span class="n">2</span><span>The side with less NEAR on it <b>wins double</b>.</span></li>
+      <li><span class="n">3</span><span>Win 3 in a row to <b>mine $BEFEWER</b>.</span></li>
+    </ol>
+    <p class="hero-f">Free to try on testnet, no wallet. <a href="#/how">How it works</a></p>
+  </section>
+{:else}
+  <p class="sov"><b>The smaller side wins double.</b> 3 wins in a row mine $BEFEWER. <a href="#/how">How it works</a></p>
+{/if}
 <div class="grid">
   <section class="card round" aria-labelledby="q">
     <div class="head">
@@ -174,7 +186,7 @@
         {:else}<Icon name="lock" size={18} /> Seal {fmtN(stakeY)} NEAR on {side === 'A' ? q.a : q.b}{/if}
       </button>
       <p class="fine">
-        {#if newcomer && game.session?.kind !== 'wallet'}Your first bet creates a free testnet account in this browser with {fmtN(GUEST_GAME_NEAR)} testnet NEAR to play. No wallet, no seed phrase, no popups. Have a testnet wallet? <button class="link" onclick={openWallet}>Play with your wallet</button>.
+        {#if newcomer && game.session?.kind !== 'wallet'}Free: your first bet gives you {fmtN(GUEST_GAME_NEAR)} test NEAR to play with. Have a testnet wallet? <button class="link" onclick={openWallet}>Use it instead</button>.
         {:else if newcomer}Deposit NEAR from your wallet on the Me page to start betting.
         {:else}Win: +{fmtN(stakeY)} NEAR (you get {fmtN(stakeY * 2n)} back). Lose: −{fmtN(stakeY)}. Every bet pays a {(game.params?.fee_bps ?? 0) / 100}% fee ({fmtN(feeY)} NEAR); {(game.params?.reveal_bounty_bps ?? 0) / 100}% of it goes to whoever reveals your bet: this page if it is open when betting closes (so it comes back to you), otherwise a keeper. The other {100 - (game.params?.reveal_bounty_bps ?? 0) / 100}% goes to the treasury. A little NEAR is held for the bet's storage and returned with the result. Max {capW} this round: what your balance covers after the fee and storage.{/if}
       </p>
@@ -195,7 +207,7 @@
           <div class="vault" aria-label="{revealing.commits} sealed bets waiting to open">
             {#each Array(Math.min(revealing.commits, 12)) as _, i}<span class="seal" style="animation-delay:{i * 120}ms"><Icon name="lock" size={18} /></span>{/each}
           </div>
-          <p class="fine center">{revealing.commits} sealed bet{revealing.commits === 1 ? '' : 's'}. drand has just published the key for this round; the keeper is opening them now.</p>
+          <p class="fine center">{revealing.commits} sealed bet{revealing.commits === 1 ? '' : 's'} opening now. The smaller side wins when the timer ends.</p>
         {:else}
           <Orbs round={revealing} />
           <p class="fine center">{revealing.reveals_a + revealing.reveals_b} of {revealing.commits} bets open. Bets on the smaller side win +100% when the timer ends.</p>
@@ -245,8 +257,8 @@
         <p class="fine">
           {#if sharesIfWin > 0}Win this round and you mine: a {nextStreak}-win streak earns {sharesIfWin} share{sharesIfWin === 1 ? '' : 's'} per 0.001 NEAR staked. Winners split the pot by shares.
           {:else}Win {need} rounds in a row and that win mines the pot. Win this one for streak {nextStreak} of {need}.{/if}
-          Each round adds {fmt(game.params.reward_per_round)} BEFEWER; nobody else can mint. {fmt(st.issued)} of {fmt(st.max_supply)} issued so far.
-          Mined BEFEWER stays unrefined until you claim it; claiming costs {game.params.refine_fee_bps / 100}%, paid to everyone still holding.
+          Each round adds {fmt(game.params.reward_per_round)} BEFEWER; there is no other way to get it.
+          {#if !newcomer}{fmt(st.issued)} of {fmt(st.max_supply)} issued so far. Mined BEFEWER stays unrefined until you claim it; claiming costs {game.params.refine_fee_bps / 100}%, paid to everyone still holding.{/if}
         </p>
       </section>
 
@@ -326,4 +338,12 @@
   .link { border: 0; padding: 0; background: none; color: var(--brand); font: inherit; text-decoration: underline; cursor: pointer }
   .sov { margin: 0 0 14px; font-size: 13.5px; line-height: 1.5; color: var(--fg-2) }
   .sov b { color: var(--fg) }
+  .hero { margin: 4px 0 18px }
+  .hero-h { margin: 0; font-size: clamp(28px, 7vw, 46px); line-height: 1.08; font-weight: 800; letter-spacing: -0.02em; color: var(--fg) }
+  .steps { list-style: none; margin: 14px 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 8px 22px; color: var(--fg-2); font-size: 15.5px }
+  .steps li { display: flex; align-items: center; gap: 8px }
+  .steps b { color: var(--fg) }
+  .steps .n { flex: none; display: grid; place-items: center; width: 24px; height: 24px; border-radius: 50%; border: 1.5px solid var(--brand); color: var(--brand); font-size: 13px; font-weight: 800 }
+  .hero-f { margin: 10px 0 0; font-size: 13.5px; color: var(--fg-3) }
+  @media (max-width: 520px) { .steps { flex-direction: column; gap: 6px; font-size: 15px } .hero { margin-bottom: 14px } }
 </style>

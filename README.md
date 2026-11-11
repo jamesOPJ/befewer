@@ -1,8 +1,11 @@
 # $BEFEWER
 
-A store-of-value token on NEAR that can only be obtained by playing a sealed-bid minority game:
-bet NEAR on one of two answers, the answer with **less** NEAR on it wins double, and winning
-3 rounds in a row mines the token. The game's revenue buys the token back and burns it.
+A 3-minute game on NEAR. Each round asks a question with two answers. Bet NEAR on one: the answer
+with **less** NEAR on it wins double. Win 3 rounds in a row and that win mines $BEFEWER, a token
+nobody can get any other way. The game's fees buy the token back and burn it.
+
+Try it in 30 seconds, no wallet: open https://befewer.com, tap an answer, tap "Seal", and watch
+the round close.
 
 Built for NEAR HACKATHON (2026-11-01 to 2026-11-14), tracks: Memecoins With Mechanics, Games With Real Economies.
 NEAR **testnet** only.
@@ -94,6 +97,9 @@ contract/   Rust, near-sdk 5.30: the game, the NEP-141 token, mining, refining, 
 keeper/     Node 22: keeper (reveals, settles, pool, buybacks), demo bots, deploy/upgrade scripts
 web/        Svelte 5 + Vite page and a small Node server (static files + the testnet guest faucet)
 ```
+
+Needs Rust with `cargo-near`, and Node 22.18 or newer for everything under `keeper/` and `web/`
+(run `npm ci` with that Node too: under Node 18 or 20 the tests and the build fail).
 
 ### Contract
 
