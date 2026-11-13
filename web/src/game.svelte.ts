@@ -1,6 +1,6 @@
 // App-wide reactive state: chain data (polled), the player's session, bets, results, autopilot.
 import {
-  ONE, CHIP, NEAR, ROUND_RECORD_NEAR, CONTRACT, view, fmt, fmtN, toNear, toYocto, nsToMs, randomSalt, commitHash, seal, loadSession, saveSession, loadGuestBackup, saveGuestBackup, newKeyPair,
+  ONE, CHIP, NEAR, TOKEN, ROUND_RECORD_NEAR, CONTRACT, view, fmt, fmtN, toNear, toYocto, nsToMs, randomSalt, commitHash, seal, loadSession, saveSession, loadGuestBackup, saveGuestBackup, newKeyPair,
   loadPicks, savePick, pickKey, storageFor, callContract, setOnTopUp, provider, type Status, type Params, type RoundV, type PlayerV, type Session,
 } from './chain'
 import * as H from './history'
@@ -482,26 +482,42 @@ export async function depositMore(near: number) {
   }
 }
 
-/** BEFEWER a claim of everything would put in the wallet, and the refining fee it would pay. */
-export function claimPreview(p: PlayerV) {
+/** What claiming `bps` (1..10000) of the unrefined BEFEWER does, with the contract's own integer
+ *  math: refined BEFEWER always comes along in full, with no fee. `toPot`: the other players hold
+ *  under 1 unrefined BEFEWER, so the contract puts the fee back in the mining pot instead. */
+export function claimPreview(p: PlayerV, bps = 10000) {
   const u = BigInt(p.unrefined)
-  const fee = (u * BigInt(game.params?.refine_fee_bps ?? 0)) / 10000n
-  return { out: u - fee + BigInt(p.refined), fee }
+  const take = (u * BigInt(bps)) / 10000n
+  const fee = (take * BigInt(game.params?.refine_fee_bps ?? 0)) / 10000n
+  const refined = BigInt(p.refined)
+  const others = BigInt(game.status?.unrefined_total ?? '0') - u
+  return { take, fee, refined, out: take - fee + refined, left: u - take, toPot: others < TOKEN }
 }
+/** The contract's `claim_befewer` event in a transaction's logs (strings of 18-decimal units). */
+const claimEvent = (res: any): { unrefined: string; fee: string; refined: string; minted: string } | null =>
+  (res?.receipts_outcome ?? [])
+    .flatMap((x: any) => x.outcome?.logs ?? [])
+    .filter((l: string) => l.startsWith('EVENT_JSON:') && l.includes('"event":"claim_befewer"'))
+    .map((l: string) => { try { return JSON.parse(l.slice('EVENT_JSON:'.length)).data[0] } catch { return null } })
+    .find(Boolean) ?? null
 /** Book the finished bets of every extra slot (one small call each), so a following withdraw or
  *  claim (which books slot 0 itself) includes them. */
 async function bookExtraSlots(p: PlayerV) {
   for (const s of p.slots) if (s.slot !== 0 && s.open.some(o => o.result)) await callContract(game.session!, 'claim', { slot: s.slot }, 60)
 }
-/** Claim all mined BEFEWER (unrefined minus the fee, plus refined) to this browser's wallet. */
-export async function claimBefewer() {
+/** Claim `bps` (1..10000) of the unrefined BEFEWER (minus the fee) plus all refined BEFEWER to
+ *  this browser's wallet. 1 is the contract's minimum: "refined only". */
+export async function claimBefewer(bps = 10000) {
   if (!game.session || !game.me) return
+  bps = Math.min(10000, Math.max(1, Math.round(bps)))
   try {
     game.busy = 'Claiming your BEFEWER'
-    const { out, fee } = claimPreview(game.me)
+    const { toPot } = claimPreview(game.me, bps)
     await bookExtraSlots(game.me)
-    await callContract(game.session, 'claim_befewer', { book: [0] }, 60)
-    toast('ok', `${fmt(out)} BEFEWER are in your wallet. ${fmt(fee)} went to everyone still holding unrefined BEFEWER.`)
+    const res = await callContract(game.session, 'claim_befewer', { bps, book: [0] }, 60)
+    const ev = claimEvent(res)
+    if (!ev) toast('ok', 'Claimed. Your wallet balance updates in a moment.')
+    else toast('ok', `${fmt(ev.minted, 6)} BEFEWER are in your wallet.` + (BigInt(ev.fee) > 0n ? ` The ${fmt(ev.fee, 6)} fee went to ${toPot ? 'the mining pot' : 'the other players holding unrefined BEFEWER'}.` : ''))
   } finally {
     game.busy = ''
     await refresh(true)

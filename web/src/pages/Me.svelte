@@ -25,10 +25,32 @@
   const shown = $derived(results.slice(0, 60))
   const resultsNet = $derived(shown.reduce((t, x) => t + netOf(x), 0n))
 
-  async function claim() {
-    try { await claimBefewer() } catch (e: any) { toast('err', String(e.message || e)) }
+  // claiming: refined BEFEWER always comes out whole; the unrefined part is a share of 0.01%..100%
+  // (0.01% is the contract's minimum, so "refined only" still takes that much unrefined)
+  const REFINED_ONLY = 1
+  let chosenBps = $state<number | null>(null)
+  const hasRefined = $derived(!!me && BigInt(me.refined) > 0n)
+  const hasUnrefined = $derived(!!me && BigInt(me.unrefined) > 0n)
+  const bps = $derived(chosenBps ?? (hasRefined ? REFINED_ONLY : 10000))
+  const preview = $derived(me ? claimPreview(me, bps) : null)
+  const pctText = (b: number) => `${(b / 100).toLocaleString('en-US', { maximumFractionDigits: 2 })}%`
+  // amounts shown to 6 decimals, cut (never rounded up); the fee line is what makes them add up,
+  // so "to your wallet" is exactly what the contract will mint (to 6 decimals)
+  const MICRO = 10n ** 12n
+  const cut = (x: bigint) => (x / MICRO) * MICRO
+  const shownSum = $derived.by(() => {
+    if (!preview) return null
+    const take = cut(preview.take), refined = cut(preview.refined), out = cut(preview.out)
+    const fee = take + refined - out
+    return { take, refined, out, fee: fee > 0n ? fee : 0n, left: cut(preview.left) }
+  })
+  function setPct(v: string) {
+    const n = Number(v)
+    if (Number.isFinite(n) && n > 0) chosenBps = Math.min(10000, Math.max(1, Math.round(n * 100)))
   }
-  const preview = $derived(me ? claimPreview(me) : null)
+  async function claim() {
+    try { await claimBefewer(bps); chosenBps = null } catch (e: any) { toast('err', String(e.message || e)) }
+  }
   const feePct = $derived((game.params?.refine_fee_bps ?? 0) / 100)
   async function deposit(n: number) {
     try { await depositMore(n) } catch (e: any) { toast('err', String(e.message || e)) }
@@ -108,9 +130,31 @@
       <div><div class="faint small">Refined</div><div class="v num gold">{fmt(me.refined)}</div><div class="faint small">your share of others' fees · no fee</div></div>
       <div><div class="faint small">In your wallet</div><div class="v num">{fmt(me.tokens)}</div><div class="faint small">tradable once the pool opens</div></div>
     </div>
-    <p class="small muted">Mined BEFEWER stays unrefined in the game. Claiming it to your wallet costs {feePct}% of the unrefined part, and that {feePct}% is shared among everyone who is still holding unrefined BEFEWER, as refined BEFEWER. The longer you hold, the more of other players' fees you collect.</p>
-    {#if preview && preview.out > 0n}
-      <button class="btn small" onclick={claim} disabled={!!game.busy}>Claim {fmt(preview.out)} BEFEWER to the wallet{preview.fee > 0n ? ` (fee ${fmt(preview.fee)})` : ''}</button>
+    <p class="small muted">Mined BEFEWER stays unrefined in the game, and only unrefined BEFEWER earns: each claim of it pays {feePct}%, shared among the other players still holding unrefined, as refined BEFEWER. Refined BEFEWER earns nothing more, pays no fee, and comes out in full with any claim.</p>
+    {#if preview && shownSum && (hasRefined || hasUnrefined)}
+      <div class="claim">
+        {#if hasUnrefined}
+          <div class="pick">
+            <div class="seg" role="radiogroup" aria-label="How much to claim">
+              {#if hasRefined}<button role="radio" aria-checked={bps === REFINED_ONLY} class:on={bps === REFINED_ONLY} onclick={() => (chosenBps = REFINED_ONLY)}>Refined only</button>{/if}
+              {#each [1000, 2500, 5000, 10000] as b}
+                <button role="radio" aria-checked={bps === b} class:on={bps === b} onclick={() => (chosenBps = b)}>{b === 10000 ? 'All' : pctText(b)}</button>
+              {/each}
+            </div>
+            <label class="custom"><span class="faint">or</span><input type="number" min="0.01" max="100" step="0.01" inputmode="decimal" aria-label="Percent of unrefined BEFEWER to claim" value={bps / 100} onchange={e => setPct((e.currentTarget as HTMLInputElement).value)} /><span class="faint">% of unrefined</span></label>
+          </div>
+        {/if}
+        <dl class="sum num">
+          {#if hasUnrefined}
+            <div><dt>Unrefined claimed · {pctText(bps)}{bps === REFINED_ONLY ? ', the least a claim takes' : ''}</dt><dd>{fmt(shownSum.take, 6)}</dd></div>
+            <div><dt>Fee {feePct}% → {preview.toPot ? 'the mining pot (other players hold under 1)' : 'other players holding unrefined'}</dt><dd>−{fmt(shownSum.fee, 6)}</dd></div>
+          {/if}
+          <div><dt>Refined · all of it, no fee</dt><dd>+{fmt(shownSum.refined, 6)}</dd></div>
+          <div class="total"><dt>To your wallet</dt><dd>{fmt(shownSum.out, 6)} BEFEWER</dd></div>
+        </dl>
+        {#if preview.left > 0n}<p class="faint small">{fmt(shownSum.left, 6)} stays unrefined and keeps earning a share of other players' claims.</p>{/if}
+        <button class="btn small primary" onclick={claim} disabled={!!game.busy || preview.out === 0n}>Claim {fmt(shownSum.out, 6)} BEFEWER to the wallet</button>
+      </div>
     {/if}
   </section>
 
@@ -233,6 +277,19 @@
   .befewer { padding: 16px 20px; display: grid; gap: 10px; margin-bottom: 12px }
   .befewer p { margin: 0 }
   .befewer .btn { justify-self: start }
+  .claim { display: grid; gap: 10px; padding: 12px 14px; border-radius: 12px; background: var(--surface-2); border: 1px solid var(--line) }
+  .pick { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px }
+  .seg { display: flex; flex-wrap: wrap; gap: 6px }
+  .seg button { min-height: 34px; padding: 0 12px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface); color: var(--fg-2); font-weight: 650; font-size: 14px; cursor: pointer; font-variant-numeric: tabular-nums }
+  .seg button.on { background: var(--fg); color: var(--bg); border-color: var(--fg) }
+  .custom { display: flex; align-items: center; gap: 6px; font-size: 14px }
+  .custom input { width: 84px }
+  .sum { display: grid; gap: 4px; margin: 0; font-size: 14px }
+  .sum div { display: flex; justify-content: space-between; gap: 12px; align-items: baseline }
+  .sum dt { color: var(--fg-2); min-width: 0 }
+  .sum dd { margin: 0; white-space: nowrap }
+  .sum .total { border-top: 1px solid var(--line); padding-top: 6px; margin-top: 2px; font-weight: 750 }
+  .sum .total dt { color: var(--fg) }
   .buckets { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px }
   @media (max-width: 520px) { .buckets { grid-template-columns: 1fr 1fr } }
   .gold { color: var(--brand) }
