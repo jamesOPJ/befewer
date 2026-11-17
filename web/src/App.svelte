@@ -38,7 +38,7 @@
     </a>
     <nav class="tabs-top" aria-label="Main">
       {#each TABS as t}
-        <a href="#/{t.id === 'play' ? '' : t.id}" class:on={page === t.id} aria-current={page === t.id ? 'page' : undefined}>{t.label}</a>
+        <a href="#/{t.id === 'play' ? '' : t.id}" class:on={page === t.id} aria-current={page === t.id ? 'page' : undefined}>{#if t.short}<span class="long">{t.label}</span><span class="short">{t.short}</span>{:else}{t.label}{/if}</a>
       {/each}
     </nav>
     <div class="right">
@@ -84,7 +84,7 @@
   .word { font-weight: 800; letter-spacing: 0.04em; font-size: 15px; color: var(--fg-2) }
   .word b { color: var(--fg); font-weight: 800 }
   .tabs-top { display: none; gap: 4px }
-  .tabs-top a { padding: 8px 12px; border-radius: 10px; color: var(--fg-2); font-weight: 600; font-size: 14px; text-decoration: none }
+  .tabs-top a { padding: 8px 12px; border-radius: 10px; color: var(--fg-2); font-weight: 600; font-size: 14px; text-decoration: none; white-space: nowrap }
   .tabs-top a:hover { color: var(--fg); background: var(--surface) }
   .tabs-top a.on { color: var(--fg); background: var(--surface-2) }
   .right { margin-left: auto; display: flex; gap: 8px; align-items: center }
@@ -106,16 +106,27 @@
   @keyframes sh { to { background-position: -200% 0 } }
   .connect { cursor: pointer; border: 1px solid var(--line); background: var(--surface-2); color: var(--fg) }
   .right .pill { white-space: nowrap }
-  .connect .short, .tn { display: none }
-  /* phones: everything on one line inside the bar. "Testnet" becomes a small tag by the logo,
-     the wallet button says "Wallet", the balance shows NEAR only (BEFEWER is on the Me page). */
-  @media (max-width: 520px) {
+  .connect .short, .tabs-top .short, .tn { display: none }
+  .tn { font-size: 10px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--brand); border: 1px solid rgba(232, 182, 94, 0.35); border-radius: 6px; padding: 1px 5px }
+  /* The bar stays on one line at every window width, shrinking in steps where the top tabs
+     (860px and up) or the phone layout (under 600px) would not fit. e2e/nav-widths.cjs drags
+     the window 1400 -> 320px with the widest header (Testnet + Connect wallet + NEAR · BEFEWER).
+     Step 1: "Testnet" becomes a small tag by the logo; the balance shows NEAR only (BEFEWER is on Me). */
+  @media (max-width: 599px), (min-width: 860px) and (max-width: 1099px) {
+    .right .testnet, .tokpart { display: none }
+    .tn { display: inline }
+  }
+  /* Step 2: short labels, "Wallet" and "How". */
+  @media (max-width: 599px), (min-width: 860px) and (max-width: 959px) {
+    .bar { gap: 14px }
+    .connect .long, .tabs-top .long { display: none }
+    .connect .short, .tabs-top .short { display: inline }
+  }
+  /* Phones: tighter bar and smaller pills. */
+  @media (max-width: 599px) {
     .bar { gap: 10px; padding: 0 12px }
     .right { gap: 6px; min-width: 0 }
-    .right .testnet, .connect .long, .tokpart { display: none }
-    .connect .short { display: inline }
     .connect, .bal { font-size: 12px; padding: 4px 9px }
-    .tn { display: inline; font-size: 10px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--brand); border: 1px solid rgba(232, 182, 94, 0.35); border-radius: 6px; padding: 1px 5px }
   }
   @media (max-width: 359px) { .word { display: none } }
   /* home-screen / notch: keep the bar below the status bar */
